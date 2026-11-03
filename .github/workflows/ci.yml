@@ -37,7 +37,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         timeout-minutes: 30
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
       - name: Build release binary
         run: cargo build --release -p lector
       - uses: actions/upload-artifact@v4

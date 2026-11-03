@@ -232,13 +232,28 @@ mod tests {
 
     #[test]
     fn location_variants() {
+        // File URIs must name absolute paths on the host platform.
+        #[cfg(windows)]
+        let (uri_b, path_b, uri_c, path_c) = (
+            "file:///C:/a/b.rs",
+            PathBuf::from(r"C:\a\b.rs"),
+            "file:///C:/c.rs",
+            PathBuf::from(r"C:\c.rs"),
+        );
+        #[cfg(not(windows))]
+        let (uri_b, path_b, uri_c, path_c) = (
+            "file:///a/b.rs",
+            PathBuf::from("/a/b.rs"),
+            "file:///c.rs",
+            PathBuf::from("/c.rs"),
+        );
         let r = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}});
-        let one = locations(json!({"uri": "file:///a/b.rs", "range": r})).unwrap();
-        assert_eq!(one[0].path, PathBuf::from("/a/b.rs"));
-        let link = locations(json!([{"targetUri": "file:///c.rs", "targetRange": r,
+        let one = locations(json!({"uri": uri_b, "range": r})).unwrap();
+        assert_eq!(one[0].path, path_b);
+        let link = locations(json!([{"targetUri": uri_c, "targetRange": r,
             "targetSelectionRange": r}]))
         .unwrap();
-        assert_eq!(link[0].path, PathBuf::from("/c.rs"));
+        assert_eq!(link[0].path, path_c);
         assert!(locations(Value::Null).unwrap().is_empty());
     }
 
