@@ -1,0 +1,6 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+other main app (line 12)
+  heading Hello (line 13)

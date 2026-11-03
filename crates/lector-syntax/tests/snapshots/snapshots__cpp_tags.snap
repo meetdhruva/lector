@@ -1,0 +1,16 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def module geo (line 3)
+def class Shape (line 5)
+def method ~Shape (line 7)
+def method area (line 8)
+def struct Box (line 12)
+def method get (line 14)
+def class Circle (line 17)
+def method Circle (line 20)
+def method area (line 21)
+def type Shapes (line 26)
+def function main (line 28)
+references: none

@@ -1,0 +1,8 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def interface Props (line 2)
+def function Counter (line 6)
+def function App (line 15)
+references: present

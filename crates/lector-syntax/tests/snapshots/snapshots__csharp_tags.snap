@@ -1,0 +1,14 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def module Demo.App (line 3)
+def interface IShape (line 5)
+def method Area (line 7)
+def enum Color (line 10)
+def class Circle (line 12)
+def method Circle (line 17)
+def method Area (line 22)
+def class Program (line 25)
+def method Main (line 27)
+references: present

@@ -1,0 +1,11 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+constant MAX_SIZE (line 5)
+class Point (line 9)
+  field x (line 10)
+  field y (line 11)
+  method norm (line 13)
+  method origin (line 17)
+function read_all (line 21)

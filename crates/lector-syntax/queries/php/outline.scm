@@ -1,0 +1,10 @@
+(namespace_definition name: (namespace_name) @name) @item.module
+(class_declaration name: (name) @name) @item.class
+(interface_declaration name: (name) @name) @item.interface
+(trait_declaration name: (name) @name) @item.trait
+(enum_declaration name: (name) @name) @item.enum
+(enum_case name: (name) @name) @item.field
+(function_definition name: (name) @name) @item.function
+(method_declaration name: (name) @name) @item.method
+(const_declaration (const_element (name) @name)) @item.constant
+(property_declaration (property_element (variable_name) @name)) @item.field

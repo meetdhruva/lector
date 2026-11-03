@@ -1,0 +1,7 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def constant nav (line 13)
+def function spin (line 16)
+references: none

@@ -1,0 +1,13 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def constant path (line 2)
+def function add (line 5)
+def class Animal (line 9)
+def method constructor (line 12)
+def method speak (line 15)
+def function square (line 20)
+def constant items (line 21)
+def variable view (line 22)
+references: present

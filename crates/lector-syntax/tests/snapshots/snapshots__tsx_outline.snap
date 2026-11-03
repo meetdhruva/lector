@@ -1,0 +1,8 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+interface Props (line 2)
+  field label (line 3)
+function Counter (line 6)
+function App (line 15)

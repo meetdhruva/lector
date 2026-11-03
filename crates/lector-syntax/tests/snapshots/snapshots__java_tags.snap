@@ -1,0 +1,12 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def module com.example.demo (line 0)
+def class Sample (line 5)
+def method Sample (line 9)
+def method run (line 14)
+def enum Level (line 21)
+def interface Visitor (line 23)
+def method visit (line 24)
+references: present

@@ -1,5 +1,6 @@
 [package]
 name = "lector-text"
+description = "SumTree, Rope and memory-mapped text with line/UTF-16 coordinates for Lector"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,23 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+serde = ["dep:serde"]
+
 [dependencies]
+arrayvec.workspace = true
+memchr.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+smallvec.workspace = true
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "text"
+harness = false

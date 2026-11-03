@@ -1,0 +1,17 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+constant LIMIT (line 4)
+interface Shape (line 6)
+  method area (line 7)
+class Circle (line 10)
+  method area (line 11)
+  class companion (line 13)
+    method unit (line 14)
+enum Color (line 18)
+  field RED (line 18)
+  field GREEN (line 18)
+class Registry (line 20)
+  field items (line 21)
+function main (line 24)

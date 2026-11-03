@@ -54,93 +54,146 @@ but must not change these signatures without updating this doc.
 
 ### lector-text
 ```rust
-pub struct Point { pub row: u32, pub column: u32 }          // Copy, Ord, Hash, Default
-pub struct PointUtf16 { pub row: u32, pub column: u32 }
+pub struct Point { pub row: u32, pub column: u32 }          // Copy, Ord, Hash, Default (+ serde feature)
+pub struct PointUtf16 { pub row: u32, pub column: u32 }     // same; also CharOffset(usize), OffsetUtf16(usize)
 pub struct TextSummary { pub len: usize, pub chars: usize, pub len_utf16: usize,
-                         pub lines: Point, pub longest_row: u32, pub longest_row_chars: u32 }
+                         pub lines: Point, pub longest_row: u32, pub longest_row_chars: u32,
+                         /* + first_line_chars, last_line_chars, last_line_len_utf16 */ }
 pub mod sum_tree { /* generic copy-on-write B+tree with summaries + cursors (Zed-style) */
     pub trait Item: Clone { type Summary: Summary; fn summary(&self) -> Self::Summary; }
     pub trait Summary: Clone + Default + std::fmt::Debug { fn add_summary(&mut self, other: &Self); }
-    pub trait Dimension<'a, S: Summary>: Clone + Default { fn add_summary(&mut self, s: &'a S); }
-    pub struct SumTree<T: Item>;   // Clone is O(1) (Arc); from_iter, push, append, summary, cursor, iter, is_empty
-    pub struct Cursor<'a, T, D>;   // seek(&target, Bias), next/prev, item, start, end
-    pub enum Bias { Left, Right }
+    pub trait Dimension<'a, S: Summary>: Clone + Default { fn add_summary(&mut self, s: &'a S); /* + from_summary */ }
+    // (D1, D2) and (D1, D2, D3) are Dimensions; a summary is a Dimension of itself; () is the unit dimension.
+    pub trait SeekTarget<'a, S, D> { fn cmp(&self, cursor_location: &D) -> Ordering; }
+    // impl'd for D: Dimension + Ord, and for D1 against (D1, D2[, D3]) (compares the first component).
+    pub struct SumTree<T: Item>;   // Clone is O(1) (Arc); new, from_item, from_iter, push, append, extend,
+                                   // update_last, summary, extent::<D>, first, last, cursor, iter, is_empty
+    pub struct Cursor<'a, T, D>;   // seek(&target, Bias) -> bool, seek_forward, slice(&target, Bias) -> SumTree,
+                                   // suffix, next/prev, item, item_summary, start() -> &D, end() -> D
+    pub enum Bias { Left, Right }  // also re-exported at the crate root
 }
-pub struct Rope;                    // Clone O(1). Built on SumTree<Chunk>.
+pub struct Rope;                    // Clone O(1). Built on SumTree<Chunk> (<=128-byte inline chunks).
 impl Rope {
-    pub fn new() -> Self; pub fn from_str(s: &str) -> Self;  // also impl From<&str>, From<String>
+    pub fn new() -> Self; pub fn from_str(s: &str) -> Self;  // also impl From<&str>, From<String>, FromStr
     pub fn len(&self) -> usize; pub fn is_empty(&self) -> bool;
     pub fn line_count(&self) -> u32;                 // "a\nb" = 2, "a\n" = 2, "" = 1
     pub fn summary(&self) -> TextSummary; pub fn max_point(&self) -> Point;
-    pub fn line_range(&self, row: u32) -> std::ops::Range<usize>;   // excludes '\n'
-    pub fn line_len(&self, row: u32) -> u32;
+    pub fn line_range(&self, row: u32) -> std::ops::Range<usize>;   // excludes "\n" and "\r\n"; past end -> len..len
+    pub fn line_len(&self, row: u32) -> u32;                        // == line_range(row).len()
     pub fn offset_to_point(&self, offset: usize) -> Point; pub fn point_to_offset(&self, p: Point) -> usize;
     pub fn offset_to_point_utf16(&self, offset: usize) -> PointUtf16;
     pub fn point_utf16_to_offset(&self, p: PointUtf16) -> usize;
     pub fn clip_offset(&self, offset: usize, bias: Bias) -> usize;  // to char boundary
-    pub fn chunks_in_range(&self, range: Range<usize>) -> impl Iterator<Item = &str>;
-    pub fn chunks(&self) -> impl Iterator<Item = &str>;
+    pub fn chunks_in_range(&self, range: Range<usize>) -> Chunks<'_>;   // Iterator<Item = &str>
+    pub fn chunks(&self) -> Chunks<'_>;
     pub fn slice(&self, range: Range<usize>) -> Rope; pub fn text_for_range(&self, range) -> String;
     pub fn chars_at(&self, offset) -> impl Iterator<Item = char>; pub fn reversed_chars_at(&self, offset) -> ...;
     pub fn replace(&mut self, range: Range<usize>, text: &str);   // for future editing
-    pub fn to_string(&self) -> String;
+    pub fn to_string(&self) -> String;   // via Display
+    pub fn version(&self) -> u64;        // see Text::version
+    // + push, append, byte_at, clip_point, max_point_utf16, text_summary_for_range,
+    //   offset_to_char_offset/char_offset_to_offset, reversed_chunks_in_range, lines(rows) -> Iterator<String>
 }
 pub struct MappedText;              // memory-mapped, read-only, for very large files (lossy UTF-8)
+// open(path), path(), len(), bytes(range) -> &[u8], line(row) -> Cow<str>, is_stale(), index_memory()
+// + the same conversions as Rope. Invalid UTF-8 bytes are their own "chars" (1 UTF-16 unit each).
 pub enum Text { Rope(Rope), Mapped(Arc<MappedText>) }   // Clone O(1), Send + Sync
 impl Text {
-    pub fn from_str(s: &str) -> Text;
+    pub fn from_str(s: &str) -> Text;        // + From<&str>, From<String>, From<Rope>, FromStr, Display
     pub fn open_mapped(path: &Path) -> io::Result<Text>;
-    pub fn version(&self) -> u64;            // unique per distinct content snapshot
-    pub fn is_mapped(&self) -> bool;
-    // same read API as Rope: len, line_count, line_range, line_len, offset_to_point,
-    // point_to_offset, *_utf16, clip_offset, text_for_range(range) -> Cow<str> / String,
-    // line(row) -> Cow<str>, chunks_in_range(range) -> Box<dyn Iterator<Item=&str> + '_>
-    pub fn lines(&self, rows: Range<u32>) -> impl Iterator<Item = Cow<'_, str>>;
+    pub fn version(&self) -> u64;            // unique per distinct content snapshot (global AtomicU64);
+                                             // clones keep it, replace() assigns a new one
+    pub fn is_mapped(&self) -> bool;  pub fn as_rope(&self) -> Option<&Rope>; pub fn as_mapped(&self) -> ...;
+    // same read API as Rope: len, is_empty, line_count, max_point, line_range, line_len, offset_to_point,
+    // point_to_offset, *_utf16, point_to_point_utf16, point_utf16_to_point, clip_offset, chars_at,
+    pub fn text_for_range(&self, range: Range<usize>) -> Cow<'_, str>;   // borrows when possible
+    pub fn line(&self, row: u32) -> Cow<'_, str>;
+    pub fn chunks_in_range(&self, range: Range<usize>) -> Box<dyn Iterator<Item = &str> + '_>;  // + chunks()
+    pub fn lines(&self, rows: Range<u32>) -> impl Iterator<Item = Cow<'_, str>>;   // rows clamped to line_count
+    pub fn replace(&mut self, range: Range<usize>, text: &str);  // Mapped -> converted to Rope first
 }
 ```
+Line semantics (Rope and MappedText): rows split on `'\n'`; `line_range`/`line_len`/`line`
+exclude a `'\r'` directly before the `'\n'`; `Point` columns are raw bytes (the `'\r'` is
+addressable); out-of-range columns clip to the row's `'\n'`, rows past the end clip to
+`len()`; offsets/points inside a multi-byte char clip to the char start (`Bias::Left`).
+For `Text::Mapped`, returned strings are lossily decoded, so their byte length can differ
+from the requested range when the file is not valid UTF-8.
+
 `MappedText` must open a 1 GB file and serve the first screen in < 500 ms; the
 line index may finish in the background but `line_count()` must then be exact.
+(Current implementation builds the exact index eagerly in parallel at open:
+~110 ms for 1 GB on warm cache; 12 bytes per 8 KiB block ≈ 0.15% overhead. A file
+truncated while mapped can raise SIGBUS — callers should re-open on watcher events
+or when `MappedText::is_stale()`.)
 
 ### lector-syntax
 ```rust
 pub const HIGHLIGHT_NAMES: &[&str];          // canonical capture names, e.g. "keyword", "function.method"
-pub struct HighlightId(pub u16);             // index into HIGHLIGHT_NAMES
+pub struct HighlightId(pub u16);             // index into HIGHLIGHT_NAMES; .name() -> &'static str
 pub struct HighlightSpan { pub range: Range<usize>, pub id: HighlightId }   // byte range in the text
-pub struct Language { pub name: String, pub lsp_id: String, pub line_comment: Option<String>, .. }
-pub struct LanguageRegistry;  // new() loads ~20 built-ins; Send + Sync
+pub struct Language { pub name: String, pub lsp_id: String, pub line_comment: Option<String>,
+                      pub block_comment: Option<(String, String)>, pub extensions: Vec<String>, pub aliases: Vec<String>, .. }
+pub struct LanguageRegistry;  // new() is cheap (process-global table, lazily compiled queries); Clone + Send + Sync
 impl LanguageRegistry {
     pub fn language_for_path(&self, path: &Path, first_line: Option<&str>) -> Option<Arc<Language>>;
-    pub fn by_name(&self, name: &str) -> Option<Arc<Language>>;
+    pub fn by_name(&self, name: &str) -> Option<Arc<Language>>;   // name, lsp id or alias, case-insensitive ("rs", "ts", "sh", "yml")
     pub fn languages(&self) -> Vec<Arc<Language>>;
+    pub fn by_extension(&self, ext: &str) -> Option<Arc<Language>>;   // added
 }
-pub struct Syntax;   // parsed tree for one Text snapshot; Clone, Send + Sync
+pub trait TextInput { fn len(&self) -> usize; fn chunks_in_range(..); fn text_for_range(..); fn offset_to_point(..); }
+// implemented for lector_text::Text, Rope, str and String. Every `&Text` parameter below is `&T where T: TextInput + ?Sized`,
+// so `&Text` (the contract) and `&str` (tests/tools) both work.
+pub struct Syntax;   // parsed tree for one Text snapshot; Clone (cheap), Send + Sync. Always pass the SAME text the tree was parsed from.
 impl Syntax {
-    pub fn parse(lang: &Arc<Language>, text: &Text) -> Result<Syntax>;  // reads via chunks, no full copy
+    pub fn parse(lang: &Arc<Language>, text: &Text) -> Result<Syntax>;  // reads via chunks (parse_with), no full copy; Err(TooLarge) above MAX_PARSE_BYTES (16 MB)
+    pub fn parse_cancellable(lang: &Arc<Language>, text: &Text, cancel: &AtomicBool) -> Result<Syntax>;   // added
     pub fn language(&self) -> &Arc<Language>;
-    pub fn highlights(&self, text: &Text, range: Range<usize>) -> Vec<HighlightSpan>; // sorted, non-overlapping
-    pub fn outline(&self, text: &Text) -> Vec<OutlineItem>;
+    pub fn highlights(&self, text: &Text, range: Range<usize>) -> Vec<HighlightSpan>; // sorted, non-overlapping, clipped to range, never ends with '\n'
+    pub fn outline(&self, text: &Text) -> Vec<OutlineItem>;             // document order, depth = nesting; computed once and cached
     pub fn enclosing_scopes(&self, text: &Text, offset: usize) -> Vec<OutlineItem>;   // outermost first
-    pub fn fold_ranges(&self, text: &Text) -> Vec<Range<u32>>;                       // row ranges
-    pub fn bracket_pair(&self, text: &Text, offset: usize) -> Option<(Range<usize>, Range<usize>)>;
+    pub fn fold_ranges(&self, text: &Text) -> Vec<Range<u32>>;          // see "Fold ranges" below
+    pub fn bracket_pair(&self, text: &Text, offset: usize) -> Option<(Range<usize>, Range<usize>)>;   // bracket at/just before offset -> (it, partner)
+    pub fn enclosing_bracket_pair(&self, text: &Text, offset: usize) -> Option<(Range<usize>, Range<usize>)>;   // added: (open, close)
     pub fn tags(&self, text: &Text) -> Vec<Tag>;
-    pub fn node_at(&self, offset: usize) -> Option<NodeInfo>;   // kind + range, for word/ident lookup
+    pub fn node_at(&self, offset: usize) -> Option<NodeInfo>;   // smallest named node covering the byte at offset
+    pub fn has_errors(&self) -> bool;                           // added
 }
+pub struct NodeInfo { pub kind: String, pub range: Range<usize>, pub named: bool }   // .is_identifier() heuristic
 pub struct OutlineItem { pub name: String, pub kind: SymbolKind, pub range: Range<usize>,
                          pub name_range: Range<usize>, pub depth: u32 }
 pub enum SymbolKind { Module, Class, Struct, Enum, Interface, Trait, Function, Method, Field,
-                      Variable, Constant, Type, Macro, Heading, Other }
-pub struct Tag { pub name: String, pub kind: SymbolKind, pub range: Range<usize>, pub is_definition: bool }
-pub struct SymbolIndex;  // workspace-wide tags index (fallback navigation without LSP)
+                      Variable, Constant, Type, Macro, Heading, Other }   // .label() -> "function", ...
+pub struct Tag { pub name: String, pub kind: SymbolKind, pub range: Range<usize> /* the name identifier */, pub is_definition: bool }
+pub struct SymbolIndex;  // workspace-wide tags index (fallback navigation without LSP); RwLock inside, Sync
 impl SymbolIndex {
-    pub fn insert_file(&self, path: PathBuf, text: &Text, tags: Vec<Tag>);  // interior mutability, Sync
+    pub fn new() -> Self;
+    pub fn insert_file(&self, path: PathBuf, text: &Text, tags: Vec<Tag>);  // replaces earlier entries of path
     pub fn remove_file(&self, path: &Path);
-    pub fn definitions(&self, name: &str) -> Vec<SymbolLocation>;
+    pub fn definitions(&self, name: &str) -> Vec<SymbolLocation>;       // ordered by path, position
     pub fn references(&self, name: &str) -> Vec<SymbolLocation>;
     pub fn all_definitions(&self) -> Vec<SymbolLocation>;   // for the symbol picker
+    pub fn definitions_in_file(&self, path: &Path) -> Vec<SymbolLocation>;   // added
+    pub fn file_count(&self) -> usize;                                       // added
 }
 pub struct SymbolLocation { pub path: PathBuf, pub name: String, pub kind: SymbolKind,
                             pub range: Range<usize>, pub point: Point }
 ```
+Languages (`Language::name`, use these in `ServerConfig::languages`): Rust, TypeScript, TSX, JavaScript (also `.jsx`),
+Python, Go, Java, Kotlin, Swift, C, C++, C#, Ruby, PHP, Bash, HTML, CSS, JSON, JSONC, YAML, TOML, Markdown, SQL
+(LSP ids: rust, typescript, typescriptreact, javascript, python, go, java, kotlin, swift, c, cpp, csharp, ruby, php,
+shellscript, html, css, json, jsonc, yaml, toml, markdown, sql). Detection: exact file name (`Cargo.lock`, `.bashrc`,
+`Gemfile`, ...), patterns (`tsconfig.*.json`, `.vscode/*.json` → JSONC), extension, then shebang / first line.
+Highlights follow injections (Markdown fences by info string, Markdown inline, front matter, HTML `<script>`/`<style>`).
+Grammar/query provenance and licenses: `crates/lector-syntax/GRAMMARS.md`.
+
+**Fold ranges.** `start` is the header row (stays visible); rows `start+1 .. end` are hidden when folded. If the region ends with
+a closing delimiter on its own row (`}`, `]`, `)`, `end`, `fi`, `</tag>`), `end` is that row, so the closer stays visible;
+otherwise (Python blocks, Markdown sections) `end` is one past the last row. Bodies that start on their own line (Allman braces,
+Python/YAML blocks) use the previous non-blank row as header. Sorted by `start`, one range per start row (outermost wins).
+
+**Symbols.** `OutlineItem.range` covers the whole item, `name_range` the identifier. `Tag.range` is the name identifier;
+definition tags merge the grammar's tags query with outline items (consistent kinds: Method vs Function, Struct vs Class).
 
 ### lector-diff
 ```rust
@@ -165,6 +218,13 @@ pub struct GutterMark { pub rows: Range<u32>, pub kind: GutterKind }   // rows i
 pub fn gutter_marks(diff: &LineDiff) -> Vec<GutterMark>;
 pub fn is_binary(bytes: &[u8]) -> bool;
 ```
+Notes (as implemented): lines are split on `'\n'` only (`line_count = newlines + 1`, a trailing
+newline yields an empty last line, `'\r'` stays in the line; use `Whitespace::IgnoreEol` to hide CRLF
+conversion). Hunks always index original lines; sliders use imara-diff's indent heuristic.
+`LineDiff::is_empty()` added. `HasKind { fn kind(&self) -> RowKind }` implemented for both row types.
+`fold_context` keeps `context` rows around changes, never folds fewer than 2 rows, and folds a
+change-free file entirely. `refine_inline` returns whole-line ranges when lines share <35% of
+non-whitespace bytes or exceed 4000 tokens. `GutterMark` `Deleted` is an empty range at the row after the removal.
 
 ### lector-search
 ```rust
@@ -192,6 +252,15 @@ pub fn search_project(root: &Path, query: &SearchQuery, walk: &WalkOptions, canc
                       sink: impl Fn(SearchEvent) + Send + Sync) -> Result<()>;
 pub fn find_in_text(text: &str, query: &SearchQuery) -> Result<Vec<Range<usize>>>;   // in-file find
 ```
+Notes (as implemented): `Result<T>` = `Result<T, SearchError>` (`SearchError::Pattern(String)`).
+`WalkOptions::hidden = true` means *include* hidden files (`.git` is always skipped); `git_ignore` also works
+outside git repos; exclude/include globs are gitignore-like (a glob without `/` matches at any depth and
+excludes descendants). `Picker::new_for_paths` (path-aware scoring) and `Picker::with_config` were added;
+`Picker::clear` disconnects old injectors (call `injector()` again). `PickerMatch.indices` are sorted char
+indices. `search_project`: `max_results == 0` is unlimited and counts matching lines; an empty pattern
+completes with `Done` and zero results; an invalid regex emits `Error` then `Done` and returns `Err`; binary
+files (NUL anywhere) and files > 10 MB are skipped; lines > 500 bytes are windowed around the first match
+(`ranges` always index `text`); `^`/`$` anchor per line; non-UTF-8 files are searched lossily.
 
 ### lector-git
 ```rust
@@ -240,7 +309,30 @@ pub struct Branch { pub name: String, pub remote: bool, pub head: bool, pub oid:
 pub struct Tag { pub name: String, pub oid: Oid }   pub struct Stash { pub index: usize, pub message: String, pub oid: Oid }
 pub struct BlameHunk { pub oid: Oid, pub lines: Range<u32>, pub orig_start: u32, pub orig_path: String,
                        pub author: String, pub time: i64, pub summary: String, pub uncommitted: bool }
+// Additions beyond the original contract:
+impl Repo {
+    pub fn is_bare(&self) -> bool; pub fn git_dir(&self) -> &Path;
+    pub fn detect_binary(&self, change: &mut FileChange) -> Result<bool>;   // fills FileChange::binary lazily
+    pub fn commit_infos(&self, oids: &[Oid]) -> Result<Vec<CommitInfo>>;   // with ref labels
+}
+pub struct GraphEdge { pub from_lane: u16, pub to_lane: u16, pub kind: EdgeKind }  pub enum EdgeKind { Straight, MergeIn, BranchOut }
+pub enum Error { NotARepository(PathBuf), Bare, InvalidRevision { rev, message }, NoMergeBase(String, String),
+                 GitNotInstalled(&'static str), GitCommand { command, status, stderr }, Parse(String), Io(io::Error), Git(String) }
+pub fn is_binary(bytes: &[u8]) -> bool;                     // NUL in first 8000 bytes
+pub fn parse_remote_url(url: &str) -> Option<RemoteWeb>;    // { host, path, scheme }
+pub fn build_permalink(remote_url: &str, sha: &str, path: &str, lines: Option<Range<u32>>) -> Option<String>;
+// Oid: from_hex, from_bytes, as_bytes, is_zero, FromStr; serde (hex string) behind the `serde` feature,
+// which also derives Serialize/Deserialize for all data types.
 ```
+Semantics: `changes()` returns paths sorted, `binary: None`; renames detected (50%) for Staged/Commit/
+Range/BranchVsBase. `Unstaged` = index→worktree (old `Side::Index`, new `Side::Workdir`); `Staged` = HEAD
+blob→`Side::Index`; `WorkingTree` = HEAD blob→`Side::Workdir`, following staged renames. `Side::Index` of a
+conflicted path loads stage 2 ("ours"). `LogQuery.limit == 0` = unlimited; author/message are case-insensitive
+substrings; `path` keeps commits whose entry differs from every parent (no parent-rewriting simplification);
+`all_refs` excludes `refs/stash`. The HEAD commit carries a `RefKind::Head` label (attached or detached). `graph` edges go from
+this row's center to the next row's; lanes compact when they end. `line_history` addresses lines as in
+`HEAD`. Workdir-dependent calls (status, worktree changesets, CLI-backed calls) return `Error::Bare` in bare
+repos. A changed `.git/config` is picked up automatically (cheap stat per call). Requires Rust 1.88 (gix 0.90).
 
 ### lector-lsp
 ```rust
@@ -263,21 +355,40 @@ impl LspManager {
 }
 pub struct Location { pub path: PathBuf, pub range: Range<PointUtf16> }
 pub struct HoverInfo { pub markdown: String, pub range: Option<Range<PointUtf16>> }
+pub struct DocumentSymbol { pub name: String, pub detail: Option<String>, pub kind: SymbolKind,
+                            pub range: Range<PointUtf16>, pub selection_range: Range<PointUtf16>, pub children: Vec<DocumentSymbol> }
+pub struct WorkspaceSymbol { pub name: String, pub kind: SymbolKind, pub path: PathBuf,
+                             pub range: Range<PointUtf16>, pub container: Option<String> }
+pub enum SymbolKind { File, Module, Namespace, Package, Class, Method, Property, Field, Constructor, Enum, Interface,
+                      Function, Variable, Constant, String, Number, Boolean, Array, Object, Key, Null, EnumMember,
+                      Struct, Event, Operator, TypeParameter, Other }   // lector_lsp::SymbolKind (LSP kinds)
+// Additions: LspManager::with_options(root, configs, LspOptions), root(); lector_lsp::which(cmd);
+// LspError / Result<T>; futures are Send + 'static. Languages: "Rust","TypeScript","TSX","JavaScript","Python",...
+// Config order = priority: the first config for a language whose command is on PATH is used (pyright, then pylsp).
+// Per-server overrides from lector-config (`lsp.servers.<name>`) are applied by the caller to `ServerConfig`s.
 ```
 
 ### lector-fs
 ```rust
-pub enum FileKind { Text, Binary, Image(ImageFormat) /*png, jpg, gif, webp, svg, bmp, ico*/, Directory }
+pub enum ImageFormat { Png, Jpeg, Gif, Webp, Svg, Bmp, Ico }      // from_extension, from_magic, mime_type
+pub enum FileKind { Text, Binary, Image(ImageFormat), Directory }
 pub struct LoadedFile { pub kind: FileKind, pub text: Option<Text>, pub size: u64, pub encoding: &'static str, pub lossy: bool }
-pub fn detect_kind(path: &Path, head: &[u8]) -> FileKind;
+// text: Some for Text and Image(Svg) (source view); None for other images, binary, directories.
+// encoding: "UTF-8" | "UTF-16LE" | "UTF-16BE" | "windows-1252" | "binary" | "" (directory)
+pub fn detect_kind(path: &Path, head: &[u8]) -> FileKind;   // head = first SNIFF_LEN (8 KiB) bytes
+pub fn is_binary(head: &[u8]) -> bool;                       // NUL or >10% control bytes; UTF-16 BOM => text
 pub fn load_file(path: &Path, mmap_threshold: u64) -> io::Result<LoadedFile>;  // >= threshold → Text::Mapped
+                                                             // (except UTF-16-BOM files, which are decoded)
 pub fn decode(bytes: &[u8]) -> (String, &'static str /*encoding*/, bool /*lossy*/);  // UTF-8, UTF-16 BOM, latin1 fallback
 pub enum FsEventKind { Created, Modified, Removed }
-pub struct FsEvent { pub path: PathBuf, pub kind: FsEventKind }
-pub enum WatchEvent { Files(Vec<FsEvent>), GitStateChanged /* .git/HEAD, index, refs */, Rescan }
+pub struct FsEvent { pub path: PathBuf, pub kind: FsEventKind }   // absolute paths, deduped per batch
+pub enum WatchEvent { Files(Vec<FsEvent>), GitStateChanged /* .git/HEAD, index, refs, packed-refs, *_HEAD */, Rescan }
 pub struct Watcher;   // drop to stop
-pub fn watch(root: &Path, debounce: Duration, sink: impl Fn(WatchEvent) + Send + 'static) -> Result<Watcher>;
+pub fn watch(root: &Path, debounce: Duration, sink: impl Fn(WatchEvent) + Send + 'static) -> lector_fs::Result<Watcher>;
+pub enum Error { Notify(notify::Error), Io(io::Error) }   // thiserror; `Result<T> = Result<T, Error>`
 ```
+Per debounced batch the sink gets either `Rescan` alone, or `Files` (if any) followed by
+`GitStateChanged` (if any). The sink runs on the watcher's background thread.
 
 ### lector-config
 ```rust
@@ -289,6 +400,17 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding>;   pub fn load_keym
 pub mod paths { pub fn config_dir() -> PathBuf; pub fn data_dir() -> PathBuf; pub fn settings_file() -> PathBuf; pub fn keymap_file() -> PathBuf; pub fn themes_dir() -> PathBuf; pub fn log_file() -> PathBuf; }
 pub struct SessionStore; // load(root) -> Option<Session>, save(root, &Session) — JSON under data_dir/sessions/<hash>.json
 pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is_viewed/set_viewed, persisted JSON
+// Additions (lector-config): `load_settings_for(Option<&Path>)`, `Settings` sub-structs (ThemeSettings, DiffSettings,
+// FileSettings, LspSettings{enabled, servers: BTreeMap<String, ServerOverride{command,args,enabled}>}, GitSettings,
+// SessionSettings); `buffer_font_family: Vec<String>` (accepts a string or list in TOML); `Platform::{MacOS,Linux,Windows}`
+// + `Platform::current()`; `merge_keymap`; keymap.toml = `[[bindings]] keys/action/context` ("none"/"" unbinds).
+// Env overrides: LECTOR_CONFIG_DIR, LECTOR_DATA_DIR. Contexts: Workspace, CodeView, DiffView, Picker.
+// SessionStore::{new(), with_dir(dir), load(&root) -> Option<Session>, save(&root, &Session) -> io::Result<()>};
+// Session { panes: Vec<PaneState{tabs: Vec<TabState{kind: TabKind, scroll_row, active}>}>, axis, active_pane,
+//           sidebar_visible, sidebar_width, sidebar_tab, window: Option<WindowBounds> };
+// TabKind::{File{path}, Diff{changeset_key, path}, Commit{oid}, Other{label}}.
+// ReviewStore::{open(file), default(), is_viewed(repo, changeset, path, content_hash), set_viewed(repo, changeset, path,
+//   content_hash, viewed) -> io::Result<()>}; `content_hash(bytes) -> String` (sha256 hex). Clone + Send + Sync.
 ```
 
 ### lector-theme
@@ -300,6 +422,20 @@ pub struct Theme { pub name: String, pub appearance: Appearance, pub ui: UiColor
 impl SyntaxTheme { pub fn style_for(&self, capture: &str) -> Option<TextStyle>; } // falls back "a.b.c" → "a.b" → "a"
 pub struct TextStyle { pub color: Color, pub bold: bool, pub italic: bool }
 pub struct ThemeRegistry; // builtins: "Lector Dark", "Lector Light", "Lector High Contrast Dark", "Lector High Contrast Light"; + user TOML themes
+impl Color { pub fn parse(s: &str) -> Result<Color, ParseColorError>; pub fn to_hex(self) -> String;
+             pub fn with_alpha(self, a: f32) -> Color; pub fn over(self, bg: Color) -> Color;   // source-over compositing
+             pub fn contrast_ratio(self, bg: Color) -> f32; }                                  // WCAG 2.x
+impl Theme { pub fn with_colorblind_diff(&self) -> Theme; }   // blue (added) / orange (removed) diff + git colors
+impl ThemeRegistry {
+    pub fn new() -> Self; pub fn get(&self, name: &str) -> Option<&Theme>; pub fn names(&self) -> Vec<&str>;
+    pub fn themes(&self) -> &[Theme]; pub fn default_for(&self, a: Appearance) -> &Theme; pub fn insert(&mut self, t: Theme);
+    pub fn load_dir(&mut self, dir: &Path) -> (Vec<String>, Vec<ThemeError>);   // *.toml; missing dir is not an error
+    pub fn load_str(&mut self, toml: &str) -> Result<&Theme, ThemeError>;
+}
+// User theme TOML: name, appearance ("light"|"dark"), optional base (theme name); [ui], [diff], [git] override
+// individual colors ("#rrggbb[aa]"); [syntax] maps capture names to "#color" or { color, bold, italic }.
+// Overriding a capture `a` also replaces inherited `a.*` styles.
+pub const CAPTURE_NAMES: &[&str];   // canonical capture names every built-in theme styles
 ```
 
 ### lector-icons
@@ -313,6 +449,35 @@ impl FileIcons {
 pub struct IconRef { pub name: &'static str, pub svg: &'static [u8] }
 pub enum UiIcon { ChevronRight, ChevronDown, Search, Files, GitBranch, GitCommit, History, ... }
 pub fn ui_icon(icon: UiIcon) -> &'static [u8];   // monochrome SVG (Lucide, ISC), tinted by the UI
+impl FileIcons { pub fn by_name(&self, name: &str) -> Option<IconRef>; }
+impl UiIcon { pub const ALL: &'static [UiIcon]; pub const fn name(self) -> &'static str /* lucide stem */;
+              pub const fn svg(self) -> &'static [u8]; pub fn from_name(name: &str) -> Option<UiIcon>; }
+// for_file precedence: exact file name (case-insensitive) → longest compound extension ("d.ts",
+// "test.tsx") → extension → default. Mapping is generated by scripts/gen_icons.py (src/generated.rs).
+```
+
+### lector-ui (extension seams)
+```rust
+// Data in through traits; integration plugs the core crates in here.
+pub trait CodeSource: 'static {             // code_view::CodeSource — rows are 0-based
+    fn line_count(&self) -> u32; fn line(&self, row: u32) -> SharedString;
+    fn version(&self) -> u64; fn max_line_len(&self) -> Option<usize>;
+    fn highlights(&self, rows: Range<u32>) -> Vec<HighlightSpan>;      // SpanStyle::Capture(&'static str) | Custom
+    fn gutter_marks(&self, rows: Range<u32>) -> Vec<GutterMark>;       // Added | Modified | Deleted
+    fn fold_ranges(&self) -> Vec<Range<u32>>;                          // folding r hides r.start+1..r.end
+    fn sticky_rows(&self, top_row: u32) -> Vec<u32>;                   // enclosing scope headers, outermost first
+    fn line_number(&self, row: u32) -> Option<u32>;                    // None = blank (diff filler rows)
+    fn row_decorations(&self, rows: Range<u32>) -> Vec<RowDecoration>; // diff line/word backgrounds
+    fn language_name(&self) -> Option<SharedString>;
+}   // all but line_count/line have defaults; InMemorySource is the demo implementation
+pub trait TreeDelegate { type Id; fn children(&mut self, parent: Option<&Id>, cx) -> Vec<TreeNode<Id>>;
+                         fn context_menu(&mut self, node, window, cx) -> Option<Entity<ContextMenu>>; }
+pub trait PickerDelegate { fn match_count; fn selected_index; fn set_selected_index; fn update_matches(query);
+                           fn confirm; fn render_match; /* + placeholder, dismissed, empty_message, width, footer */ }
+pub trait PaneItem { fn title; fn icon; fn path; fn view(&self) -> AnyView; fn focus_handle; fn code_view; fn clone_item; }
+// CodeView API: scroll_to_row(row, center), set_cursor/set_selection, set_search_matches, set_decorations,
+// set_annotations (blame), on_hover(cb), on_cmd_click(cb), set_soft_wrap, set_show_minimap, set_folded.
+// Keymap: keymap::bind_keymap(cx, &[KeySpec { keys, action, context }]) (same shape as lector-config).
 ```
 
 ## Threading model (UI)
@@ -351,6 +516,13 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
 * `diff::` ToggleLayout, NextHunk, PrevHunk, NextFile, PrevFile, ToggleViewed,
   ToggleIgnoreWhitespace, ExpandAllContext, OpenInEditor
 * `picker::` Confirm, Cancel, SelectNext, SelectPrev
+* lector-ui additions (UI plumbing, also bindable): `workspace::` CloseOtherTabs, CloseTabsToRight,
+  ToggleColorblindDiff, About; `editor::` MoveToLineStart, MoveToLineEnd, MoveWordLeft, MoveWordRight,
+  SelectToLineStart, SelectToLineEnd, SelectWordLeft, SelectWordRight, SelectPageUp, SelectPageDown,
+  SelectToTop, SelectToBottom, ClearSelection; `tree::` ExpandSelected, CollapseSelected;
+  `text_input::` Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste,
+  Cut, Copy, ShowCharacterPalette. Key contexts: `Workspace`, `CodeView`, `DiffView`, `Picker`,
+  `TextInput`, `ContextMenu`, `TreeView`.
 
 Default keys (macOS uses `cmd`, Linux/Windows use `ctrl` in its place):
 file finder `cmd-p`, command palette `cmd-shift-p`, project symbols `cmd-t`, outline

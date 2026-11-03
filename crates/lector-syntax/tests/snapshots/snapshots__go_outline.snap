@@ -1,0 +1,14 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+constant Pi (line 7)
+interface Shape (line 9)
+  method Area (line 10)
+struct Rect (line 13)
+  field W (line 14)
+  field H (line 14)
+method (r Rect) Area (line 17)
+type Celsius (line 21)
+variable names (line 23)
+function main (line 25)

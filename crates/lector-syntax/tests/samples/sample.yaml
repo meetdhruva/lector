@@ -1,0 +1,24 @@
+# CI config
+name: ci
+on:
+  push:
+    branches: [main]
+env:
+  RUST_LOG: "info"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: |
+          cargo test
+          echo done
+anchors:
+  base: &base
+    retries: 3
+  derived:
+    <<: *base
+    enabled: true
+    ratio: 1.5
+    nothing: null

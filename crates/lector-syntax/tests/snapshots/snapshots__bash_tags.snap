@@ -1,0 +1,6 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def function greet (line 6)
+references: present

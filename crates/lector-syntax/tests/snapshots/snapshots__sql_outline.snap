@@ -1,0 +1,10 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+struct users (line 1)
+  field id (line 2)
+  field name (line 3)
+  field created_at (line 4)
+struct active_users (line 7)
+field idx_users_name (line 10)

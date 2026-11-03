@@ -1,0 +1,17 @@
+---
+source: crates/lector-diff/src/tests.rs
+expression: "render_split(OLD, NEW, &split_rows(&ld))"
+---
+    1 one           |   1 one
+    2 two           |   2 two
+~   3 three         |   3 THREE
++                   |   4 three-and-a-half
+    4 four          |   5 four
+    5 five          |   6 five
+    6 six           |   7 six
+    7 seven         |   8 seven
+-   8 eight         |     
+    9 nine          |   9 nine
+   10 ten           |  10 ten
++                   |  11 extra
+   11               |  12

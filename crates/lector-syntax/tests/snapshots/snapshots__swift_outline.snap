@@ -1,0 +1,20 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+interface Shape (line 2)
+  method area (line 3)
+struct Circle (line 6)
+  field radius (line 7)
+  method area (line 8)
+enum Direction (line 11)
+  field north (line 12)
+  field south (line 12)
+class Counter (line 15)
+  field count (line 16)
+  method init (line 17)
+  method increment (line 18)
+other extension Counter (line 23)
+  method reset (line 24)
+type Callback (line 27)
+variable shapes (line 29)

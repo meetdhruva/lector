@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+description = "File icons (Material Icon Theme) and UI icons (Lucide) for Lector, as embedded SVG bytes."
+include = ["src/**", "assets/**", "THIRD_PARTY.md", "Cargo.toml"]
 
 [dependencies]
 

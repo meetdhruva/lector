@@ -1,0 +1,9 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+other :root (line 2)
+other .card > .title:hover (line 6)
+other @media (max-width: 600px) (line 12)
+  other #nav (line 13)
+other spin (line 16)

@@ -1,0 +1,17 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+module Demo.App (line 3)
+  interface IShape (line 5)
+    method Area (line 7)
+  enum Color (line 10)
+    field Red (line 10)
+    field Green (line 10)
+  class Circle (line 12)
+    field Pi (line 14)
+    field Radius (line 15)
+    method Circle (line 17)
+    method Area (line 22)
+  class Program (line 25)
+    method Main (line 27)

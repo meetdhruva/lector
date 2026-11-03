@@ -1,0 +1,17 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def constant LIMIT (line 4)
+def interface Shape (line 6)
+def method area (line 7)
+def class Circle (line 10)
+def method area (line 11)
+def class companion (line 13)
+def method unit (line 14)
+def enum Color (line 18)
+def constant RED (line 18)
+def constant GREEN (line 18)
+def class Registry (line 20)
+def function main (line 24)
+references: present

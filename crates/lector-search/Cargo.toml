@@ -8,5 +8,15 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+ignore = "0.4"
+globset.workspace = true
+nucleo = "0.5"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+thiserror.workspace = true
+regex.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,7 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def struct users (line 1)
+def struct active_users (line 7)
+references: present

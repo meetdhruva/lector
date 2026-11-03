@@ -8,5 +8,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+imara-diff = "0.2"
 
 [dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
+criterion = { workspace = true, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "diff_bench"
+harness = false

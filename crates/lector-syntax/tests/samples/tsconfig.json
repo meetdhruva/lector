@@ -1,0 +1,10 @@
+{
+  // compiler options
+  "compilerOptions": {
+    "target": "es2022",
+    /* strict mode */
+    "strict": true,
+    "paths": { "@/*": ["src/*"] }
+  },
+  "include": ["src"]
+}

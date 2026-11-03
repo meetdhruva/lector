@@ -1,0 +1,12 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+module Geometry (line 4)
+  constant PI (line 5)
+  class Shape (line 7)
+    method initialize (line 10)
+    method area (line 14)
+    method build (line 18)
+  class Circle (line 26)
+    method area (line 27)

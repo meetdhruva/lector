@@ -1,0 +1,8 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+module package (line 1)
+module dependencies (line 7)
+module bin (line 11)
+module profile.dev (line 15)

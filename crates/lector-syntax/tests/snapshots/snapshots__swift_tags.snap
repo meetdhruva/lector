@@ -1,0 +1,18 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def interface Shape (line 2)
+def method area (line 3)
+def struct Circle (line 6)
+def field radius (line 7)
+def method area (line 8)
+def enum Direction (line 11)
+def class Counter (line 15)
+def field count (line 16)
+def method init (line 17)
+def method increment (line 18)
+def method reset (line 24)
+def type Callback (line 27)
+def variable shapes (line 29)
+references: none

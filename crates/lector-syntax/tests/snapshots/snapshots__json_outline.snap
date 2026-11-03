@@ -1,0 +1,9 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+field scripts (line 4)
+field list (line 8)
+field nested (line 9)
+  field a (line 9)
+    field b (line 9)

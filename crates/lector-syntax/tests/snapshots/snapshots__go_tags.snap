@@ -1,0 +1,13 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def constant Pi (line 7)
+def interface Shape (line 9)
+def method Area (line 10)
+def struct Rect (line 13)
+def method Area (line 17)
+def type Celsius (line 21)
+def variable names (line 23)
+def function main (line 25)
+references: present

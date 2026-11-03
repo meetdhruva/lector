@@ -1,0 +1,8 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+field compilerOptions (line 2)
+  field paths (line 6)
+    field @/* (line 6)
+field include (line 8)

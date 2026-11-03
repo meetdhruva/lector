@@ -1,5 +1,6 @@
 [package]
 name = "lector-fs"
+description = "File loading, kind/encoding detection and a debounced file watcher for Lector"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,5 +9,10 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lector-text.workspace = true
+thiserror.workspace = true
+encoding_rs = "0.8"
+notify-debouncer-full = "0.6"
 
 [dev-dependencies]
+tempfile.workspace = true

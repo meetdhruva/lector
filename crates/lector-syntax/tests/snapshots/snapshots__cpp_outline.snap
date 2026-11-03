@@ -1,0 +1,17 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+module geo (line 3)
+  class Shape (line 5)
+    method ~Shape (line 7)
+    method area (line 8)
+  struct Box (line 12)
+    field value (line 13)
+    method get (line 14)
+  class Circle (line 17)
+    field r_ (line 18)
+    method Circle (line 20)
+    method area (line 21)
+type Shapes (line 26)
+function main (line 28)

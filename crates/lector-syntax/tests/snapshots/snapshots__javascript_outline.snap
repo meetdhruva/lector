@@ -1,0 +1,14 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+constant path (line 2)
+function add (line 5)
+class Animal (line 9)
+  field count (line 10)
+  field #secret (line 11)
+  method constructor (line 12)
+  method speak (line 15)
+function square (line 20)
+constant items (line 21)
+variable view (line 22)

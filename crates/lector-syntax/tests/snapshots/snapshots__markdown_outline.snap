@@ -1,0 +1,8 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+heading Lector (line 5)
+  heading Install (line 9)
+    heading Notes (line 21)
+      heading Setext Heading (line 29)

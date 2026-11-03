@@ -6,7 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+description = "GPUI application shell, views and widget kit for Lector."
 
 [dependencies]
 gpui = "0.2.2"
+lector-theme.workspace = true
+lector-icons.workspace = true
 anyhow.workspace = true
+smallvec.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
+
+[features]
+test-support = ["gpui/test-support"]

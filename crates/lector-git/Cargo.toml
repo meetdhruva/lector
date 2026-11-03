@@ -1,12 +1,30 @@
 [package]
 name = "lector-git"
+description = "Read-only git access for Lector: status, diffs, log, graph, blame, permalinks"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# gix 0.90 requires Rust 1.88.
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+serde = ["dep:serde"]
+
 [dependencies]
+gix = { version = "0.90", default-features = false, features = [
+    "sha1",
+    "status",
+    "revision",
+    "blob-diff",
+    "dirwalk",
+    "max-performance",
+] }
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

@@ -1,0 +1,15 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+module com.example.demo (line 0)
+class Sample (line 5)
+  field MAX (line 6)
+  field name (line 7)
+  method Sample (line 9)
+  method run (line 13)
+  enum Level (line 21)
+    field LOW (line 21)
+    field HIGH (line 21)
+  interface Visitor (line 23)
+    method visit (line 24)

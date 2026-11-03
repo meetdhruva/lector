@@ -1,1 +1,22 @@
-//! lector-config
+//! Lector configuration: settings, keymaps, platform paths, and persisted
+//! session / review state.
+//!
+//! Nothing here touches the user's project files; all state lives under
+//! [`paths::config_dir`] and [`paths::data_dir`].
+#![forbid(unsafe_code)]
+
+mod atomic;
+mod keymap;
+pub mod paths;
+mod review;
+mod session;
+mod settings;
+
+pub use keymap::{default_keymap, load_keymap, merge_keymap, KeyBinding, Platform};
+pub use review::{content_hash, ReviewStore};
+pub use session::{Axis, PaneState, Session, SessionStore, TabKind, TabState, WindowBounds};
+pub use settings::{
+    default_settings_toml, load_settings, load_settings_for, DiffLayout, DiffSettings,
+    FileSettings, GitSettings, LspSettings, ServerOverride, SessionSettings, Settings,
+    ShowWhitespace, ThemeMode, ThemeSettings,
+};

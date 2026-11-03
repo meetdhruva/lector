@@ -1,0 +1,14 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+field name (line 1)
+field on (line 2)
+  field push (line 3)
+field env (line 5)
+field jobs (line 7)
+  field build (line 8)
+    field steps (line 10)
+field anchors (line 16)
+  field base (line 17)
+  field derived (line 19)

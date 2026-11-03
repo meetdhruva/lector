@@ -1,0 +1,10 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def constant MAX_SIZE (line 5)
+def class Point (line 9)
+def method norm (line 13)
+def method origin (line 17)
+def function read_all (line 21)
+references: present

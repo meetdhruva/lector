@@ -1,0 +1,16 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def module App\Models (line 3)
+def interface Shape (line 7)
+def method area (line 9)
+def trait Named (line 12)
+def field name (line 14)
+def class Base (line 17)
+def constant VERSION (line 20)
+def field count (line 21)
+def method __construct (line 23)
+def method create (line 27)
+def function helper (line 36)
+references: present

@@ -6,7 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+description = "Theme model and built-in themes for Lector (UI-free)."
 
 [dependencies]
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true

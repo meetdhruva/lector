@@ -8,5 +8,17 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lsp-types = "0.97"
+lector-text.workspace = true
+url = "2"
+futures = "0.3"
+serde_json.workspace = true
+serde.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
+

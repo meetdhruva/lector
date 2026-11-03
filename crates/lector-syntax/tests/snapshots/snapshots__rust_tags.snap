@@ -1,0 +1,21 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def struct Point (line 6)
+def enum Shape (line 11)
+def trait Area (line 17)
+def constant UNITS (line 18)
+def method area (line 19)
+def method describe (line 20)
+def constant UNITS (line 26)
+def method area (line 28)
+def method fmt (line 38)
+def module util (line 43)
+def type Registry (line 44)
+def constant MAX_ITEMS (line 45)
+def variable GREETING (line 46)
+def macro square (line 48)
+def function count_words (line 52)
+def function main (line 61)
+references: present

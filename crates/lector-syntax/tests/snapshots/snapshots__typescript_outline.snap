@@ -1,0 +1,21 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+interface Greeter (line 3)
+  field name (line 4)
+  method greet (line 5)
+type Id (line 8)
+enum Color (line 10)
+  field Red (line 11)
+  field Green (line 12)
+constant MAX_RETRIES (line 15)
+class Base (line 17)
+  field cache (line 18)
+  method constructor (line 19)
+  method greet (line 21)
+  method load (line 25)
+module Util (line 28)
+  function clamp (line 29)
+function double (line 34)
+function main (line 36)

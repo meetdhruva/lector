@@ -1,0 +1,15 @@
+---
+source: crates/lector-diff/src/tests.rs
+expression: "fold_context(&rows, 1)"
+---
+[
+    Rows(
+        0..5,
+    ),
+    Folded {
+        rows: 5..7,
+    },
+    Rows(
+        7..13,
+    ),
+]

@@ -1,0 +1,11 @@
+{
+  "name": "lector",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "cargo build",
+    "test": "cargo test"
+  },
+  "list": [1, 2.5, -3e2, true, false, null],
+  "nested": { "a": { "b": [] } }
+}

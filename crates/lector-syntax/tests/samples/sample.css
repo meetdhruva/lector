@@ -1,0 +1,20 @@
+@import url("base.css");
+
+:root {
+  --accent: #ff8800;
+}
+
+.card > .title:hover {
+  color: var(--accent);
+  margin: 0 auto;
+  font-family: "Inter", sans-serif;
+}
+
+@media (max-width: 600px) {
+  #nav { display: none; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

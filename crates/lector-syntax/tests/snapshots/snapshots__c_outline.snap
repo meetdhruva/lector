@@ -1,0 +1,16 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+constant MAX (line 1)
+macro SQUARE (line 2)
+type Point (line 4)
+  struct Point (line 4)
+    field x (line 5)
+    field y (line 6)
+enum Color (line 9)
+  field RED (line 9)
+  field GREEN (line 9)
+function add (line 11)
+function name (line 15)
+function main (line 19)

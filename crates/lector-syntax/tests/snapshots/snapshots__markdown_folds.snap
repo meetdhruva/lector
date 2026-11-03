@@ -1,0 +1,5 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "folds_snapshot(& text, & syntax)"
+---
+0..4 5..35 9..35 15..20 21..35 23..27 24..27 25..27

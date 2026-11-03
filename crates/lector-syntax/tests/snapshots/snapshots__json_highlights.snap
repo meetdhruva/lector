@@ -1,0 +1,25 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: hl
+---
+1:2 string "\"name\""
+1:10 string "\"lector\""
+2:2 string "\"version\""
+2:13 string "\"0.1.0\""
+3:2 string "\"private\""
+3:13 constant.builtin "true"
+4:2 string "\"scripts\""
+5:4 string "\"build\""
+5:13 string "\"cargo build\""
+6:4 string "\"test\""
+6:12 string "\"cargo test\""
+8:2 string "\"list\""
+8:11 number "1"
+8:14 number "2.5"
+8:19 number "-3e2"
+8:25 constant.builtin "true"
+8:31 constant.builtin "false"
+8:38 constant.builtin "null"
+9:2 string "\"nested\""
+9:14 string "\"a\""
+9:21 string "\"b\""

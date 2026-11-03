@@ -1,0 +1,15 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "outline_snapshot(& text, & syntax)"
+---
+module App\\Models (line 3)
+interface Shape (line 7)
+  method area (line 9)
+trait Named (line 12)
+  field $name (line 14)
+class Base (line 17)
+  constant VERSION (line 20)
+  field $count (line 21)
+  method __construct (line 23)
+  method create (line 27)
+function helper (line 36)

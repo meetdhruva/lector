@@ -1,0 +1,13 @@
+---
+source: crates/lector-syntax/tests/snapshots.rs
+expression: "tags_snapshot(& text, & syntax)"
+---
+def module Geometry (line 4)
+def constant PI (line 5)
+def class Shape (line 7)
+def method initialize (line 10)
+def method area (line 14)
+def method build (line 18)
+def class Circle (line 26)
+def method area (line 27)
+references: present
