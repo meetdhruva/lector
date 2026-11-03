@@ -18,6 +18,15 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        // No background auto-gc/maintenance: newer git detaches it after commits, and
+        // its lock files appearing and vanishing would look like Lector writing.
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_0", "gc.auto")
+        .env("GIT_CONFIG_VALUE_0", "0")
+        .env("GIT_CONFIG_KEY_1", "maintenance.auto")
+        .env("GIT_CONFIG_VALUE_1", "false")
+        .env("GIT_CONFIG_KEY_2", "gc.autoDetach")
+        .env("GIT_CONFIG_VALUE_2", "false")
         .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
         .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
         .output()
