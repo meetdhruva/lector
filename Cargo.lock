@@ -4356,6 +4356,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs 6.0.0",
+ "dunce",
  "futures",
  "lector-config",
  "lector-theme",
@@ -4373,6 +4374,7 @@ name = "lector-config"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
+ "dunce",
  "parking_lot",
  "serde",
  "serde_ignored",
@@ -4398,6 +4400,7 @@ dependencies = [
 name = "lector-fs"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "encoding_rs",
  "lector-text",
  "notify",
@@ -4546,6 +4549,7 @@ name = "lector-ui-git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dunce",
  "gpui",
  "lector-config",
  "lector-diff",
@@ -4567,6 +4571,7 @@ name = "lector-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dunce",
  "futures",
  "lector-config",
  "lector-diff",
@@ -4576,6 +4581,7 @@ dependencies = [
  "lector-search",
  "lector-syntax",
  "lector-text",
+ "memchr",
  "parking_lot",
  "tempfile",
  "thiserror 2.0.21",

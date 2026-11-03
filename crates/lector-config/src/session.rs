@@ -147,7 +147,7 @@ impl SessionStore {
     }
 
     fn file_for(&self, root: &Path) -> PathBuf {
-        let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let canon = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let digest = Sha256::digest(canon.to_string_lossy().as_bytes());
         let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         self.dir.join(format!("{hex}.json"))

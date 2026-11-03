@@ -145,7 +145,7 @@ fn build_request(cli: &Cli) -> anyhow::Result<OpenRequest> {
 fn request_for_target(arg: &str) -> anyhow::Result<OpenRequest> {
     let (path, line, col) = parse_target(arg);
     let path =
-        std::fs::canonicalize(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        dunce::canonicalize(&path).with_context(|| format!("cannot open {}", path.display()))?;
     let fixed_size = std::env::var_os("LECTOR_SCREENSHOT").map(|_| (1600., 1000.));
     if path.is_dir() {
         Ok(OpenRequest {

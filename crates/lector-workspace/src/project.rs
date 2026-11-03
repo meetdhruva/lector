@@ -251,10 +251,28 @@ fn to_slash(p: &Path) -> String {
     }
 }
 
+/// The canonical spelling of `path`, also for paths that do not exist yet
+/// (their nearest existing ancestor is canonicalized and the rest re-appended).
+fn canonical_spelling(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = dunce::canonicalize(path) {
+        return Some(canonical);
+    }
+    let mut tail = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        tail.push(current.file_name()?.to_os_string());
+        if let Ok(base) = dunce::canonicalize(parent) {
+            return Some(tail.iter().rev().fold(base, |acc, part| acc.join(part)));
+        }
+        current = parent;
+    }
+    None
+}
+
 impl Project {
     /// Opens `root`. Discovers the git repository (if any); never fails because of git.
     pub fn open(root: &Path, settings: Settings) -> Result<Project> {
-        let root = root.canonicalize()?;
+        let root = dunce::canonicalize(root)?;
         if !root.is_dir() {
             return Err(Error::Other(format!(
                 "{} is not a directory",
@@ -276,7 +294,7 @@ impl Project {
         let repo_prefix = repo
             .as_ref()
             .and_then(|r| {
-                let wd = r.workdir().canonicalize().ok()?;
+                let wd = dunce::canonicalize(r.workdir()).ok()?;
                 let rel = root.strip_prefix(&wd).ok()?;
                 let s = to_slash(rel);
                 Some(if s.is_empty() { s } else { format!("{s}/") })
@@ -528,7 +546,12 @@ impl Project {
     /// Loads `path` (absolute, or relative to the root) as an immutable [`Document`].
     pub fn load_document(&self, path: &Path) -> Result<Document> {
         let abs = if path.is_absolute() {
-            path.to_path_buf()
+            // Use the project's spelling of paths inside it, so documents, symbols and
+            // git paths compare equal whatever form the caller used.
+            match self.relative_path(path) {
+                Some(rel) => self.absolute_path(&rel),
+                None => path.to_path_buf(),
+            }
         } else {
             self.inner.root.join(path)
         };
@@ -571,16 +594,25 @@ impl Project {
     }
 
     /// Path relative to the root, `/`-separated; `None` when `abs` is outside the project.
+    ///
+    /// Accepts non-canonical spellings of paths inside the root too (a symlinked
+    /// parent such as macOS `/var` → `/private/var`, or `\\?\` prefixes on Windows).
     pub fn relative_path(&self, abs: &Path) -> Option<String> {
-        abs.strip_prefix(&self.inner.root)
-            .ok()
-            .map(to_slash)
-            .filter(|s| !s.is_empty())
+        if let Ok(rel) = abs.strip_prefix(&self.inner.root) {
+            let s = to_slash(rel);
+            return (!s.is_empty()).then_some(s);
+        }
+        let canonical = canonical_spelling(abs)?;
+        let s = to_slash(canonical.strip_prefix(&self.inner.root).ok()?);
+        (!s.is_empty()).then_some(s)
     }
 
     /// Absolute path of a root-relative path.
     pub fn absolute_path(&self, rel: &str) -> PathBuf {
-        self.inner.root.join(rel)
+        // Join per component so Windows paths get native separators throughout.
+        rel.split('/')
+            .filter(|part| !part.is_empty())
+            .fold(self.inner.root.clone(), |acc, part| acc.join(part))
     }
 
     /// Repo-relative path for a root-relative one (differs when the root is a repo subfolder).

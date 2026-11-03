@@ -678,7 +678,14 @@ pub fn resolve_link(target: &str, base_dir: Option<&Path>) -> (String, bool) {
     }
     let path = target.split(['#', '?']).next().unwrap_or(target);
     match base_dir {
-        Some(base) if !path.is_empty() => (base.join(path).display().to_string(), false),
+        Some(base) if !path.is_empty() => {
+            // Markdown links use '/'; join per segment for native separators.
+            let joined = path
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .fold(base.to_path_buf(), |acc, segment| acc.join(segment));
+            (joined.display().to_string(), false)
+        }
         _ => (path.to_string(), false),
     }
 }
@@ -1124,6 +1131,13 @@ mod tests {
         );
         let (p, url) = resolve_link("docs/a.md#h", Some(Path::new("/r")));
         assert!(!url);
-        assert_eq!(p, "/r/docs/a.md");
+        assert_eq!(
+            p,
+            Path::new("/r")
+                .join("docs")
+                .join("a.md")
+                .display()
+                .to_string()
+        );
     }
 }

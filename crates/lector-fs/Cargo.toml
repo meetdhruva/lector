@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+dunce.workspace = true
 lector-text.workspace = true
 thiserror.workspace = true
 encoding_rs = "0.8"

@@ -9,6 +9,8 @@ authors.workspace = true
 description = "UI-free application model for Lector: project, documents, navigation, review."
 
 [dependencies]
+memchr.workspace = true
+dunce.workspace = true
 lector-text.workspace = true
 lector-fs.workspace = true
 lector-syntax.workspace = true

@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Git review views for Lector: changes, diffs, history, branches, blame."
 
 [dependencies]
+dunce.workspace = true
 gpui = "0.2.2"
 lector-ui.workspace = true
 lector-workspace.workspace = true

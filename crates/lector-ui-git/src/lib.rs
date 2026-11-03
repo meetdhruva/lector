@@ -240,8 +240,8 @@ fn restore_git_tabs(
 fn active_rel_path(ws: &Workspace, store: &Entity<GitStore>, cx: &App) -> Option<String> {
     let path = ws.active_path(cx)?;
     let repo = store.read(cx).repo()?;
-    let wd = repo.workdir().canonicalize().ok()?;
-    let abs = path.canonicalize().ok()?;
+    let wd = dunce::canonicalize(repo.workdir()).ok()?;
+    let abs = dunce::canonicalize(path).ok()?;
     let rel = abs.strip_prefix(&wd).ok()?;
     Some(rel.to_string_lossy().replace('\\', "/"))
 }

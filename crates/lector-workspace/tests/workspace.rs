@@ -644,3 +644,37 @@ fn bench_10k_line_file() {
     assert_eq!(all.len() as u32, d.line_count());
     assert_eq!(again.len(), 60);
 }
+
+/// A project reached through a symlinked path (like macOS `/var` → `/private/var`):
+/// documents loaded through either spelling resolve to the same project paths.
+#[cfg(unix)]
+#[test]
+fn symlinked_root_spellings_resolve_to_project_paths() {
+    let t = tempfile::tempdir().unwrap();
+    let real = t.path().join("real");
+    fs::create_dir(&real).unwrap();
+    init_repo(&real);
+    write(&real, "src/lib.rs", "pub fn compute() -> u32 {\n    1\n}\n");
+    commit_all(&real);
+    write(&real, "src/lib.rs", "pub fn compute() -> u32 {\n    2\n}\n");
+    let alias = t.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+    let project = Project::open(&alias, no_lsp()).unwrap();
+    project.refresh_git_status().unwrap();
+    for spelling in [&alias, &real] {
+        let path = spelling.join("src/lib.rs");
+        assert_eq!(project.relative_path(&path).as_deref(), Some("src/lib.rs"));
+        let doc = project.load_document(&path).unwrap();
+        assert_eq!(doc.rel_path(), Some("src/lib.rs"));
+        let marks = doc.diff_gutter(&project);
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert_eq!(marks[0].kind, GutterKind::Modified);
+    }
+    // A path that does not exist yet still maps through the symlinked parent.
+    assert_eq!(
+        project.relative_path(&alias.join("src/new.rs")).as_deref(),
+        Some("src/new.rs")
+    );
+    assert_eq!(project.relative_path(Path::new("/elsewhere/x.rs")), None);
+}

@@ -68,7 +68,7 @@ pub fn watch(
     sink: impl Fn(WatchEvent) + Send + 'static,
 ) -> Result<Watcher> {
     let mut roots = vec![root.to_path_buf()];
-    if let Ok(canonical) = root.canonicalize() {
+    if let Ok(canonical) = dunce::canonicalize(root) {
         if canonical != root {
             roots.push(canonical);
         }

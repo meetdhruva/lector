@@ -18,6 +18,7 @@ name = "lector"
 path = "src/main.rs"
 
 [dependencies]
+dunce.workspace = true
 lector-ui.workspace = true
 lector-ui-git.workspace = true
 lector-theme.workspace = true

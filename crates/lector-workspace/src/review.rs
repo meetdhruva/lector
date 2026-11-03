@@ -216,6 +216,40 @@ fn load_side(repo: &Repo, side: &Side) -> Result<Loaded> {
     })
 }
 
+/// Mirrors git's checkout line-ending conversion (`core.autocrlf`, `eol=crlf`) for a
+/// working-tree file compared with a stored version: when the stored side uses LF only
+/// and the working file uses CRLF, the working file is compared with LF endings, as git
+/// does after its clean filter. Without this, every line of every file would show as
+/// changed for Windows users with `core.autocrlf=true`.
+fn normalize_checkout_eol(stored: Option<&[u8]>, working: Vec<u8>) -> Vec<u8> {
+    let Some(stored) = stored else {
+        return working;
+    };
+    if memchr::memchr(b'\r', stored).is_some() || memchr::memmem::find(&working, b"\r\n").is_none()
+    {
+        return working;
+    }
+    let mut out = Vec::with_capacity(working.len());
+    let mut rest = working.as_slice();
+    while let Some(at) = memchr::memmem::find(rest, b"\r\n") {
+        out.extend_from_slice(&rest[..at]);
+        out.push(b'\n');
+        rest = &rest[at + 2..];
+    }
+    out.extend_from_slice(rest);
+    out
+}
+
+/// Applies [`normalize_checkout_eol`] when `new_side` is the working tree.
+fn normalize_loaded_pair(old: &Loaded, new_side: &Side, new: Loaded) -> Loaded {
+    match (old, new_side, new) {
+        (Loaded::Bytes(stored), Side::Workdir(_), Loaded::Bytes(working)) => {
+            Loaded::Bytes(normalize_checkout_eol(Some(stored), working))
+        }
+        (_, _, new) => new,
+    }
+}
+
 fn side_identity(side: &Side, loaded: &Loaded) -> String {
     match (side, loaded) {
         (Side::Blob(oid), _) => format!("blob:{oid}"),
@@ -233,7 +267,7 @@ struct FileSummary {
 
 fn summarize(repo: &Repo, change: &FileChange, opts: &DiffOptions) -> Result<FileSummary> {
     let old = load_side(repo, &change.old)?;
-    let new = load_side(repo, &change.new)?;
+    let new = normalize_loaded_pair(&old, &change.new, load_side(repo, &change.new)?);
     let hash = content_hash(
         format!(
             "{}|{}",
@@ -725,7 +759,7 @@ pub fn load_file_diff_with(
     opts: &DiffOptions,
 ) -> Result<FileDiff> {
     let old_loaded = load_side(repo, &change.old)?;
-    let new_loaded = load_side(repo, &change.new)?;
+    let new_loaded = normalize_loaded_pair(&old_loaded, &change.new, load_side(repo, &change.new)?);
     Ok(build_file_diff(
         change.clone(),
         &old_loaded,
@@ -827,7 +861,9 @@ pub fn file_vs_revision_with(
     opts: &DiffOptions,
 ) -> Result<FileDiff> {
     let old = repo.file_at(rev, rel_path)?;
-    let new = std::fs::read(repo.workdir().join(rel_path)).ok();
+    let new = std::fs::read(repo.workdir().join(rel_path))
+        .ok()
+        .map(|working| normalize_checkout_eol(old.as_deref(), working));
     let kind = match (&old, &new) {
         (None, Some(_)) => lector_git::ChangeKind::Added,
         (Some(_), None) => lector_git::ChangeKind::Deleted,
@@ -1293,6 +1329,26 @@ mod tests {
             &diff_options(&settings),
         );
         assert!(ws.diff.hunks.is_empty());
+    }
+
+    #[test]
+    fn checkout_eol_is_normalized_like_git() {
+        // Stored LF, working CRLF (core.autocrlf=true checkout): compared as LF.
+        assert_eq!(
+            normalize_checkout_eol(Some(b"a\nb\n"), b"a\r\nb\r\n".to_vec()),
+            b"a\nb\n"
+        );
+        // A stored file that already has CR keeps the working bytes untouched.
+        assert_eq!(
+            normalize_checkout_eol(Some(b"a\r\n"), b"a\r\nb\r\n".to_vec()),
+            b"a\r\nb\r\n"
+        );
+        // Lone CRs are content, not line endings.
+        assert_eq!(
+            normalize_checkout_eol(Some(b"a\n"), b"x\ry\r\n".to_vec()),
+            b"x\ry\n"
+        );
+        assert_eq!(normalize_checkout_eol(None, b"a\r\n".to_vec()), b"a\r\n");
     }
 
     #[test]

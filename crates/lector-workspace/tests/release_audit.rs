@@ -249,7 +249,8 @@ fn unusual_files_do_not_panic() {
         b"fn \xff\xfe() { \"\xe2\x82\" }\n// \xc3\n".as_slice(),
     );
     write(&root, "utf16.txt", b"\xff\xfeh\x00i\x00\n\x00".as_slice());
-    write(&root, "nul.bin", b"\x00\x00\x00".as_slice());
+    // Not "nul.*": NUL is a reserved device name on Windows.
+    write(&root, "zeros.bin", b"\x00\x00\x00".as_slice());
     write(
         &root,
         "with space/ünï cödé.md",

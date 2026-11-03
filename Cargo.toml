@@ -45,6 +45,7 @@ memmap2 = "0.9"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 dirs = "6"
+dunce = "1"
 globset = "0.4"
 rayon = "1"
 # dev

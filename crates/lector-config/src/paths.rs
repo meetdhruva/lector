@@ -17,7 +17,7 @@ pub fn portable_root() -> Option<&'static Path> {
     static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
     ROOT.get_or_init(|| {
         let exe = std::env::current_exe().ok()?;
-        let exe = exe.canonicalize().unwrap_or(exe);
+        let exe = dunce::canonicalize(&exe).unwrap_or(exe);
         portable_root_for(exe.parent()?)
     })
     .as_deref()

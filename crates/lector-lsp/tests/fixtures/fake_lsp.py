@@ -39,6 +39,7 @@ def read():
 
 log("start")
 docs = {}
+root_uri = "file:///tmp"
 while True:
     m = read()
     if m is None:
@@ -49,6 +50,7 @@ while True:
         continue
     log(method)
     if method == "initialize":
+        root_uri = (p or {}).get("rootUri") or "file:///tmp"
         time.sleep(args.init_delay)
         send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {"hoverProvider": True}}})
         if args.probe_config:
@@ -88,7 +90,7 @@ while True:
     elif method == "workspace/symbol":
         send({"jsonrpc": "2.0", "id": mid, "result": [
             {"name": p["query"] + "_sym", "kind": 12, "containerName": "mod",
-             "location": {"uri": "file:///tmp/x.rs",
+             "location": {"uri": root_uri.rstrip("/") + "/x.rs",
                           "range": {"start": {"line": 3, "character": 1}, "end": {"line": 3, "character": 4}}}}]})
     elif method == "shutdown":
         send({"jsonrpc": "2.0", "id": mid, "result": None})
