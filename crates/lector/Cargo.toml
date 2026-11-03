@@ -1,0 +1,17 @@
+[package]
+name = "lector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A fast, reading-first code viewer and git review tool."
+
+[[bin]]
+name = "lector"
+path = "src/main.rs"
+
+[dependencies]
+lector-ui.workspace = true
+anyhow.workspace = true
