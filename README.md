@@ -1,0 +1,121 @@
+# Lector
+
+**A fast, reading-first code viewer and git review tool, written in Rust.**
+
+AI agents now write a large share of code; humans increasingly *read* and *review* it.
+Today's editors are built for typing. Lector is built for reading: understanding an
+unfamiliar codebase, following definitions, and reviewing changes — working-tree
+edits, commits, branches, or whatever an agent just did.
+
+v0.1.0 is **strictly read-only**. It never modifies your files or your repository.
+
+![Lector reading code](docs/screenshots/reader-dark.png)
+
+## Features (v0.1.0)
+
+**Reading**
+- Native, GPU-rendered UI (GPUI) with embedded JetBrains Mono and Inter fonts
+- Tree-sitter highlighting for 23 languages, folding, indent guides, minimap
+- Sticky scroll headers, breadcrumbs, outline panel, symbol pickers
+- Go to definition, find references and hover — via your installed language servers,
+  with a tags-based fallback that works with zero setup
+- Fuzzy file finder (nucleo), command palette, project search (ripgrep's engine)
+- Markdown preview, image preview, binary detection, instant opening of 1 GB+ files
+- Live reload when files change on disk (e.g. while an agent works)
+- Material file icons, light/dark/high-contrast themes, colorblind-safe diffs
+- Session restore, keyboard and mouse parity, context menus everywhere
+
+**Git review**
+- Changes panel: staged, unstaged, untracked, conflicts; branch vs base; commit ranges
+- Side-by-side and unified diffs with word-level highlights and folded context
+- Review tab with per-file "viewed" checkboxes that reset when a file changes again
+- History with commit graph, ref labels and filters; commit detail view
+- Branches, tags and stashes; blame gutter; file and line history
+- Permalinks for GitHub, GitLab, Bitbucket, Gitea/Codeberg, sourcehut
+
+| | |
+|---|---|
+| ![Split diff](docs/screenshots/diff-split-dark.png) | ![History graph](docs/screenshots/history-graph-dark.png) |
+| ![Review tab](docs/screenshots/review-tab-dark.png) | ![Outline](docs/screenshots/outline-light.png) |
+
+## Install from source
+
+Requires Rust 1.88+ and `git` on `PATH`.
+
+```sh
+git clone https://github.com/meetdhruva/lector
+cd lector
+cargo build --release -p lector
+./target/release/lector path/to/repo        # or: lector file.rs:42
+```
+
+Linux build dependencies (Debian/Ubuntu):
+
+```sh
+sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+  libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev libssl-dev
+```
+
+macOS needs Xcode command line tools; Windows needs the MSVC toolchain.
+
+## Usage
+
+```
+lector [PATH[:LINE[:COL]]] [--theme NAME]
+```
+
+| Action | macOS | Linux / Windows |
+|---|---|---|
+| File finder | `cmd-p` | `ctrl-p` |
+| Command palette | `cmd-shift-p` | `ctrl-shift-p` |
+| Project symbols / file outline | `cmd-t` / `cmd-shift-o` | `ctrl-t` / `ctrl-shift-o` |
+| Project search | `cmd-shift-f` | `ctrl-shift-f` |
+| Changes / History | `ctrl-shift-g` / `ctrl-shift-h` | same |
+| Go to definition / references | `f12` / `shift-f12` | same |
+| Back / forward | `ctrl--` / `ctrl-shift--` | `alt-left` / `alt-right` |
+| Next / previous hunk (diff) | `alt-n` / `alt-p` | same |
+| Mark file viewed (review) | `v` | `v` |
+| Toggle blame | `cmd-alt-b` | `ctrl-alt-b` |
+
+Settings live in `settings.toml` and `keymap.toml` in Lector's config directory
+(run *Open Settings* from the command palette). A project can override settings in
+`.lector/settings.toml`.
+
+## Architecture
+
+Lector is a Cargo workspace of small crates. Everything below the UI is UI-free,
+synchronous, and reusable on its own:
+
+| Crate | Purpose |
+|---|---|
+| `lector-text` | SumTree, rope, memory-mapped text, coordinate conversions |
+| `lector-syntax` | tree-sitter language registry, highlights, outline, folds, tags |
+| `lector-diff` | line diff (imara-diff histogram), word refinement, split/unified rows |
+| `lector-search` | gitignore-aware walker, fuzzy picker (nucleo), project grep |
+| `lector-git` | read-only git via gitoxide, git CLI for blame and line history |
+| `lector-lsp` | read-only LSP client without an async runtime |
+| `lector-fs` | file loading, encoding and kind detection, debounced watcher |
+| `lector-config` | settings, keymaps, paths, session and review state |
+| `lector-theme`, `lector-icons` | theme model and built-in themes; file and UI icons |
+| `lector-workspace` | UI-free app model: project, documents, navigation, review |
+| `lector-ui`, `lector-ui-git` | GPUI shell, widgets and views |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
+and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements.
+
+## Roadmap
+
+| Release | Scope |
+|---|---|
+| 0.2 | Stage/unstage hunks, revert, commit composer |
+| 0.3 | Editing, multi-cursor, formatting, LSP code actions, conflict resolution |
+| 0.4 | Full accessibility (screen readers via AccessKit) |
+| 0.5 | Agent integration: ACP client, MCP server, headless CLI |
+| 0.6+ | WASM plugins, PR integration, stacked changes, structural diff |
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Bundled fonts, icons and grammars keep their own permissive licenses; see
+[assets/THIRD_PARTY.md](assets/THIRD_PARTY.md), `crates/lector-icons/THIRD_PARTY.md`
+and `crates/lector-syntax/GRAMMARS.md`.
