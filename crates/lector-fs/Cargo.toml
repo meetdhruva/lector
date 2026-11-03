@@ -12,7 +12,7 @@ authors.workspace = true
 lector-text.workspace = true
 thiserror.workspace = true
 encoding_rs = "0.8"
-notify-debouncer-full = "0.6"
+notify = "8.2"
 
 [dev-dependencies]
 tempfile.workspace = true

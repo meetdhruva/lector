@@ -3,15 +3,13 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use notify_debouncer_full::notify::event::{AccessKind, MetadataKind, ModifyKind, RenameMode};
-use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{
-    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, NoCache,
-};
+use notify::event::{AccessKind, MetadataKind, ModifyKind, RenameMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
-use crate::{Error, Result};
+use crate::Result;
 
 /// What happened to a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -49,7 +47,8 @@ pub enum WatchEvent {
 
 /// A running watcher; dropping it stops watching.
 pub struct Watcher {
-    _debouncer: Debouncer<RecommendedWatcher, NoCache>,
+    // Owns the channel sender; dropping it ends the debounce thread.
+    _watcher: RecommendedWatcher,
 }
 
 impl std::fmt::Debug for Watcher {
@@ -77,28 +76,56 @@ pub fn watch(
     // Don't follow symlinks (like the walker): a link to `/` or `$HOME` inside the
     // project would otherwise make the watcher crawl and watch that whole tree.
     let config = notify::Config::default().with_follow_symlinks(false);
-    // `NoCache` on every platform: the debouncer's file-id cache (its default on macOS
-    // and Windows) walks the whole tree *following symlinks* when watching starts,
-    // which is slow on large repos and never ends with a link to `/`. We only need
-    // path-level changes, so rename stitching by file id is not required.
-    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
-        debounce,
-        None,
-        move |result: DebounceEventResult| {
-            for event in convert(result, &roots) {
-                sink(event);
-            }
+    // Raw backend events, debounced here rather than by notify-debouncer-full: that
+    // crate drops a path created and removed within one window, which loses real
+    // deletions on macOS (FSEvents tags a deletion with the file's earlier "created"
+    // flag), and its file-id cache walks the whole tree following symlinks on start.
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = RecommendedWatcher::new(
+        move |event| {
+            let _ = tx.send(event);
         },
-        NoCache::new(),
         config,
-    )
-    .map_err(Error::Notify)?;
-    debouncer
-        .watch(root, RecursiveMode::Recursive)
-        .map_err(Error::Notify)?;
-    Ok(Watcher {
-        _debouncer: debouncer,
-    })
+    )?;
+    watcher.watch(root, RecursiveMode::Recursive)?;
+    std::thread::Builder::new()
+        .name("lector-fs-watch".into())
+        .spawn(move || debounce_loop(&rx, debounce, &roots, &sink))?;
+    Ok(Watcher { _watcher: watcher })
+}
+
+/// Collects events until the stream has been quiet for `debounce` (or a batch has
+/// been open for `max_latency`, so a steady stream of writes still gets delivered),
+/// then hands the converted batch to `sink`. Returns when the watcher is dropped.
+fn debounce_loop(
+    rx: &mpsc::Receiver<notify::Result<Event>>,
+    debounce: Duration,
+    roots: &[PathBuf],
+    sink: &impl Fn(WatchEvent),
+) {
+    let debounce = debounce.max(Duration::from_millis(10));
+    let max_latency = debounce * 10;
+    while let Ok(first) = rx.recv() {
+        let opened = Instant::now();
+        let mut batch = vec![first];
+        let disconnected = loop {
+            let remaining = max_latency.saturating_sub(opened.elapsed());
+            if remaining.is_zero() {
+                break false;
+            }
+            match rx.recv_timeout(debounce.min(remaining)) {
+                Ok(event) => batch.push(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => break false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break true,
+            }
+        };
+        if disconnected {
+            return;
+        }
+        for event in convert(batch, roots) {
+            sink(event);
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -237,11 +264,14 @@ fn exists_kind(path: &Path) -> FsEventKind {
     }
 }
 
-fn convert(result: DebounceEventResult, roots: &[PathBuf]) -> Vec<WatchEvent> {
-    let events: Vec<DebouncedEvent> = match result {
-        Ok(events) => events,
-        Err(_) => return vec![WatchEvent::Rescan],
-    };
+fn convert(results: Vec<notify::Result<Event>>, roots: &[PathBuf]) -> Vec<WatchEvent> {
+    let mut events = Vec::with_capacity(results.len());
+    for result in results {
+        match result {
+            Ok(event) => events.push(event),
+            Err(_) => return vec![WatchEvent::Rescan],
+        }
+    }
     let mut batch = Batch::default();
     for event in &events {
         if event.need_rescan() {
@@ -313,20 +343,18 @@ fn convert(result: DebounceEventResult, roots: &[PathBuf]) -> Vec<WatchEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify_debouncer_full::notify::event::{CreateKind, DataChange, Flag, RemoveKind};
-    use notify_debouncer_full::notify::Event;
-    use std::time::Instant;
+    use notify::event::{CreateKind, DataChange, Flag, RemoveKind};
 
     fn roots() -> Vec<PathBuf> {
         vec![PathBuf::from("/repo")]
     }
 
-    fn event(kind: EventKind, paths: &[&str]) -> DebouncedEvent {
+    fn event(kind: EventKind, paths: &[&str]) -> notify::Result<Event> {
         let mut event = Event::new(kind);
         for path in paths {
             event = event.add_path(PathBuf::from(path));
         }
-        DebouncedEvent::new(event, Instant::now())
+        Ok(event)
     }
 
     #[test]
@@ -416,7 +444,7 @@ mod tests {
                 &[&s(".git/objects/12/34")],
             ),
         ];
-        let out = convert(Ok(events), &roots);
+        let out = convert(events, &roots);
         let file = |rel: &str, kind| FsEvent { path: p(rel), kind };
         assert_eq!(
             out,
@@ -439,10 +467,10 @@ mod tests {
     #[test]
     fn errors_and_rescan_flags_become_rescan() {
         let roots = roots();
-        assert_eq!(convert(Err(vec![]), &roots), vec![WatchEvent::Rescan]);
-        let mut flagged = event(EventKind::Other, &[]);
-        flagged.event = flagged.event.clone().set_flag(Flag::Rescan);
-        assert_eq!(convert(Ok(vec![flagged]), &roots), vec![WatchEvent::Rescan]);
-        assert_eq!(convert(Ok(vec![]), &roots), vec![]);
+        let error = Err(notify::Error::generic("queue overflow"));
+        assert_eq!(convert(vec![error], &roots), vec![WatchEvent::Rescan]);
+        let flagged = Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan));
+        assert_eq!(convert(vec![flagged], &roots), vec![WatchEvent::Rescan]);
+        assert_eq!(convert(vec![], &roots), vec![]);
     }
 }

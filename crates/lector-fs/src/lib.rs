@@ -31,7 +31,7 @@ pub use lector_text::Text;
 pub enum Error {
     /// The OS file watcher failed.
     #[error("file watcher error: {0}")]
-    Notify(#[from] notify_debouncer_full::notify::Error),
+    Notify(#[from] notify::Error),
     /// An I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
