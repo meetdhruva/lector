@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "A fast, reading-first code viewer and git review tool."
+homepage = "https://github.com/meetdhruva/lector"
+readme = "../../README.md"
+keywords = ["editor", "code-viewer", "git", "code-review", "gui"]
+categories = ["development-tools", "text-editors"]
+build = "build.rs"
 
 [[bin]]
 name = "lector"
@@ -23,3 +28,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive"] }
 dirs.workspace = true
+futures = "0.3"
+url = "2"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

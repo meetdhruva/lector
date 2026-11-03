@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.meetdhruva.Lector</id>
+  <name>Lector</name>
+  <summary>Fast, reading-first code viewer and git review tool</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="io.github.meetdhruva">
+    <name>Lector contributors</name>
+  </developer>
+  <description>
+    <p>
+      Lector is built for reading and reviewing code rather than typing it: understanding
+      an unfamiliar codebase, following definitions, and reviewing changes made by people
+      or AI agents. It never modifies your files or repositories.
+    </p>
+    <ul>
+      <li>Tree-sitter highlighting, sticky scroll, breadcrumbs, outline and symbol search</li>
+      <li>Go to definition, references and hover via language servers or built-in tags</li>
+      <li>Side-by-side and unified diffs, review checklists, history graph and blame</li>
+      <li>Fuzzy file finder, project search, Markdown and image preview</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.meetdhruva.Lector.desktop</launchable>
+  <url type="homepage">https://github.com/meetdhruva/lector</url>
+  <url type="bugtracker">https://github.com/meetdhruva/lector/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/meetdhruva/lector/main/docs/screenshots/reader-dark.png</image>
+      <caption>Reading code</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/meetdhruva/lector/main/docs/screenshots/diff-split-dark.png</image>
+      <caption>Reviewing a diff</caption>
+    </screenshot>
+  </screenshots>
+  <provides>
+    <binary>lector</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-03">
+      <description><p>First release: a complete read-only reader and git review tool.</p></description>
+    </release>
+  </releases>
+</component>

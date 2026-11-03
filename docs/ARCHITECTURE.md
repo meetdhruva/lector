@@ -405,8 +405,9 @@ pub fn load_settings() -> (Settings, Vec<String> /*warnings*/);   // defaults �
 pub fn default_settings_toml() -> &'static str;   // documented, commented default file
 pub struct KeyBinding { pub keys: String /* "cmd-p" / "ctrl-shift-f" (gpui syntax) */, pub action: String, pub context: Option<String> }
 pub fn default_keymap(platform: Platform) -> Vec<KeyBinding>;   pub fn load_keymap() -> (Vec<KeyBinding>, Vec<String>);
-pub mod paths { pub fn config_dir() -> PathBuf; pub fn data_dir() -> PathBuf; pub fn settings_file() -> PathBuf; pub fn keymap_file() -> PathBuf; pub fn themes_dir() -> PathBuf; pub fn log_file() -> PathBuf; }
+pub mod paths { pub fn portable_root() -> Option<&'static Path> /* <exe dir>/lector-data */; pub fn is_portable() -> bool; pub fn config_dir() -> PathBuf; pub fn data_dir() -> PathBuf; pub fn settings_file() -> PathBuf; pub fn keymap_file() -> PathBuf; pub fn themes_dir() -> PathBuf; pub fn log_file() -> PathBuf; }
 pub struct SessionStore; // load(root) -> Option<Session>, save(root, &Session) — JSON under data_dir/sessions/<hash>.json
+pub struct RecentProjects; // new(), list() -> Vec<PathBuf> (newest first), most_recent_existing(), record(root) — data_dir/recent.json, max 20
 pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is_viewed/set_viewed, persisted JSON
 // Additions (lector-config): `load_settings_for(Option<&Path>)`, `Settings` sub-structs (ThemeSettings, DiffSettings,
 // FileSettings, LspSettings{enabled, servers: BTreeMap<String, ServerOverride{command,args,enabled}>}, GitSettings,

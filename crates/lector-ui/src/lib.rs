@@ -101,7 +101,7 @@ pub fn open_workspace_window(cx: &mut App, request: OpenRequest) -> anyhow::Resu
         }),
         window_min_size: Some(size(px(640.), px(400.))),
         window_decorations: Some(WindowDecorations::Client),
-        app_id: Some("dev.lector.Lector".into()),
+        app_id: Some("io.github.meetdhruva.Lector".into()),
         ..Default::default()
     };
     cx.open_window(options, move |window, cx| {

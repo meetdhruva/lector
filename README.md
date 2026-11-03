@@ -38,6 +38,22 @@ v0.1.0 is **strictly read-only**. It never modifies your files or your repositor
 | ![Split diff](docs/screenshots/diff-split-dark.png) | ![History graph](docs/screenshots/history-graph-dark.png) |
 | ![Review tab](docs/screenshots/review-tab-dark.png) | ![Outline](docs/screenshots/outline-light.png) |
 
+## Download
+
+Get the latest build from [GitHub Releases](https://github.com/meetdhruva/lector/releases/latest):
+
+| Platform | Installers | Portable |
+|---|---|---|
+| Windows x64 / ARM64 | `…-setup.exe` (per-user or all users), `.msi` | `…-portable.zip` |
+| macOS 11+ (universal) | `.dmg` | `.zip` |
+| Linux x86_64 / ARM64 | `.deb`, `.rpm` | `.AppImage`, `.tar.gz` |
+
+Builds are not code-signed yet. On macOS, right-click Lector.app → *Open* on first launch;
+on Windows, SmartScreen may ask you to confirm. Every release includes `SHA256SUMS.txt`.
+
+**Portable mode:** if a `lector-data` folder exists next to the executable, Lector keeps all
+settings and state there (the Windows portable zip ships with it).
+
 ## Install from source
 
 Requires Rust 1.88+ and `git` on `PATH`.
@@ -101,7 +117,8 @@ synchronous, and reusable on its own:
 | `lector-ui`, `lector-ui-git` | GPUI shell, widgets and views |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
-and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements.
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements, and
+[docs/RELEASING.md](docs/RELEASING.md) for how releases are built.
 
 ## Roadmap
 
@@ -118,4 +135,5 @@ and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements.
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 Bundled fonts, icons and grammars keep their own permissive licenses; see
 [assets/THIRD_PARTY.md](assets/THIRD_PARTY.md), `crates/lector-icons/THIRD_PARTY.md`
-and `crates/lector-syntax/GRAMMARS.md`.
+and `crates/lector-syntax/GRAMMARS.md`. Release artifacts also include the full license
+texts of all Rust dependencies (`third-party/CRATES.md`, generated with cargo-about).

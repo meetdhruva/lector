@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Lector
+GenericName=Code Viewer
+Comment=Fast, reading-first code viewer and git review tool
+Exec=lector %F
+TryExec=lector
+Icon=io.github.meetdhruva.Lector
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.meetdhruva.Lector
+Categories=Development;IDE;RevisionControl;
+Keywords=code;viewer;git;diff;review;source;reader;
+MimeType=inode/directory;text/plain;text/markdown;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-java;text/x-python;text/x-rust;text/x-go;text/x-ruby;text/x-php;text/x-shellscript;text/x-csharp;text/x-kotlin;text/x-swift;text/javascript;application/javascript;application/typescript;application/json;application/x-yaml;application/toml;text/html;text/css;text/x-sql;text/x-patch;text/x-diff;

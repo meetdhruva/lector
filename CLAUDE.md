@@ -25,6 +25,15 @@ Read `docs/ARCHITECTURE.md` first: it defines crate boundaries and public API co
 - `vendor/xattr` patches a libc incompatibility in GPUI's dependency tree. Keep it.
 - Run the app headless for screenshots: `scripts/screenshot.sh <path> <out.png>`.
 
+## Commits
+- Every commit is authored and committed as
+  `meetdhruva <268780292+meetdhruva@users.noreply.github.com>` (set in the repo's git config).
+  Do not add `Co-Authored-By`, session links or any other identity to commit messages.
+
+## Releases
+- See `docs/RELEASING.md`. Packaging lives in `packaging/` and `scripts/package-*.{sh,ps1}`;
+  `.github/workflows/release.yml` builds every artifact when a `v*` tag is pushed.
+
 ## Style
 - `cargo fmt`; `cargo clippy -p <crate> -- -D warnings` should pass.
 - Prefer clear names over comments; doc-comment every public item.

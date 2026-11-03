@@ -1,0 +1,262 @@
+name: Release
+
+# Builds every release artifact and publishes a GitHub release.
+#   - push a tag `vX.Y.Z` (the version must match `workspace.package.version`), or
+#   - run manually (Actions → Release → Run workflow) with a tag; the tag is created
+#     at the selected commit if it does not exist yet.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.0"
+        required: true
+      draft:
+        description: "Create the release as a draft"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          CARGO_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag $TAG does not match workspace version $CARGO_VERSION"
+            exit 1
+          fi
+          PRERELEASE=false
+          case "$VERSION" in *-*) PRERELEASE=true ;; esac
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Third-party crate licenses
+        run: cargo about generate --workspace about.hbs -o THIRD_PARTY_CRATES.md
+      - name: Release notes
+        run: scripts/release-notes.sh "${{ steps.meta.outputs.version }}" > RELEASE_NOTES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-meta
+          path: |
+            THIRD_PARTY_CRATES.md
+            RELEASE_NOTES.md
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 (glibc 2.35) keeps the binaries compatible with older distributions.
+          - arch: x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist-${{ matrix.target }}
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev libssl-dev rpm desktop-file-utils
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-meta
+          path: target
+      - name: Build
+        run: cargo build --locked --profile dist -p lector --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          BIN=target/${{ matrix.target }}/dist/lector
+          "$BIN" --version | grep -F "${{ needs.prepare.outputs.version }}"
+          desktop-file-validate packaging/linux/io.github.meetdhruva.Lector.desktop
+      - name: appimagetool
+        run: |
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.arch }}.AppImage"
+          chmod +x appimagetool
+      - name: Package
+        env:
+          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
+        run: |
+          scripts/package-linux.sh target/${{ matrix.target }}/dist/lector \
+            "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" dist
+          ls -la dist
+      - name: Verify packages
+        run: |
+          dpkg-deb --info dist/*.deb
+          rpm -qip dist/*.rpm
+          APPIMAGE="$(ls dist/*.AppImage)"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --version | grep -F "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist-macos-universal
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-meta
+          path: target
+      - name: Build (Apple Silicon)
+        run: cargo build --locked --profile dist -p lector --target aarch64-apple-darwin
+      - name: Build (Intel)
+        run: cargo build --locked --profile dist -p lector --target x86_64-apple-darwin
+      - name: Universal binary
+        run: |
+          mkdir -p target/universal
+          lipo -create -output target/universal/lector \
+            target/aarch64-apple-darwin/dist/lector target/x86_64-apple-darwin/dist/lector
+          lipo -info target/universal/lector
+          target/universal/lector --version | grep -F "${{ needs.prepare.outputs.version }}"
+      - name: Package
+        run: |
+          scripts/package-macos.sh target/universal/lector "${{ needs.prepare.outputs.version }}" universal dist
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-universal
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          # Cross-compiled on the x64 runner (MSVC ships the ARM64 toolset).
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist-${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-meta
+          path: target
+      - name: Build
+        run: cargo build --locked --profile dist -p lector --target ${{ matrix.target }}
+      - name: Smoke test
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $out = (& "target\${{ matrix.target }}\dist\lector.exe" --version | Out-String)
+          Write-Host $out
+          if ($out -notmatch [regex]::Escape("${{ needs.prepare.outputs.version }}")) { throw "unexpected version output" }
+      - name: Installer tools
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add --global WixToolset.UI.wixext/5.0.2
+      - name: Package
+        shell: pwsh
+        run: |
+          pwsh scripts/package-windows.ps1 -Binary "target\${{ matrix.target }}\dist\lector.exe" `
+            -Version "${{ needs.prepare.outputs.version }}" -Arch ${{ matrix.arch }} -OutDir dist
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [prepare, linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-meta
+          path: meta
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Lector ${{ needs.prepare.outputs.version }}
+          body_path: meta/RELEASE_NOTES.md
+          draft: ${{ github.event.inputs.draft == 'true' }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: dist/*

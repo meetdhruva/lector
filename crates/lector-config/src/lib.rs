@@ -8,11 +8,13 @@
 mod atomic;
 mod keymap;
 pub mod paths;
+mod recent;
 mod review;
 mod session;
 mod settings;
 
 pub use keymap::{default_keymap, load_keymap, merge_keymap, KeyBinding, Platform};
+pub use recent::{RecentProjects, MAX_RECENT_PROJECTS};
 pub use review::{content_hash, ReviewStore};
 pub use session::{Axis, PaneState, Session, SessionStore, TabKind, TabState, WindowBounds};
 pub use settings::{

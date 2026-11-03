@@ -669,6 +669,11 @@ impl Workspace {
                         let (settings, _) = lector_config::load_settings_for(Some(&root));
                         match Project::open(&root, settings) {
                             Ok(project) => {
+                                if let Err(err) =
+                                    lector_config::RecentProjects::new().record(project.root())
+                                {
+                                    tracing::warn!("cannot record recent project: {err}");
+                                }
                                 this.save_session_now(cx);
                                 let ws = cx.new(|cx| Workspace::new(project, window, cx));
                                 ws.update(cx, |ws, cx| {

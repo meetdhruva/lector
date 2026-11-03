@@ -15,6 +15,11 @@ First release: a complete read-only reader and git review tool.
 - Safety: never writes to user files or repositories; language servers are started
   with options that keep them from writing into the project (see docs/PERFORMANCE.md
   and the read-only regression test in `crates/lector-workspace/tests/release_audit.rs`).
+- Distribution: GitHub releases for Windows (x64, ARM64: setup.exe, MSI, portable zip),
+  macOS (universal .dmg and .zip) and Linux (x86_64, ARM64: .deb, .rpm, AppImage, tarball),
+  with an app icon, desktop integration ("Open with Lector", file associations, PATH),
+  portable mode, a welcome project for first launch, reopening the last project when
+  started from a launcher, SHA-256 checksums and bundled third-party licenses.
 
 Known limitations: fuzzy finder misses its 50 ms gate at 1M paths on 2-core machines;
 cold open of 1 GB files is disk-bound; no accessibility support yet (planned for 0.4).

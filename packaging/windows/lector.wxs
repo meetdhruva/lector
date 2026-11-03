@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX Toolset v5 package for Lector. Built by scripts/package-windows.ps1:
+     wix build lector.wxs -arch x64 -ext WixToolset.UI.wixext
+       -d Version=0.1.0 -d SourceDir=<staging> -o Lector-0.1.0-windows-x64.msi -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Lector"
+           Manufacturer="Lector contributors"
+           Version="$(Version)"
+           UpgradeCode="A35E95B4-1468-4BC2-8CAB-9BF3D304937F"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="Lector — reading-first code viewer and git review tool" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Lector is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="LectorIcon" SourceFile="$(SourceDir)\lector.ico" />
+    <Property Id="ARPPRODUCTICON" Value="LectorIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/meetdhruva/lector" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/meetdhruva/lector/issues" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Lector">
+        <Directory Id="ThirdPartyFolder" Name="third-party" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="LectorExe">
+        <File Id="LectorExeFile" Source="$(SourceDir)\lector.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Lector"
+                    Description="Reading-first code viewer" WorkingDirectory="INSTALLFOLDER"
+                    Icon="LectorIcon" Advertise="yes" />
+        </File>
+      </Component>
+      <Component Id="Docs">
+        <File Source="$(SourceDir)\README.md" KeyPath="yes" />
+        <File Source="$(SourceDir)\CHANGELOG.md" />
+        <File Source="$(SourceDir)\LICENSE-MIT" />
+        <File Source="$(SourceDir)\LICENSE-APACHE" />
+      </Component>
+      <Component Id="PathEnvironment" Guid="5F8E0C2A-4D1B-4E8F-9A3C-2B6D7E1F0A94">
+        <Environment Id="LectorPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no"
+                     Part="last" Action="set" System="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Lector" Name="InstallDir" Type="string"
+                       Value="[INSTALLFOLDER]" KeyPath="yes" />
+      </Component>
+      <Component Id="ContextMenu" Guid="8B2D4F6A-1C3E-4A5B-8D7F-9E0A1B2C3D4E">
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\Lector" Type="string"
+                       Value="Open with Lector" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\Lector" Name="Icon"
+                       Type="string" Value="[INSTALLFOLDER]lector.exe" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\Lector\command"
+                       Type="string" Value="&quot;[INSTALLFOLDER]lector.exe&quot; &quot;%1&quot;" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\Lector"
+                       Type="string" Value="Open with Lector" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\Lector"
+                       Name="Icon" Type="string" Value="[INSTALLFOLDER]lector.exe" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\Lector\command"
+                       Type="string" Value="&quot;[INSTALLFOLDER]lector.exe&quot; &quot;%V&quot;" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\lector.exe"
+                       Name="FriendlyAppName" Type="string" Value="Lector" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\lector.exe\shell\open\command"
+                       Type="string" Value="&quot;[INSTALLFOLDER]lector.exe&quot; &quot;%1&quot;" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="ThirdPartyFiles" Directory="ThirdPartyFolder">
+      <Files Include="$(SourceDir)\third-party\**" />
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Lector" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="ThirdPartyFiles" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(SourceDir)\LICENSE.rtf" />
+  </Package>
+</Wix>

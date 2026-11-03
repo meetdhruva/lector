@@ -69,3 +69,12 @@ debug = false
 lto = "thin"
 codegen-units = 16
 debug = "line-tables-only"
+
+# Release artifacts: smaller, faster binaries (used by .github/workflows/release.yml).
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = true
+panic = "unwind"

@@ -224,6 +224,7 @@ fn repository_is_byte_identical_after_reading() {
     );
 }
 
+#[cfg(unix)]
 fn project_load_rejects(root: &Path, rel: &str) -> bool {
     if !root.join(rel).exists() {
         return true;
