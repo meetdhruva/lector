@@ -136,3 +136,42 @@ fn dropping_the_watcher_stops_events() {
     }
     drop(_dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinks_are_not_followed_into_large_trees() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().expect("canonicalize");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    // A loop and a link to the filesystem root must not be crawled.
+    std::os::unix::fs::symlink(&root, root.join("src/loop")).expect("symlink");
+    std::os::unix::fs::symlink("/", root.join("rootfs")).expect("symlink");
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let _watcher = watch(&root, Duration::from_millis(50), move |event| {
+        let _ = tx.send(event);
+    })
+    .expect("watch");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "watch setup took {:?}",
+        started.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let file = root.join("src/a.rs");
+    std::fs::write(&file, "x").expect("write");
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("timed out waiting for the create event");
+        let event = rx.recv_timeout(remaining).expect("event");
+        if has_file(
+            &event,
+            &file,
+            &[FsEventKind::Created, FsEventKind::Modified],
+        ) {
+            break;
+        }
+    }
+}

@@ -102,7 +102,13 @@ impl Document {
             let first_line = if t.is_empty() {
                 None
             } else {
-                let l = t.line(0);
+                // Only look at a bounded prefix: the first line of a minified or
+                // mapped file can be gigabytes long.
+                let head_end = t
+                    .line_range(0)
+                    .end
+                    .min(t.clip_offset(t.len().min(4096), Bias::Left));
+                let l = t.text_for_range(0..head_end);
                 let end = l.char_indices().nth(256).map_or(l.len(), |(i, _)| i);
                 Some(l[..end].to_string())
             };

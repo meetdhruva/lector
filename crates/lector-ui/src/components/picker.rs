@@ -207,10 +207,13 @@ impl<D: PickerDelegate> Picker<D> {
         )
         .track_scroll(self.scroll_handle.clone())
         .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
-        .py(px(4.))
-        .max_h(px(420.));
+        .max_h(px(412.));
+        // The vertical padding lives on the wrapper: padding on an inferred-height
+        // uniform list makes its content a few pixels taller than the viewport, which
+        // showed a scrollbar (and allowed a tiny scroll) even for two matches.
         div()
             .relative()
+            .py(px(4.))
             .child(list)
             .child(vertical_scrollbar(
                 "picker-scrollbar",

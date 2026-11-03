@@ -45,6 +45,9 @@ impl GitCli {
                 "core.quotepath=off",
                 "-c",
                 "log.showSignature=false",
+                // Never run a repository-configured fsmonitor hook.
+                "-c",
+                "core.fsmonitor=false",
             ])
             .args(&args)
             .env("GIT_OPTIONAL_LOCKS", "0")
@@ -107,6 +110,13 @@ impl Repo {
         let cli = self.cli()?;
         let mut args: Vec<&str> = vec!["blame", "--porcelain"];
         if let Some(rev) = rev {
+            if rev.starts_with('-') {
+                // Would be parsed as an option (e.g. `--contents=<file>`).
+                return Err(Error::InvalidRevision {
+                    rev: rev.to_owned(),
+                    message: "revisions cannot start with '-'".into(),
+                });
+            }
             args.push(rev);
         }
         args.push("--");

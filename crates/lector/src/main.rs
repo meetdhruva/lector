@@ -112,6 +112,7 @@ fn load_themes(cli: &Cli) -> (ThemeRegistry, ThemeMode) {
 }
 
 fn main() -> anyhow::Result<()> {
+    lector_ui::startup::mark_process_start();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -130,6 +131,7 @@ fn main() -> anyhow::Result<()> {
         (settings, warnings, project)
     });
     let (registry, mode) = load_themes(&cli);
+    lector_ui::startup::log("themes loaded");
 
     Application::new()
         .with_assets(lector_ui::assets::Assets)
@@ -147,12 +149,15 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             }
+            lector_ui::startup::log("app ready, project open");
             lector_ui::init(cx, registry, mode, (settings, warnings));
             lector_ui_git::init(cx);
+            lector_ui::startup::log("ui initialized");
             if let Err(err) = lector_ui::open_workspace_window(cx, request) {
                 eprintln!("lector: failed to open window: {err:#}");
                 cx.quit();
             }
+            lector_ui::startup::log("window opened");
         });
     Ok(())
 }

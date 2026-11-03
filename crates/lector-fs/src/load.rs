@@ -64,6 +64,13 @@ pub fn load_file(path: &Path, mmap_threshold: u64) -> io::Result<LoadedFile> {
             lossy: false,
         });
     }
+    if !metadata.is_file() {
+        // FIFOs, sockets and devices: reading could block forever or never end.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
     let size = metadata.len();
 
     if size >= mmap_threshold {
@@ -115,6 +122,20 @@ fn binary(kind: FileKind, size: u64) -> LoadedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_rejected_without_blocking() {
+        let err = load_file(Path::new("/dev/zero"), u64::MAX).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            let err = load_file(&fifo, 1024).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
 
     fn write(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join(name);

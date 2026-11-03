@@ -24,7 +24,12 @@ fn time<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 #[ignore]
 fn status_on_50k_files() {
     let fx = Fixture::new();
-    for dir in 0..500 {
+    // LECTOR_PERF_STATUS_DIRS=850 gives a Linux-kernel-sized tree (85k files).
+    let dirs: usize = std::env::var("LECTOR_PERF_STATUS_DIRS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    for dir in 0..dirs {
         for file in 0..100 {
             fx.write(
                 &format!("d{dir:03}/sub/f{file:03}.txt"),
@@ -49,7 +54,8 @@ fn status_on_50k_files() {
     let (wt, wt_time) = time(|| repo.changes(&Changeset::WorkingTree).unwrap());
     assert_eq!(wt.len(), 8);
     println!(
-        "status 50k files: first {:?}, median {:?} (git status: {:?}); WorkingTree changes {:?}",
+        "status {}k files: first {:?}, median {:?} (git status: {:?}); WorkingTree changes {:?}",
+        dirs / 10,
         first,
         median(samples),
         git_time,

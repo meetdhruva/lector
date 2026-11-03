@@ -6,9 +6,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use notify_debouncer_full::notify::event::{AccessKind, MetadataKind, ModifyKind, RenameMode};
-use notify_debouncer_full::notify::{EventKind, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
 };
 
 use crate::{Error, Result};
@@ -74,11 +74,20 @@ pub fn watch(
             roots.push(canonical);
         }
     }
-    let mut debouncer = new_debouncer(debounce, None, move |result: DebounceEventResult| {
-        for event in convert(result, &roots) {
-            sink(event);
-        }
-    })
+    // Don't follow symlinks (like the walker): a link to `/` or `$HOME` inside the
+    // project would otherwise make the watcher crawl and watch that whole tree.
+    let config = notify::Config::default().with_follow_symlinks(false);
+    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
+        debounce,
+        None,
+        move |result: DebounceEventResult| {
+            for event in convert(result, &roots) {
+                sink(event);
+            }
+        },
+        RecommendedCache::new(),
+        config,
+    )
     .map_err(Error::Notify)?;
     debouncer
         .watch(root, RecursiveMode::Recursive)

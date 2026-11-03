@@ -130,3 +130,43 @@ fn time_to_first_results_200k_paths() {
     assert!(!visible.is_empty());
     assert!(visible[0].indices.len() >= 5);
 }
+
+/// Release gate: fuzzy file finder over 1M paths, first results < 50 ms.
+/// `cargo test -p lector-search --release --test picker -- --ignored --nocapture`
+#[test]
+#[ignore = "release-gate measurement; run explicitly in release mode"]
+fn release_gate_1m_paths() {
+    let paths = synthetic(1_000_000);
+    let mut p: Picker<String> = Picker::new_for_paths(Arc::new(|| {}));
+    let inj = p.injector();
+    let t0 = Instant::now();
+    for s in &paths {
+        inj.push(s.clone(), s);
+    }
+    let inject = t0.elapsed();
+    // Let the empty query settle (the finder is open before typing).
+    p.set_query("");
+    settle(&mut p);
+    assert_eq!(p.total_count(), 1_000_000);
+    let mut report = Vec::new();
+    // Type a query keystroke by keystroke, like the finder does. nucleo publishes a
+    // snapshot only when a matching pass completes, so the time until `tick` stops
+    // running is the time to the first results for that query.
+    let query = "crate mod12";
+    for end in 1..=query.len() {
+        let q = &query[..end];
+        let t = Instant::now();
+        p.set_query(q);
+        while p.tick(1) {
+            assert!(t.elapsed() < Duration::from_secs(20));
+        }
+        p.tick(1);
+        let top = p.matches(0..50);
+        assert!(!top.is_empty());
+        report.push((q.to_string(), t.elapsed(), p.matched_count()));
+    }
+    println!("picker 1M paths: inject {inject:?}");
+    for (q, results, n) in &report {
+        println!("  {q:>12}: results {results:?}, matched {n}");
+    }
+}

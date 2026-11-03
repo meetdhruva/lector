@@ -24,6 +24,7 @@ pub mod markdown;
 pub mod menus;
 pub mod os;
 pub mod settings;
+pub mod startup;
 pub mod theme;
 pub mod views;
 

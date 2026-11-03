@@ -11,7 +11,9 @@ mod error;
 mod manager;
 mod types;
 
-pub use config::{builtin_servers, which, ServerConfig};
+pub use config::{
+    builtin_servers, read_only_settings, which, writes_to_project, ServerConfig, WRITES_TO_PROJECT,
+};
 pub use error::{LspError, Result};
 pub use lector_text::PointUtf16;
 pub use manager::{LspManager, LspOptions, ServerState, ServerStatus};

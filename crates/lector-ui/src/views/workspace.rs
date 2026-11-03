@@ -1277,7 +1277,10 @@ pub struct WorkspaceRoot {
 
 impl Render for WorkspaceRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.workspace.clone())
+        div()
+            .size_full()
+            .child(self.workspace.clone())
+            .children(crate::startup::first_paint_probe())
     }
 }
 

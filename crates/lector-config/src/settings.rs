@@ -346,6 +346,10 @@ large_file_threshold_mb = 32
 [lsp]
 # Use language servers (hover, go to definition, references, symbols).
 enabled = true
+# Lector never writes to your project, so servers that build into the project
+# directory (jdtls, kotlin-language-server, sourcekit-lsp, csharp-ls) only start
+# with `enabled = true`, and rust-analyzer runs without dependency resolution,
+# build scripts or `cargo check` (they would write Cargo.lock / target/).
 # Per-server overrides, keyed by server name. Example:
 # [lsp.servers.rust-analyzer]
 # command = "/opt/ra/rust-analyzer"

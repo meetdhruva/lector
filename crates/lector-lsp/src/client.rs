@@ -27,6 +27,8 @@ struct Shared {
     pending: Mutex<HashMap<i64, Pending>>,
     closed: AtomicBool,
     root_uri: String,
+    /// `workspace/configuration` section name and value (read-only settings).
+    settings: Option<(String, Value)>,
 }
 
 impl Shared {
@@ -105,6 +107,7 @@ impl Client {
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             root_uri,
+            settings: crate::config::read_only_settings(label).map(|v| (label.to_string(), v)),
         });
 
         let name = label.to_string();
@@ -308,7 +311,12 @@ fn read_loop<R: BufRead>(mut r: R, shared: &Shared, name: &str) {
         let id = msg.get("id");
         match (method, id) {
             (Some(method), Some(id)) => {
-                let result = handle_server_request(method, msg.get("params"), &shared.root_uri);
+                let result = handle_server_request(
+                    method,
+                    msg.get("params"),
+                    &shared.root_uri,
+                    shared.settings.as_ref(),
+                );
                 let reply = match result {
                     Some(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
                     None => json!({"jsonrpc": "2.0", "id": id,
@@ -342,14 +350,33 @@ fn read_loop<R: BufRead>(mut r: R, shared: &Shared, name: &str) {
 }
 
 /// Minimal answers to server → client requests; `None` = unsupported.
-fn handle_server_request(method: &str, params: Option<&Value>, root_uri: &str) -> Option<Value> {
+fn handle_server_request(
+    method: &str,
+    params: Option<&Value>,
+    root_uri: &str,
+    settings: Option<&(String, Value)>,
+) -> Option<Value> {
     match method {
         "workspace/configuration" => {
-            let n = params
+            let items = params
                 .and_then(|p| p.get("items"))
                 .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            Some(Value::Array(vec![Value::Null; n]))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            Some(Value::Array(
+                items
+                    .iter()
+                    .map(|item| match settings {
+                        Some((section, value))
+                            if item.get("section").and_then(Value::as_str)
+                                == Some(section.as_str()) =>
+                        {
+                            value.clone()
+                        }
+                        _ => Value::Null,
+                    })
+                    .collect(),
+            ))
         }
         "workspace/workspaceFolders" => Some(json!([{"uri": root_uri, "name": "root"}])),
         "client/registerCapability"
@@ -383,5 +410,30 @@ fn handle_notification(method: &str, params: Option<&Value>, name: &str) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_configuration_answers_own_section() {
+        let settings = ("rust-analyzer".to_string(), json!({"checkOnSave": false}));
+        let params = json!({"items": [{"section": "rust-analyzer"}, {"section": "other"}, {}]});
+        let reply = handle_server_request(
+            "workspace/configuration",
+            Some(&params),
+            "file:///r",
+            Some(&settings),
+        )
+        .expect("reply");
+        assert_eq!(reply, json!([{"checkOnSave": false}, null, null]));
+        let reply =
+            handle_server_request("workspace/configuration", Some(&params), "file:///r", None)
+                .expect("reply");
+        assert_eq!(reply, json!([null, null, null]));
+        // Edits are never applied.
+        assert!(handle_server_request("workspace/applyEdit", None, "file:///r", None).is_none());
     }
 }

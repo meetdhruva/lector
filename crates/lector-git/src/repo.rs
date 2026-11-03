@@ -281,7 +281,9 @@ pub(crate) fn read_worktree_file(path: &Path) -> Result<Option<Vec<u8>>> {
         let target = gix::path::into_bstr(target).git()?;
         return Ok(Some(target.into_owned().into()));
     }
-    if meta.is_dir() {
+    if !meta.is_file() {
+        // Directories (e.g. submodules) and special files (FIFOs, sockets) have no
+        // readable blob content; reading a FIFO would block forever.
         return Ok(None);
     }
     match std::fs::read(path) {

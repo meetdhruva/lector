@@ -366,6 +366,12 @@ pub enum SymbolKind { File, Module, Namespace, Package, Class, Method, Property,
 // LspError / Result<T>; futures are Send + 'static. Languages: "Rust","TypeScript","TSX","JavaScript","Python",...
 // Config order = priority: the first config for a language whose command is on PATH is used (pyright, then pylsp).
 // Per-server overrides from lector-config (`lsp.servers.<name>`) are applied by the caller to `ServerConfig`s.
+// Read-only (v0.1): `read_only_settings(name) -> Option<serde_json::Value>` is sent as `initializationOptions`
+// and answers `workspace/configuration` for section `name` (rust-analyzer: cargo.noDeps, no build scripts /
+// proc macros / checkOnSave / cache priming — `cargo metadata` would create or update Cargo.lock, builds write
+// target/); clangd runs with `--background-index=false` (.cache/clangd); `WRITES_TO_PROJECT` /
+// `writes_to_project(name)` (jdtls, kotlin-language-server, sourcekit-lsp, csharp-ls) are only started by
+// lector-workspace when `lsp.servers.<name>.enabled = true`. `workspace/applyEdit` is never honored.
 ```
 
 ### lector-fs
@@ -380,6 +386,7 @@ pub fn is_binary(head: &[u8]) -> bool;                       // NUL or >10% cont
 pub fn load_file(path: &Path, mmap_threshold: u64) -> io::Result<LoadedFile>;  // >= threshold → Text::Mapped
                                                              // (except UTF-16-BOM files, which are decoded)
 pub fn decode(bytes: &[u8]) -> (String, &'static str /*encoding*/, bool /*lossy*/);  // UTF-8, UTF-16 BOM, latin1 fallback
+// load_file: non-regular files (FIFOs, sockets, devices) → Err(InvalidInput) instead of blocking.
 pub enum FsEventKind { Created, Modified, Removed }
 pub struct FsEvent { pub path: PathBuf, pub kind: FsEventKind }   // absolute paths, deduped per batch
 pub enum WatchEvent { Files(Vec<FsEvent>), GitStateChanged /* .git/HEAD, index, refs, packed-refs, *_HEAD */, Rescan }
@@ -388,7 +395,8 @@ pub fn watch(root: &Path, debounce: Duration, sink: impl Fn(WatchEvent) + Send +
 pub enum Error { Notify(notify::Error), Io(io::Error) }   // thiserror; `Result<T> = Result<T, Error>`
 ```
 Per debounced batch the sink gets either `Rescan` alone, or `Files` (if any) followed by
-`GitStateChanged` (if any). The sink runs on the watcher's background thread.
+`GitStateChanged` (if any). The sink runs on the watcher's background thread. Symlinks are not
+followed (like the walker), so a link to `/` or a symlink loop cannot make the watch crawl or fail.
 
 ### lector-config
 ```rust

@@ -223,7 +223,7 @@ impl Slot {
                 return;
             }
         };
-        let params = json!({
+        let mut params = json!({
             "processId": std::process::id(),
             "clientInfo": {"name": "lector", "version": env!("CARGO_PKG_VERSION")},
             "rootUri": self.root_uri,
@@ -231,6 +231,9 @@ impl Slot {
             "capabilities": client_capabilities(),
             "trace": "off",
         });
+        if let Some(options) = crate::config::read_only_settings(&self.config.name) {
+            params["initializationOptions"] = options;
+        }
         let res = futures::executor::block_on(client.request_with_timeout(
             "initialize",
             params,

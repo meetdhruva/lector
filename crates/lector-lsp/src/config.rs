@@ -66,7 +66,8 @@ pub fn builtin_servers() -> Vec<ServerConfig> {
         cfg(
             "clangd",
             "clangd",
-            &[],
+            // The background index is stored in `<project>/.cache/clangd`.
+            &["--background-index=false"],
             &["C", "C++"],
             &[
                 "compile_commands.json",
@@ -162,6 +163,39 @@ pub fn builtin_servers() -> Vec<ServerConfig> {
     ]
 }
 
+/// Built-in servers that build or index the project into its own directory as
+/// part of normal operation (jdtls: `.project`/`.classpath`/`.settings`; Gradle's
+/// `.gradle/`; SwiftPM's `.build/`; MSBuild's `obj/`). Lector v0.1 is read-only, so
+/// callers should only start these when the user enables them explicitly.
+pub const WRITES_TO_PROJECT: &[&str] = &[
+    "jdtls",
+    "kotlin-language-server",
+    "sourcekit-lsp",
+    "csharp-ls",
+];
+
+/// Whether the built-in server `name` writes into the project (see [`WRITES_TO_PROJECT`]).
+pub fn writes_to_project(name: &str) -> bool {
+    WRITES_TO_PROJECT.contains(&name)
+}
+
+/// Settings that keep the built-in server `name` from writing into the project,
+/// sent as `initializationOptions` and as the answer to `workspace/configuration`
+/// for the section `name`. rust-analyzer: no dependency resolution (`cargo metadata`
+/// would create or update `Cargo.lock`), no build scripts or proc macros and no
+/// `cargo check` (they build into `target/`).
+pub fn read_only_settings(name: &str) -> Option<serde_json::Value> {
+    match name {
+        "rust-analyzer" => Some(serde_json::json!({
+            "cargo": { "noDeps": true, "buildScripts": { "enable": false } },
+            "procMacro": { "enable": false },
+            "checkOnSave": false,
+            "cachePriming": { "enable": false },
+        })),
+        _ => None,
+    }
+}
+
 fn is_executable(p: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(p) else {
         return false;
@@ -224,6 +258,26 @@ pub(crate) fn language_id(language: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_server_settings() {
+        let ra = read_only_settings("rust-analyzer").expect("rust-analyzer settings");
+        assert_eq!(ra["cargo"]["noDeps"], true);
+        assert_eq!(ra["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(ra["checkOnSave"], false);
+        assert!(read_only_settings("gopls").is_none());
+        let clangd = builtin_servers()
+            .into_iter()
+            .find(|c| c.name == "clangd")
+            .expect("clangd");
+        assert!(clangd
+            .args
+            .contains(&"--background-index=false".to_string()));
+        for name in WRITES_TO_PROJECT {
+            assert!(builtin_servers().iter().any(|c| c.name == *name), "{name}");
+        }
+        assert!(writes_to_project("jdtls") && !writes_to_project("rust-analyzer"));
+    }
 
     #[test]
     fn builtins_cover_languages() {

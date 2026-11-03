@@ -222,10 +222,14 @@ impl std::fmt::Debug for Project {
 fn lsp_configs(settings: &Settings) -> Vec<ServerConfig> {
     let mut out = Vec::new();
     for mut cfg in lector_lsp::builtin_servers() {
-        if let Some(o) = settings.lsp.servers.get(&cfg.name) {
-            if o.enabled == Some(false) {
-                continue;
-            }
+        let o = settings.lsp.servers.get(&cfg.name);
+        let enabled = o.and_then(|o| o.enabled);
+        // Read-only: servers that build into the project directory are opt-in.
+        if enabled == Some(false) || (enabled.is_none() && lector_lsp::writes_to_project(&cfg.name))
+        {
+            continue;
+        }
+        if let Some(o) = o {
             if let Some(c) = &o.command {
                 cfg.command = c.clone();
             }
@@ -599,5 +603,37 @@ impl Project {
             opened.insert(doc.path().to_path_buf(), version);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn servers_that_write_into_the_project_are_opt_in() {
+        let names =
+            |s: &Settings| -> Vec<String> { lsp_configs(s).into_iter().map(|c| c.name).collect() };
+        let mut settings = Settings::default();
+        let default = names(&settings);
+        assert!(default.contains(&"rust-analyzer".to_string()));
+        assert!(!default.contains(&"jdtls".to_string()));
+        settings.lsp.servers.insert(
+            "jdtls".into(),
+            lector_config::ServerOverride {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        settings.lsp.servers.insert(
+            "gopls".into(),
+            lector_config::ServerOverride {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        let opted = names(&settings);
+        assert!(opted.contains(&"jdtls".to_string()));
+        assert!(!opted.contains(&"gopls".to_string()));
     }
 }
