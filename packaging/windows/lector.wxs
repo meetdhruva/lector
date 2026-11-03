@@ -34,11 +34,18 @@
                     Icon="LectorIcon" Advertise="yes" />
         </File>
       </Component>
-      <Component Id="Docs">
+      <!-- One component per unversioned file so WiX can generate stable GUIDs. -->
+      <Component Id="Readme">
         <File Source="$(SourceDir)\README.md" KeyPath="yes" />
-        <File Source="$(SourceDir)\CHANGELOG.md" />
-        <File Source="$(SourceDir)\LICENSE-MIT" />
-        <File Source="$(SourceDir)\LICENSE-APACHE" />
+      </Component>
+      <Component Id="Changelog">
+        <File Source="$(SourceDir)\CHANGELOG.md" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseMit">
+        <File Source="$(SourceDir)\LICENSE-MIT" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseApache">
+        <File Source="$(SourceDir)\LICENSE-APACHE" KeyPath="yes" />
       </Component>
       <Component Id="PathEnvironment" Guid="5F8E0C2A-4D1B-4E8F-9A3C-2B6D7E1F0A94">
         <Environment Id="LectorPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no"

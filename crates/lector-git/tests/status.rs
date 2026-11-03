@@ -159,6 +159,8 @@ fn status_conflict_from_failed_merge() {
     assert_eq!(ours, b"main\n");
 }
 
+// Symlinks and the executable bit are Unix concepts (git on Windows ignores both by default).
+#[cfg(unix)]
 #[test]
 fn status_type_change_and_executable_bit() {
     let fx = Fixture::new();
