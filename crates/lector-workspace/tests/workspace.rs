@@ -518,7 +518,7 @@ fn tag_based_definitions_and_references() {
         .map(|r| {
             format!(
                 "{}:{}:{:?}",
-                r.path.strip_prefix(t.path()).unwrap().display(),
+                p.relative_path(&r.path).unwrap(),
                 r.range.start.row,
                 r.source
             )
