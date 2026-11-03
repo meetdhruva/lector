@@ -14,6 +14,13 @@ Releases are built entirely by GitHub Actions (`.github/workflows/release.yml`).
 
 The `prepare` job fails fast if the tag does not match the workspace version.
 
+### Dry runs
+
+Push any `release/**` branch (e.g. `git push origin HEAD:release/v0.2.0`) to build every
+artifact exactly as a release would, without publishing: the files are attached to the
+workflow run as artifacts (`dist-linux-x86_64`, `dist-macos-universal`, ...). CI also runs
+on `release/**` branches, so the full test suite runs on Linux, macOS and Windows first.
+
 ## What gets built
 
 | Job | Runner | Artifacts |
