@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, px, Action, AnyElement, App, Axis, ClipboardItem, CursorStyle, Decorations,
@@ -13,13 +12,16 @@ use gpui::{
 };
 
 use super::command_palette::CommandPaletteDelegate;
-use super::file_finder::{walk_project, FileFinderDelegate};
 use super::go_to_line::GoToLine;
 use super::pane::{new_pane, CodeItem, Pane, PaneEvent, PaneItem, PaneNode};
+use crate::editor::{FileView, Reveal};
+use lector_workspace::Project;
+
+mod integration;
 use super::sidebar::{Sidebar, SidebarPanel};
 use super::theme_selector::ThemeSelectorDelegate;
 use crate::actions::{editor, workspace::*};
-use crate::code_view::{CodeSource, CodeView, CodeViewEvent, EditorSettings, InMemorySource, Pos};
+use crate::code_view::{CodeSource, CodeView, CodeViewEvent, EditorSettings, InMemorySource};
 use crate::components::modal::ModalLayer;
 use crate::components::picker::Picker;
 use crate::components::split::{clamp_width, panel_resize_handle, DraggedPanelEdge};
@@ -30,6 +32,8 @@ use crate::components::{
 use crate::icons::{Icon, IconName, IconSize};
 use crate::keymap::contexts;
 use crate::theme::{ActiveTheme, ColorExt, ThemeState};
+use integration::Integration;
+pub use integration::TabRestorer;
 
 /// Per-file facts shown in the status bar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -109,11 +113,28 @@ pub fn read_git_branch(root: &Path) -> Option<SharedString> {
     None
 }
 
+/// Events emitted by the [`Workspace`] (subscribe with `cx.subscribe`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkspaceEvent {
+    /// The active pane item changed (another tab, pane or file).
+    ActiveItemChanged,
+    /// Files were created/modified/removed on disk (absolute paths).
+    FilesChanged(Vec<PathBuf>),
+    /// `.git` state changed (HEAD, index, refs); git status was refreshed.
+    GitStateChanged,
+    /// Settings were (re)loaded.
+    SettingsChanged,
+}
+
+type ActionRegistration = Box<dyn Fn(gpui::Div, &mut Window, &mut Context<Workspace>) -> gpui::Div>;
+
 /// The workspace root view.
 pub struct Workspace {
+    action_registrations: Vec<ActionRegistration>,
     root: PathBuf,
     name: SharedString,
     branch: Option<SharedString>,
+    branch_status: Option<SharedString>,
     sidebar: Entity<Sidebar>,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -122,14 +143,15 @@ pub struct Workspace {
     modal_layer: Entity<ModalLayer>,
     focus_handle: FocusHandle,
     closed: Vec<PathBuf>,
-    back: Vec<(PathBuf, Pos)>,
-    forward: Vec<(PathBuf, Pos)>,
-    files: Arc<Vec<String>>,
-    file_meta: HashMap<PathBuf, FileMeta>,
+    project: Project,
+    integ: Integration,
     window_title: String,
     lsp_status: SharedString,
+    toast: Option<(SharedString, u64)>,
     _subscriptions: Vec<Subscription>,
 }
+
+impl gpui::EventEmitter<WorkspaceEvent> for Workspace {}
 
 impl Focusable for Workspace {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -138,13 +160,11 @@ impl Focusable for Workspace {
 }
 
 impl Workspace {
-    /// Workspace over the folder `root`.
-    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name: SharedString = root
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| root.display().to_string())
-            .into();
+    /// Workspace over `project` (its root folder). The file tree, git
+    /// status, symbol index and watchers start in the background.
+    pub fn new(project: Project, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let root = project.root().to_path_buf();
+        let name: SharedString = project.name().to_string().into();
         let branch = read_git_branch(&root);
         let sidebar = cx.new(|cx| Sidebar::new(root.clone(), cx));
         let pane = new_pane(Some(root.clone()), cx);
@@ -167,23 +187,14 @@ impl Workspace {
         }));
         ThemeState::sync_with_window(window, cx);
 
-        // Index files in the background for the file finder.
-        let walk_root = root.clone();
-        let index = cx.background_spawn(async move { walk_project(&walk_root) });
-        cx.spawn(async move |this, cx| {
-            let files = index.await;
-            let _ = this.update(cx, |this, cx| {
-                this.files = Arc::new(files);
-                cx.notify();
-            });
-        })
-        .detach();
-
         pane.update(cx, |p, _| p.is_active_pane = true);
-        Workspace {
+        let integ = Integration::new(&project, cx);
+        let mut this = Workspace {
+            action_registrations: Vec::new(),
             root,
             name,
             branch,
+            branch_status: None,
             sidebar,
             sidebar_visible: true,
             sidebar_width: px(272.),
@@ -192,14 +203,65 @@ impl Workspace {
             modal_layer,
             focus_handle: cx.focus_handle(),
             closed: Vec::new(),
-            back: Vec::new(),
-            forward: Vec::new(),
-            files: Arc::new(Vec::new()),
-            file_meta: HashMap::new(),
+            project,
+            integ,
             window_title: String::new(),
             lsp_status: "LSP: off".into(),
+            toast: None,
             _subscriptions: subscriptions,
-        }
+        };
+        this.start_integration(window, cx);
+        this
+    }
+
+    /// Shows a short message ("Permalink copied") above the status bar for
+    /// a few seconds.
+    pub fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let id = self.toast.as_ref().map(|t| t.1 + 1).unwrap_or(0);
+        self.toast = Some((message.into(), id));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast.as_ref().is_some_and(|t| t.1 == id) {
+                    this.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_toast(&self, cx: &App) -> Option<impl IntoElement> {
+        let (message, _) = self.toast.clone()?;
+        let ui = &cx.theme().ui;
+        Some(
+            div()
+                .absolute()
+                .bottom(metrics::STATUS_BAR_HEIGHT + px(12.))
+                .right(px(16.))
+                .px(px(12.))
+                .py(px(7.))
+                .rounded(metrics::RADIUS_LG)
+                .bg(ui.elevated.hsla())
+                .border_1()
+                .border_color(ui.border.hsla())
+                .shadow_lg()
+                .text_size(metrics::TEXT_SM)
+                .text_color(ui.text.hsla())
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .child(
+                            Icon::new(IconName::CircleCheck)
+                                .size(IconSize::Small)
+                                .color(ui.accent.hsla()),
+                        )
+                        .child(message),
+                ),
+        )
     }
 
     fn subscribe_pane(
@@ -227,6 +289,7 @@ impl Workspace {
                     if let Some(path) = path {
                         this.closed.push(path.clone());
                     }
+                    cx.emit(WorkspaceEvent::ActiveItemChanged);
                     cx.notify();
                 }
                 PaneEvent::RevealPath(path) => {
@@ -249,14 +312,40 @@ impl Workspace {
             });
             self.active_pane = pane;
         }
+        cx.emit(WorkspaceEvent::ActiveItemChanged);
         cx.notify();
+    }
+
+    /// Registers a handler for action `A` on the workspace element, so
+    /// extension crates can hook in from `cx.observe_new::<Workspace>(..)`:
+    ///
+    /// ```ignore
+    /// cx.observe_new(|ws: &mut Workspace, _window, _cx| {
+    ///     ws.register_action(|ws, _: &ShowChanges, window, cx| { /* ... */ });
+    /// }).detach();
+    /// ```
+    ///
+    /// Registered handlers run before the workspace's built-in handlers for
+    /// the same action (call `cx.propagate()` to fall through to them).
+    pub fn register_action<A: Action>(
+        &mut self,
+        callback: impl Fn(&mut Workspace, &A, &mut Window, &mut Context<Workspace>) + 'static,
+    ) -> &mut Self {
+        let callback = Rc::new(callback);
+        self.action_registrations
+            .push(Box::new(move |div, _window, cx| {
+                let callback = callback.clone();
+                div.on_action(
+                    cx.listener(move |ws, action: &A, window, cx| callback(ws, action, window, cx)),
+                )
+            }));
+        self
     }
 
     /// The project root.
     pub fn root(&self) -> &Path {
         &self.root
     }
-
     /// The sidebar.
     pub fn sidebar(&self) -> &Entity<Sidebar> {
         &self.sidebar
@@ -270,6 +359,21 @@ impl Workspace {
     /// The active pane.
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active_pane
+    }
+
+    /// Sets the branch shown in the title bar and, optionally, a richer
+    /// status-bar label (e.g. "main ↑2 ↓1"); used by lector-ui-git.
+    pub fn set_branch(
+        &mut self,
+        branch: Option<SharedString>,
+        status_label: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.branch != branch || self.branch_status != status_label {
+            self.branch = branch;
+            self.branch_status = status_label;
+            cx.notify();
+        }
     }
 
     /// Sets the LSP status text shown in the status bar.
@@ -286,7 +390,8 @@ impl Workspace {
             .and_then(|i| i.code_view())
     }
 
-    fn active_path(&self, cx: &App) -> Option<PathBuf> {
+    /// Path of the active item, if it shows a file.
+    pub fn active_path(&self, cx: &App) -> Option<PathBuf> {
         self.active_pane
             .read(cx)
             .active_item()
@@ -313,59 +418,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if path.is_dir() {
-            self.reveal_path(&path, cx);
-            return;
-        }
-        if let (Some(current), Some(view)) = (self.active_path(cx), self.active_code_view(cx)) {
-            if current != path {
-                self.back.push((current, view.read(cx).cursor()));
-                self.forward.clear();
-            }
-        }
-        self.open_path_internal(path, preview, window, cx);
-    }
-
-    fn open_path_internal(
-        &mut self,
-        path: PathBuf,
-        preview: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let title: SharedString = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
-            .into();
-        let pane = self.active_pane.clone();
-        if let Some(ix) = pane.read(cx).index_for_path(&path, cx) {
-            pane.update(cx, |pane, cx| {
-                if !preview {
-                    pane.pin(ix, cx);
-                }
-                pane.activate(ix, true, window, cx);
-            });
-            cx.notify();
-            return;
-        }
-        let (source, meta) = load_source(&path, &title);
-        self.file_meta.insert(path.clone(), meta);
-        let view_path = path.clone();
-        let view = cx.new(|cx| {
-            let mut v = CodeView::new(source, cx);
-            v.set_path(Some(view_path));
-            v
-        });
-        self._subscriptions
-            .push(cx.subscribe(&view, |_, _, event: &CodeViewEvent, cx| {
-                if matches!(event, CodeViewEvent::SelectionChanged) {
-                    cx.notify();
-                }
-            }));
-        let item = Box::new(CodeItem::new(view, Some(path), title));
-        pane.update(cx, |pane, cx| pane.add_item(item, preview, window, cx));
-        cx.notify();
+        self.open_path_with(path, preview, None, true, window, cx);
     }
 
     /// Opens `path` and moves the cursor to 1-based `line`/`col`.
@@ -376,16 +429,16 @@ impl Workspace {
         col: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.open_path(path, false, window, cx);
-        if let (Some(line), Some(view)) = (line, self.active_code_view(cx)) {
-            view.update(cx, |v, cx| {
-                let row = line.saturating_sub(1);
-                let col = col.map(|c| c.saturating_sub(1) as usize).unwrap_or(0);
-                v.set_cursor(Pos::new(row, col), cx);
-                v.scroll_to_row(row, true, cx);
-            });
-        }
+    ) -> Option<Entity<FileView>> {
+        let reveal = line.map(|line| {
+            let col = col.map(|c| c.saturating_sub(1) as usize).unwrap_or(0);
+            Reveal {
+                row: line.saturating_sub(1),
+                cols: col..col,
+                center: true,
+            }
+        });
+        self.open_path_with(path, false, reveal, true, window, cx)
     }
 
     fn reveal_path(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -419,23 +472,6 @@ impl Workspace {
         let previous = window.focused(cx);
         self.toggle_modal(window, cx, move |window, cx| {
             let delegate = CommandPaletteDelegate::new(previous, cx);
-            Picker::new(delegate, window, cx)
-        });
-    }
-
-    fn toggle_file_finder(
-        &mut self,
-        _: &ToggleFileFinder,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let files = self.files.clone();
-        let root = self.root.clone();
-        let this = cx.entity().downgrade();
-        self.toggle_modal(window, cx, move |window, cx| {
-            let delegate = FileFinderDelegate::new(root, files, move |path, window, cx| {
-                let _ = this.update(cx, |ws, cx| ws.open_path(path, false, window, cx));
-            });
             Picker::new(delegate, window, cx)
         });
     }
@@ -492,29 +528,52 @@ impl Workspace {
 
     fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
         let new = new_pane(Some(self.root.clone()), cx);
-        let active = self
-            .active_pane
-            .read(cx)
-            .active_item()
-            .and_then(|i| i.code_view().map(|v| (v, i.path(cx), i.title(cx))));
-        let cloned = active.map(|(view, path, title)| {
-            let source = view.read(cx).source().clone();
-            let selection = view.read(cx).selection();
-            let p = path.clone();
-            let v = cx.new(|cx| {
-                let mut v = CodeView::new(source, cx);
-                v.set_path(p.clone());
-                v.set_selection(selection, cx);
+        let cloned: Option<Box<dyn PaneItem>> = if let Some(file_view) = self.active_file_view(cx) {
+            // A second view of the same file, at the same position.
+            let (path, head) = {
+                let v = file_view.read(cx);
+                (v.path().to_path_buf(), v.code_view().read(cx).cursor())
+            };
+            let project = self.project.clone();
+            let view = cx.new(|cx| {
+                let mut v = FileView::new(path, project, cx);
+                v.reveal(
+                    Reveal {
+                        row: head.row,
+                        cols: head.col..head.col,
+                        center: true,
+                    },
+                    cx,
+                );
                 v
             });
-            self._subscriptions
-                .push(cx.subscribe(&v, |_, _, event: &CodeViewEvent, cx| {
-                    if matches!(event, CodeViewEvent::SelectionChanged) {
-                        cx.notify();
-                    }
-                }));
-            Box::new(CodeItem::new(v, path, title)) as Box<dyn PaneItem>
-        });
+            self.subscribe_file_view(&view, window, cx);
+            Some(Box::new(crate::editor::FileItem::new(view, cx)))
+        } else {
+            let active = self
+                .active_pane
+                .read(cx)
+                .active_item()
+                .and_then(|i| i.code_view().map(|v| (v, i.path(cx), i.title(cx))));
+            active.map(|(view, path, title)| {
+                let source = view.read(cx).source().clone();
+                let selection = view.read(cx).selection();
+                let p = path.clone();
+                let v = cx.new(|cx| {
+                    let mut v = CodeView::new(source, cx);
+                    v.set_path(p.clone());
+                    v.set_selection(selection, cx);
+                    v
+                });
+                self._subscriptions
+                    .push(cx.subscribe(&v, |_, _, event: &CodeViewEvent, cx| {
+                        if matches!(event, CodeViewEvent::SelectionChanged) {
+                            cx.notify();
+                        }
+                    }));
+                Box::new(CodeItem::new(v, path, title)) as Box<dyn PaneItem>
+            })
+        };
         let target = self.active_pane.clone();
         self.center.split(&target, new.clone(), axis, cx);
         self._subscriptions
@@ -566,30 +625,6 @@ impl Workspace {
         }
     }
 
-    fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((path, pos)) = self.back.pop() {
-            if let (Some(cur), Some(view)) = (self.active_path(cx), self.active_code_view(cx)) {
-                self.forward.push((cur, view.read(cx).cursor()));
-            }
-            self.open_path_internal(path, false, window, cx);
-            if let Some(view) = self.active_code_view(cx) {
-                view.update(cx, |v, cx| v.set_cursor(pos, cx));
-            }
-        }
-    }
-
-    fn go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((path, pos)) = self.forward.pop() {
-            if let (Some(cur), Some(view)) = (self.active_path(cx), self.active_code_view(cx)) {
-                self.back.push((cur, view.read(cx).cursor()));
-            }
-            self.open_path_internal(path, false, window, cx);
-            if let Some(view) = self.active_code_view(cx) {
-                view.update(cx, |v, cx| v.set_cursor(pos, cx));
-            }
-        }
-    }
-
     fn reveal_active_file(&mut self, _: &RevealActiveFile, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = self.active_path(cx) {
             self.reveal_path(&path, cx);
@@ -620,98 +655,6 @@ impl Workspace {
         }
     }
 
-    fn copy_permalink(
-        &mut self,
-        _: &editor::CopyPermalink,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Placeholder until lector-git provides remotes: path#Lline.
-        if let (Some(path), Some(view)) = (self.active_path(cx), self.active_code_view(cx)) {
-            let rel = path
-                .strip_prefix(&self.root)
-                .unwrap_or(&path)
-                .display()
-                .to_string();
-            let line = view.read(cx).cursor().row + 1;
-            cx.write_to_clipboard(ClipboardItem::new_string(format!("{rel}#L{line}")));
-        }
-    }
-
-    fn toggle_blame(&mut self, _: &editor::ToggleBlame, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.active_code_view(cx) else {
-            return;
-        };
-        view.update(cx, |v, cx| {
-            let row = v.cursor().row;
-            let mut notes = std::collections::BTreeMap::new();
-            notes.insert(
-                row,
-                SharedString::from("Blame unavailable — git integration pending"),
-            );
-            v.set_annotations(notes, cx);
-        });
-    }
-
-    fn open_text_tab(
-        &mut self,
-        title: &str,
-        text: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let view = cx.new(|cx| CodeView::from_text(&text, Some(title), cx));
-        let item = Box::new(CodeItem::new(
-            view,
-            None,
-            SharedString::from(title.to_string()),
-        ));
-        self.active_pane
-            .update(cx, |p, cx| p.add_item(item, false, window, cx));
-    }
-
-    fn open_keymap(&mut self, _: &OpenKeymap, window: &mut Window, cx: &mut Context<Self>) {
-        let mut text = String::from("# Lector default key bindings (read-only)\n\n");
-        let mut last_ctx: Option<String> = None;
-        for spec in crate::keymap::default_keymap() {
-            if spec.context != last_ctx {
-                text.push_str(&format!(
-                    "\n[{}]\n",
-                    spec.context.clone().unwrap_or_else(|| "global".into())
-                ));
-                last_ctx = spec.context.clone();
-            }
-            text.push_str(&format!("\"{}\" = \"{}\"\n", spec.keys, spec.action));
-        }
-        self.open_text_tab("keymap.toml", text, window, cx);
-    }
-
-    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        let s = EditorSettings::get(cx);
-        let theme = cx.theme().name.clone();
-        let text = format!(
-            "# Lector settings (preview — editable settings arrive with lector-config)\n\n\
-             theme = \"{theme}\"\n\
-             font_family = \"{}\"\n\
-             font_size = {}\n\
-             line_height = {}\n\
-             tab_size = {}\n\
-             soft_wrap = {}\n\
-             minimap = {}\n\
-             indent_guides = {}\n\
-             sticky_headers = {}\n",
-            s.font_family,
-            f32::from(s.font_size),
-            s.line_height,
-            s.tab_size,
-            s.soft_wrap,
-            s.show_minimap,
-            s.indent_guides,
-            s.sticky_headers
-        );
-        self.open_text_tab("settings.toml", text, window, cx);
-    }
-
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
@@ -722,9 +665,19 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
                 if let Some(root) = paths.into_iter().next() {
-                    let _ = this.update_in(cx, |_, window, cx| {
-                        let ws = cx.new(|cx| Workspace::new(root, window, cx));
-                        window.replace_root(cx, |_, _| WorkspaceRoot { workspace: ws });
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        let (settings, _) = lector_config::load_settings_for(Some(&root));
+                        match Project::open(&root, settings) {
+                            Ok(project) => {
+                                this.save_session_now(cx);
+                                let ws = cx.new(|cx| Workspace::new(project, window, cx));
+                                ws.update(cx, |ws, cx| {
+                                    ws.restore_session(window, cx);
+                                });
+                                window.replace_root(cx, |_, _| WorkspaceRoot { workspace: ws });
+                            }
+                            Err(err) => this.show_toast(format!("Cannot open folder: {err}"), cx),
+                        }
                     });
                 }
             }
@@ -902,29 +855,48 @@ impl Workspace {
         let ui = cx.theme().ui.clone();
         let settings = EditorSettings::get(cx);
         let view = self.active_code_view(cx);
-        let path = self.active_path(cx);
-        let meta = path.as_ref().and_then(|p| self.file_meta.get(p)).cloned();
-        let (cursor, language, selection_len) = match &view {
+        let meta = self.active_file_view(cx).and_then(|v| v.read(cx).meta());
+        let (cursor, language, selection) = match &view {
             Some(view) => {
                 let v = view.read(cx);
                 let (line, col) = v.cursor_line_col(settings.tab_size);
                 let sel = v.selection();
-                let sel_len = if sel.is_empty() {
+                let selection = if sel.is_empty() {
                     None
                 } else {
-                    Some(v.selected_text().chars().count())
+                    let (start, end) = sel.range();
+                    let lines =
+                        end.row - start.row + u32::from(end.col > 0 || end.row == start.row);
+                    Some(if end.row - start.row < 2000 {
+                        let chars = v.selected_text().chars().count();
+                        if lines > 1 {
+                            format!("{chars} selected ({lines} lines)")
+                        } else {
+                            format!("{chars} selected")
+                        }
+                    } else {
+                        format!("{lines} lines selected")
+                    })
                 };
                 (
                     Some(format!("Ln {line}, Col {col}")),
                     v.source().language_name(),
-                    sel_len,
+                    selection,
                 )
             }
             None => (None, None, None),
         };
         let fg = ui.status_bar_fg.hsla();
+        let warn = cx.theme().git.modified.hsla();
         let item =
             |id: &'static str, label: SharedString| Button::new(id, label).compact().color(fg);
+        let indexing = self.integ.index_progress.map(|(done, total)| {
+            if total == 0 {
+                "Indexing symbols…".to_string()
+            } else {
+                format!("Indexing symbols {}%", done * 100 / total.max(1))
+            }
+        });
         h_flex()
             .h(metrics::STATUS_BAR_HEIGHT)
             .flex_none()
@@ -938,8 +910,10 @@ impl Workspace {
             .child(
                 h_flex()
                     .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap(px(2.))
-                    .when_some(self.branch.clone(), |el, branch| {
+                    .when_some(self.branch_status.clone().or(self.branch.clone()), |el, branch| {
                         el.child(
                             item("status-branch", branch)
                                 .icon(IconName::GitBranch)
@@ -949,20 +923,36 @@ impl Workspace {
                                 }),
                         )
                     })
-                    .child(
-                        item("status-changes", "Changes".into())
+                    .when(self.project.repo().is_some(), |el| el.child({
+                        let changed = self.integ.git_status.len();
+                        let label: SharedString = if changed == 0 {
+                            "Changes".into()
+                        } else {
+                            format!("{changed} changed").into()
+                        };
+                        item("status-changes", label)
                             .icon(IconName::GitCompare)
                             .tooltip(Tooltip::for_action("Show Changes", &ShowChanges))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(ShowChanges), cx)
-                            }),
-                    ),
+                            })
+                    }))
+                    .when_some(indexing, |el, text| {
+                        el.child(
+                            item("status-indexing", text.into())
+                                .icon(IconName::Loader)
+                                .tooltip(Tooltip::text(
+                                    "Building the project symbol index (Go to Symbol, navigation without LSP)",
+                                )),
+                        )
+                    }),
             )
             .child(
                 h_flex()
+                    .flex_none()
                     .gap(px(2.))
-                    .when_some(selection_len, |el, n| {
-                        el.child(item("status-sel", format!("{n} selected").into()))
+                    .when_some(selection, |el, text| {
+                        el.child(item("status-sel", text.into()))
                     })
                     .when_some(cursor, |el, c| {
                         el.child(
@@ -974,14 +964,34 @@ impl Workspace {
                         )
                     })
                     .when_some(meta.clone(), |el, m| {
-                        el.child(item("status-indent", m.indentation))
+                        el.child(
+                            item("status-indent", m.indentation)
+                                .tooltip(Tooltip::text("Indentation detected from the file")),
+                        )
                     })
                     .when_some(meta.clone(), |el, m| {
-                        el.child(item("status-encoding", m.encoding))
+                        if m.lossy {
+                            el.child(
+                                item("status-encoding", format!("{} (lossy)", m.encoding).into())
+                                    .color(warn)
+                                    .icon(IconName::AlertTriangle)
+                                    .tooltip(Tooltip::text(
+                                        "Some bytes are invalid in this encoding and are shown as \u{FFFD}",
+                                    )),
+                            )
+                        } else {
+                            el.child(item("status-encoding", m.encoding))
+                        }
                     })
                     .when_some(meta, |el, m| el.child(item("status-eol", m.line_ending)))
                     .when_some(language, |el, l| el.child(item("status-language", l)))
-                    .child(item("status-lsp", self.lsp_status.clone()).icon(IconName::CircleDot)),
+                    .when_some(self.integ.lsp_status.clone(), |el, (label, tip)| {
+                        el.child(
+                            item("status-lsp", label)
+                                .icon(IconName::CircleDot)
+                                .tooltip(Tooltip::text(tip)),
+                        )
+                    }),
             )
     }
 
@@ -1120,7 +1130,7 @@ impl Render for Workspace {
 
         let title = match self.active_path(cx) {
             Some(p) => format!(
-                "{} — {} — Lector",
+                "{} — {}",
                 p.file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default(),
@@ -1135,18 +1145,30 @@ impl Render for Workspace {
 
         let sidebar_width = self.sidebar_width;
         let center = self.center.render(0, cx);
-        v_flex()
-            .id("workspace")
+        let mut root = v_flex();
+        let registrations = std::mem::take(&mut self.action_registrations);
+        for register in &registrations {
+            root = register(root, window, cx);
+        }
+        self.action_registrations = registrations;
+        root.id("workspace")
             .key_context(contexts::WORKSPACE)
             .track_focus(&self.focus_handle)
             .relative()
             .size_full()
-            .font_family(crate::assets::UI_FONT)
-            .text_size(metrics::TEXT)
+            .font_family(crate::settings::UiFont::get(cx).family)
+            .text_size(px(crate::settings::UiFont::get(cx).size))
             .text_color(ui.text.hsla())
             .bg(ui.background.hsla())
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_finder))
+            .on_action(cx.listener(Self::toggle_outline_picker))
+            .on_action(cx.listener(Self::toggle_symbol_finder))
+            .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::find_references))
+            .on_action(cx.listener(Self::toggle_markdown_preview))
+            .on_action(cx.listener(Self::reload_settings_action))
+            .on_action(cx.listener(Self::copy_permalink_action))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::find))
@@ -1165,10 +1187,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowBranches, w, cx| {
                 this.show_panel(SidebarPanel::Branches, w, cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleProjectSearch, w, cx| {
-                this.show_panel(SidebarPanel::Search, w, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleOutline, w, cx| {
+            .on_action(cx.listener(Self::toggle_project_search))
+            .on_action(cx.listener(|this, _: &ShowOutline, w, cx| {
                 this.show_panel(SidebarPanel::Outline, w, cx)
             }))
             .on_action(
@@ -1187,8 +1207,8 @@ impl Render for Workspace {
                 this.active_pane
                     .update(cx, |p, cx| p.activate_relative(-1, w, cx))
             }))
-            .on_action(cx.listener(Self::go_back))
-            .on_action(cx.listener(Self::go_forward))
+            .on_action(cx.listener(Self::nav_back))
+            .on_action(cx.listener(Self::nav_forward))
             .on_action(cx.listener(Self::reveal_active_file))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
@@ -1204,10 +1224,8 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &editor::CopyRelativePath, _, cx| this.copy_path(true, cx)),
             )
-            .on_action(cx.listener(Self::copy_permalink))
-            .on_action(cx.listener(Self::toggle_blame))
-            .on_action(cx.listener(Self::open_keymap))
-            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_keymap_file))
+            .on_action(cx.listener(Self::open_settings_file))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_drag_move(
@@ -1235,13 +1253,17 @@ impl Render for Workspace {
                                 .w(sidebar_width + px(46.))
                                 .border_r_1()
                                 .border_color(ui.border.hsla())
-                                .child(self.sidebar.clone())
+                                .child(
+                                    gpui::AnyView::from(self.sidebar.clone())
+                                        .cached(gpui::StyleRefinement::default().size_full()),
+                                )
                                 .child(panel_resize_handle("sidebar-edge", cx)),
                         )
                     })
                     .child(div().flex_1().min_w_0().h_full().child(center)),
             )
             .child(self.render_status_bar(cx))
+            .children(self.render_toast(cx))
             .child(self.modal_layer.clone())
             .children(self.render_resize_edges(window))
     }

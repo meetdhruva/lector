@@ -6,7 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+description = "UI-free application model for Lector: project, documents, navigation, review."
 
 [dependencies]
+lector-text.workspace = true
+lector-fs.workspace = true
+lector-syntax.workspace = true
+lector-diff.workspace = true
+lector-git.workspace = true
+lector-search.workspace = true
+lector-lsp.workspace = true
+lector-config.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+futures = "0.3"
 
 [dev-dependencies]
+tempfile.workspace = true

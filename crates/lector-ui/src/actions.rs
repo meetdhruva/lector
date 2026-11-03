@@ -45,6 +45,7 @@ pub mod workspace {
             CloseTabsToRight,
             ToggleColorblindDiff,
             About,
+            ShowOutline,
         ]
     );
 }

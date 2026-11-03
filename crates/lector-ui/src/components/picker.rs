@@ -132,7 +132,8 @@ impl<D: PickerDelegate> Picker<D> {
         cx.notify();
     }
 
-    fn scroll_to_selected(&self) {
+    /// Scrolls the selected match into view.
+    pub fn scroll_to_selected(&self) {
         self.scroll_handle
             .scroll_to_item(self.delegate.selected_index(), ScrollStrategy::Top);
     }
@@ -303,6 +304,8 @@ pub struct PickerItem {
     detail_positions: Vec<usize>,
     icon: Option<AnyElement>,
     end: Option<SharedString>,
+    label_color: Option<Hsla>,
+    indent: Pixels,
     selected: bool,
 }
 
@@ -316,6 +319,8 @@ impl PickerItem {
             detail_positions: Vec::new(),
             icon: None,
             end: None,
+            label_color: None,
+            indent: px(0.),
             selected,
         }
     }
@@ -339,6 +344,18 @@ impl PickerItem {
         self
     }
 
+    /// Left indentation (outline depth).
+    pub fn indent(mut self, indent: Pixels) -> Self {
+        self.indent = indent;
+        self
+    }
+
+    /// Label color override (e.g. git status).
+    pub fn label_color(mut self, color: Hsla) -> Self {
+        self.label_color = Some(color);
+        self
+    }
+
     /// Right-aligned text (e.g. key binding).
     pub fn end_text(mut self, text: Option<SharedString>) -> Self {
         self.end = text;
@@ -353,6 +370,7 @@ impl RenderOnce for PickerItem {
         h_flex()
             .h(px(30.))
             .px(px(8.))
+            .pl(px(8.) + self.indent)
             .gap(px(8.))
             .rounded(metrics::RADIUS)
             .text_size(metrics::TEXT)
@@ -368,11 +386,12 @@ impl RenderOnce for PickerItem {
                     .gap(px(8.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(div().flex_none().child(highlighted_text(
-                        self.label,
-                        &self.positions,
-                        accent,
-                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .when_some(self.label_color, |el, c| el.text_color(c))
+                            .child(highlighted_text(self.label, &self.positions, accent)),
+                    )
                     .when_some(self.detail, |el, detail| {
                         el.child(
                             div()

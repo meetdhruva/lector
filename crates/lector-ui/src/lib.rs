@@ -16,10 +16,14 @@ pub mod actions;
 pub mod assets;
 pub mod code_view;
 pub mod components;
+pub mod editor;
 pub mod fuzzy;
 pub mod icons;
 pub mod keymap;
+pub mod markdown;
 pub mod menus;
+pub mod os;
+pub mod settings;
 pub mod theme;
 pub mod views;
 
@@ -35,16 +39,24 @@ use gpui::{
     WindowDecorations, WindowOptions,
 };
 
-/// Initializes fonts, theme, app-level action handlers, default key
-/// bindings and the menu bar. Call once at startup, before opening windows.
-pub fn init(cx: &mut App, registry: lector_theme::ThemeRegistry, mode: ThemeMode) {
+/// Initializes fonts, theme, settings (`lector-config`), app-level action
+/// handlers, key bindings and the menu bar. Call once at startup, before
+/// opening windows. `settings` are the effective settings for the first
+/// window (defaults ← user file ← project file).
+pub fn init(
+    cx: &mut App,
+    registry: lector_theme::ThemeRegistry,
+    mode: ThemeMode,
+    settings: (lector_config::Settings, Vec<String>),
+) {
     assets::load_fonts(cx);
+    if matches!(mode, ThemeMode::Named(_)) {
+        cx.set_global(settings::CliTheme);
+    }
     ThemeState::init(cx, registry, mode, lector_theme::Appearance::Dark);
     cx.set_global(code_view::EditorSettings::default());
-    let errors = keymap::bind_keymap(cx, &keymap::default_keymap());
-    for err in errors {
-        tracing::warn!("keymap: {err}");
-    }
+    settings::apply_settings(cx, settings.0, settings.1);
+    settings::bind_effective_keymap(cx);
     cx.on_action(|_: &actions::workspace::Quit, cx| cx.quit());
     cx.on_action(|_: &actions::workspace::About, _| {
         tracing::info!("Lector {}", env!("CARGO_PKG_VERSION"));
@@ -61,10 +73,20 @@ pub struct OpenRequest {
     pub file: Option<(PathBuf, Option<u32>, Option<u32>)>,
     /// Fixed window bounds at the origin (headless screenshots).
     pub fixed_size: Option<(f32, f32)>,
+    /// The project, if already opened (e.g. on a background thread while
+    /// the app starts); opened on demand otherwise.
+    pub project: Option<lector_workspace::Project>,
 }
 
 /// Opens a workspace window for `request`.
 pub fn open_workspace_window(cx: &mut App, request: OpenRequest) -> anyhow::Result<()> {
+    let project = match request.project.clone() {
+        Some(p) => p,
+        None => lector_workspace::Project::open(
+            &request.root,
+            settings::AppSettings::get(cx).as_ref().clone(),
+        )?,
+    };
     let bounds = match request.fixed_size {
         Some((w, h)) => Bounds::new(point(px(0.), px(0.)), size(px(w), px(h))),
         None => Bounds::centered(None, size(px(1440.), px(900.)), cx),
@@ -82,10 +104,13 @@ pub fn open_workspace_window(cx: &mut App, request: OpenRequest) -> anyhow::Resu
         ..Default::default()
     };
     cx.open_window(options, move |window, cx| {
-        let workspace = cx.new(|cx| views::Workspace::new(request.root.clone(), window, cx));
+        let workspace = cx.new(|cx| views::Workspace::new(project, window, cx));
+        let restored = workspace.update(cx, |ws, cx| ws.restore_session(window, cx));
         if let Some((file, line, col)) = request.file.clone() {
-            workspace.update(cx, |ws, cx| ws.open_path_at(file, line, col, window, cx));
-        } else {
+            workspace.update(cx, |ws, cx| {
+                ws.open_path_at(file, line, col, window, cx);
+            });
+        } else if !restored {
             let focus = workspace
                 .read(cx)
                 .sidebar()

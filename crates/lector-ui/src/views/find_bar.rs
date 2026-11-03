@@ -1,20 +1,22 @@
 //! In-file find: a small modal that highlights matches in the active code
 //! view. Enter jumps to the next match; matches stay highlighted after the
 //! modal closes so `editor::FindNext` / `FindPrev` keep working.
-//! Integration replaces the matcher with `lector_search::find_in_text`.
+//! Matching uses `lector_search::find_in_text` on a background thread over
+//! the document snapshot (case / whole word / regex toggles).
 
 use std::ops::Range;
 
 use gpui::{
     div, prelude::*, px, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Subscription, Window,
+    SharedString, Subscription, Task, Window,
 };
+use lector_search::{CaseMode, SearchQuery};
 
 use crate::actions::picker::{Cancel, Confirm, SelectNext, SelectPrev};
 use crate::code_view::{CodeView, Pos, Selection};
 use crate::components::popover::surface;
 use crate::components::text_input::{TextInput, TextInputEvent};
-use crate::components::{h_flex, metrics};
+use crate::components::{h_flex, metrics, IconButton, Tooltip};
 use crate::icons::{Icon, IconName, IconSize};
 use crate::keymap::contexts;
 use crate::theme::{ActiveTheme, ColorExt};
@@ -64,12 +66,20 @@ pub fn find_matches(view: &CodeView, query: &str, limit: usize) -> Vec<(u32, Ran
     out
 }
 
+/// Maximum highlighted matches.
+const MAX_MATCHES: usize = 100_000;
+
 /// The find modal.
 pub struct FindBar {
     input: Entity<TextInput>,
     target: Entity<CodeView>,
     count: usize,
     active: Option<usize>,
+    case_sensitive: bool,
+    whole_word: bool,
+    regex: bool,
+    error: Option<SharedString>,
+    search_task: Option<Task<()>>,
     _subscription: Subscription,
 }
 
@@ -96,6 +106,11 @@ impl FindBar {
             target,
             count: 0,
             active: None,
+            case_sensitive: false,
+            whole_word: false,
+            regex: false,
+            error: None,
+            search_task: None,
             _subscription: subscription,
         };
         if !selected.is_empty() && !selected.contains('\n') {
@@ -109,7 +124,64 @@ impl FindBar {
     }
 
     fn update_matches(&mut self, query: &str, cx: &mut Context<Self>) {
-        let matches = find_matches(self.target.read(cx), query, 100_000);
+        self.error = None;
+        if query.is_empty() {
+            self.search_task = None;
+            self.apply_matches(Vec::new(), cx);
+            return;
+        }
+        let search = SearchQuery {
+            pattern: query.to_string(),
+            regex: self.regex,
+            case: if self.case_sensitive {
+                CaseMode::Sensitive
+            } else {
+                CaseMode::Smart
+            },
+            whole_word: self.whole_word,
+            ..Default::default()
+        };
+        let text = self.target.read(cx).source().text_snapshot();
+        let Some(text) = text else {
+            // Sources without a snapshot (small in-memory text): match here.
+            let matches = find_matches(self.target.read(cx), query, MAX_MATCHES);
+            self.apply_matches(matches, cx);
+            return;
+        };
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let string = text.to_string();
+                    lector_search::find_in_text(&string, &search).map(|ranges| {
+                        ranges
+                            .into_iter()
+                            .take(MAX_MATCHES)
+                            .map(|r| {
+                                let start = text.offset_to_point(r.start);
+                                let end = text.offset_to_point(r.end);
+                                let end_col = if end.row == start.row {
+                                    end.column as usize
+                                } else {
+                                    text.line_len(start.row) as usize
+                                };
+                                (start.row, start.column as usize..end_col)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(matches) => this.apply_matches(matches, cx),
+                Err(err) => {
+                    this.error = Some(err.to_string().into());
+                    this.apply_matches(Vec::new(), cx);
+                }
+            });
+        }));
+    }
+
+    fn apply_matches(&mut self, matches: Vec<(u32, Range<usize>)>, cx: &mut Context<Self>) {
         let cursor = self.target.read(cx).cursor();
         // Start at the first match at or after the cursor.
         let active = (!matches.is_empty()).then(|| {
@@ -123,6 +195,16 @@ impl FindBar {
         self.target
             .update(cx, |v, cx| v.set_search_matches(matches, active, cx));
         cx.notify();
+    }
+
+    fn toggle(&mut self, which: u8, cx: &mut Context<Self>) {
+        match which {
+            0 => self.case_sensitive = !self.case_sensitive,
+            1 => self.whole_word = !self.whole_word,
+            _ => self.regex = !self.regex,
+        }
+        let query = self.input.read(cx).text().to_string();
+        self.update_matches(&query, cx);
     }
 
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -158,6 +240,7 @@ impl Render for FindBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();
         let status = match (self.count, self.active) {
+            _ if self.error.is_some() => "Invalid pattern".to_string(),
             (0, _) if self.input.read(cx).text().is_empty() => String::new(),
             (0, _) => "No results".to_string(),
             (n, Some(a)) => format!("{} of {n}", a + 1),
@@ -169,7 +252,7 @@ impl Render for FindBar {
             .on_action(cx.listener(Self::next))
             .on_action(cx.listener(Self::prev))
             .on_action(cx.listener(Self::cancel))
-            .w(px(480.))
+            .w(px(560.))
             .child(
                 h_flex()
                     .h(px(40.))
@@ -198,8 +281,61 @@ impl Render for FindBar {
                                 ui.text_muted.hsla()
                             })
                             .child(status),
-                    ),
+                    )
+                    .child(self.render_toggles(cx)),
             )
+    }
+}
+
+impl FindBar {
+    fn render_toggles(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let toggle = |id: &'static str, icon: IconName, on: bool, which: u8, tip: &'static str| {
+            let weak = weak.clone();
+            IconButton::new(id, icon)
+                .icon_size(IconSize::Small)
+                .selected(on)
+                .tooltip(Tooltip::text(tip))
+                .on_click(move |_, _, cx| {
+                    let _ = weak.update(cx, |bar, cx| bar.toggle(which, cx));
+                })
+        };
+        let step = |id: &'static str, icon: IconName, delta: isize, tip: &'static str| {
+            let weak = weak.clone();
+            IconButton::new(id, icon)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text(tip))
+                .on_click(move |_, _, cx| {
+                    let _ = weak.update(cx, |bar, cx| bar.step(delta, cx));
+                })
+        };
+        h_flex()
+            .flex_none()
+            .gap(px(1.))
+            .child(toggle(
+                "find-case",
+                IconName::CaseSensitive,
+                self.case_sensitive,
+                0,
+                "Match Case",
+            ))
+            .child(toggle(
+                "find-word",
+                IconName::WholeWord,
+                self.whole_word,
+                1,
+                "Match Whole Word",
+            ))
+            .child(toggle(
+                "find-regex",
+                IconName::Regex,
+                self.regex,
+                2,
+                "Use Regular Expression",
+            ))
+            .child(div().w(px(6.)))
+            .child(step("find-prev", IconName::ArrowUp, -1, "Previous Match"))
+            .child(step("find-next", IconName::ArrowDown, 1, "Next Match"))
     }
 }
 

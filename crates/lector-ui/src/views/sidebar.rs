@@ -76,7 +76,7 @@ impl SidebarPanel {
             SidebarPanel::History => Box::new(ShowHistory),
             SidebarPanel::Branches => Box::new(ShowBranches),
             SidebarPanel::Search => Box::new(ToggleProjectSearch),
-            SidebarPanel::Outline => Box::new(ToggleOutline),
+            SidebarPanel::Outline => Box::new(ShowOutline),
         }
     }
 

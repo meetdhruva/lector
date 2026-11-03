@@ -42,8 +42,23 @@ pub trait PaneItem: 'static {
     fn code_view(&self) -> Option<Entity<CodeView>> {
         None
     }
+    /// The file view, for items that show a project file.
+    fn file_view(&self) -> Option<Entity<crate::editor::FileView>> {
+        None
+    }
+    /// Session state of this tab (restored on startup). Defaults to the
+    /// file path; return `None` for transient items.
+    fn tab_kind(&self, cx: &App) -> Option<lector_config::TabKind> {
+        self.path(cx)
+            .map(|path| lector_config::TabKind::File { path })
+    }
     /// A new item showing the same content (for splits).
     fn clone_item(&self, window: &mut Window, cx: &mut App) -> Option<Box<dyn PaneItem>>;
+    /// Identity for items without a file path (diff, commit, review tabs),
+    /// so opening the same thing twice activates the existing tab.
+    fn item_key(&self, _cx: &App) -> Option<SharedString> {
+        None
+    }
 }
 
 /// A file opened in a [`CodeView`].
@@ -185,6 +200,11 @@ impl Pane {
         self.active
     }
 
+    /// All items in tab order.
+    pub fn items(&self) -> impl Iterator<Item = &dyn PaneItem> + '_ {
+        self.entries.iter().map(|e| e.item.as_ref())
+    }
+
     /// Titles of all items (tests, menus).
     pub fn titles(&self, cx: &App) -> Vec<SharedString> {
         self.entries.iter().map(|e| e.item.title(cx)).collect()
@@ -200,6 +220,13 @@ impl Pane {
         self.entries
             .iter()
             .position(|e| e.item.path(cx).as_deref() == Some(path))
+    }
+
+    /// Index of the item whose [`PaneItem::item_key`] is `key`.
+    pub fn index_for_key(&self, key: &str, cx: &App) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|e| e.item.item_key(cx).is_some_and(|k| k.as_ref() == key))
     }
 
     /// Adds an item (replacing the existing preview tab when `preview`) and
@@ -229,6 +256,25 @@ impl Pane {
             ix
         };
         self.activate(ix, true, window, cx);
+    }
+
+    /// Adds an item and makes it the pane's active tab without focusing
+    /// it or activating the pane (e.g. a side-by-side preview).
+    pub fn add_item_in_background(&mut self, item: Box<dyn PaneItem>, cx: &mut Context<Self>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let ix = (self.active + 1).min(self.entries.len());
+        self.entries.insert(
+            ix,
+            PaneEntry {
+                id,
+                item,
+                preview: false,
+            },
+        );
+        self.active = ix;
+        self.tab_scroll.scroll_to_item(ix);
+        cx.notify();
     }
 
     /// Makes a preview tab permanent.
@@ -430,7 +476,12 @@ impl Render for Pane {
             .collect();
 
         let content: AnyElement = match self.active_item() {
-            Some(item) => item.view().into_any_element(),
+            // Cached: siblings (other panes, sidebar) do not re-render while
+            // one view scrolls.
+            Some(item) => item
+                .view()
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element(),
             None => empty_pane(cx).into_any_element(),
         };
 

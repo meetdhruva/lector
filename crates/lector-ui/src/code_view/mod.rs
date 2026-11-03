@@ -128,6 +128,8 @@ pub enum CodeViewEvent {
     SelectionChanged,
     /// The view scrolled.
     Scrolled,
+    /// The buffer position under the pointer changed (`None`: off text).
+    HoverMoved(Option<Pos>),
 }
 
 /// Where to scroll on the next layout.
@@ -151,6 +153,9 @@ pub(crate) struct DragState {
     mode: DragMode,
     origin: (Pos, Pos),
 }
+
+/// Pointer rest time before [`CodeView::on_hover`] fires.
+pub const HOVER_DELAY_MS: u64 = 500;
 
 type HoverCallback = Rc<dyn Fn(&HoverTarget, &mut Window, &mut App)>;
 type ClickCallback = Rc<dyn Fn(Pos, &mut Window, &mut App)>;
@@ -189,6 +194,49 @@ pub struct CodeView {
     context_menu: ContextMenuState,
     path: Option<PathBuf>,
     pub(crate) gutter_hovered: bool,
+    gutter_annotations: Option<Rc<GutterAnnotations>>,
+    on_gutter_annotation_click: Option<AnnotationClickCallback>,
+}
+
+type AnnotationClickCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// One block of a left gutter annotation column (blame): consecutive rows
+/// attributed to the same thing. The label is drawn on the block's first
+/// visible row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GutterAnnotation {
+    /// Rows covered (sorted, non-overlapping across blocks).
+    pub rows: Range<u32>,
+    /// Main text (e.g. "Alice · Fix parser").
+    pub text: SharedString,
+    /// Right-aligned secondary text (e.g. "3 days ago").
+    pub detail: SharedString,
+    /// Color of a thin bar at the left edge (e.g. age heat).
+    pub bar: Option<Hsla>,
+    /// Draw the block with a subtle background (alternating blocks).
+    pub shaded: bool,
+    /// Draw the text dimmed/italic (e.g. uncommitted lines).
+    pub muted: bool,
+}
+
+/// A left gutter annotation column, see [`CodeView::set_gutter_annotations`].
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct GutterAnnotations {
+    /// Column width in characters.
+    pub width_chars: usize,
+    /// Blocks sorted by row.
+    pub blocks: Vec<GutterAnnotation>,
+}
+
+impl GutterAnnotations {
+    /// Index of the block containing `row`.
+    pub fn block_at(&self, row: u32) -> Option<usize> {
+        let ix = self.blocks.partition_point(|b| b.rows.end <= row);
+        self.blocks
+            .get(ix)
+            .filter(|b| b.rows.start <= row && row < b.rows.end)
+            .map(|_| ix)
+    }
 }
 
 impl EventEmitter<CodeViewEvent> for CodeView {}
@@ -234,6 +282,8 @@ impl CodeView {
             context_menu: ContextMenuState::default(),
             path: None,
             gutter_hovered: false,
+            gutter_annotations: None,
+            on_gutter_annotation_click: None,
         }
     }
 
@@ -414,7 +464,35 @@ impl CodeView {
         &self.annotations
     }
 
-    /// Called after the pointer rests over text for ~300 ms.
+    /// Shows (or hides with `None`) a left gutter annotation column, e.g.
+    /// blame, before the line numbers.
+    pub fn set_gutter_annotations(
+        &mut self,
+        annotations: Option<GutterAnnotations>,
+        cx: &mut Context<Self>,
+    ) {
+        self.gutter_annotations = annotations.map(Rc::new);
+        cx.notify();
+    }
+
+    /// The gutter annotation column, if shown.
+    pub fn gutter_annotations(&self) -> Option<&Rc<GutterAnnotations>> {
+        self.gutter_annotations.as_ref()
+    }
+
+    /// Called with the block index when a gutter annotation is clicked.
+    pub fn on_gutter_annotation_click(
+        &mut self,
+        f: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) {
+        self.on_gutter_annotation_click = Some(Rc::new(f));
+    }
+
+    pub(crate) fn gutter_annotation_click_callback(&self) -> Option<AnnotationClickCallback> {
+        self.on_gutter_annotation_click.clone()
+    }
+
+    /// Called after the pointer rests over text for [`HOVER_DELAY_MS`].
     pub fn on_hover(&mut self, f: impl Fn(&HoverTarget, &mut Window, &mut App) + 'static) {
         self.on_hover = Some(Rc::new(f));
     }
@@ -954,12 +1032,13 @@ impl CodeView {
         }
         self.hover_pos = pos;
         self.hover_task = None;
+        cx.emit(CodeViewEvent::HoverMoved(pos));
         let (Some(pos), Some(callback)) = (pos, self.on_hover.clone()) else {
             return;
         };
         self.hover_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(300))
+                .timer(Duration::from_millis(HOVER_DELAY_MS))
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.hover_pos == Some(pos) {

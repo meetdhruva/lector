@@ -14,7 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 lector-ui.workspace = true
+lector-ui-git.workspace = true
 lector-theme.workspace = true
+lector-workspace.workspace = true
+lector-config.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

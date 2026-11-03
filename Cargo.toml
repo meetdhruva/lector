@@ -25,6 +25,7 @@ lector-theme = { path = "crates/lector-theme" }
 lector-icons = { path = "crates/lector-icons" }
 lector-workspace = { path = "crates/lector-workspace" }
 lector-ui = { path = "crates/lector-ui" }
+lector-ui-git = { path = "crates/lector-ui-git" }
 # common
 anyhow = "1"
 thiserror = "2"

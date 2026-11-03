@@ -9,7 +9,7 @@ use gpui::{
 use crate::actions::{humanize_action_name, is_palette_hidden};
 use crate::components::binding_text_for_action;
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
-use crate::fuzzy::match_and_sort;
+use crate::fuzzy::NucleoList;
 
 /// One palette entry.
 pub struct Command {
@@ -26,6 +26,7 @@ pub struct Command {
 /// Palette delegate.
 pub struct CommandPaletteDelegate {
     commands: Vec<Command>,
+    list: NucleoList<usize>,
     matches: Vec<(usize, Vec<usize>)>,
     selected: usize,
     previous_focus: Option<FocusHandle>,
@@ -50,8 +51,13 @@ impl CommandPaletteDelegate {
             })
             .collect();
         commands.sort_by(|a, b| a.label.cmp(&b.label));
+        let list = NucleoList::new(false);
+        for (ix, c) in commands.iter().enumerate() {
+            list.push(ix, &c.label);
+        }
         CommandPaletteDelegate {
             commands,
+            list,
             matches: Vec::new(),
             selected: 0,
             previous_focus,
@@ -95,9 +101,12 @@ impl PickerDelegate for CommandPaletteDelegate {
                 .map(|ix| (ix, Vec::new()))
                 .collect()
         } else {
-            match_and_sort(query, self.commands.iter().map(|c| c.label.as_ref()))
+            self.list.set_query(query.trim());
+            self.list.settle(200);
+            self.list
+                .top(500)
                 .into_iter()
-                .map(|(ix, m)| (ix, m.positions))
+                .map(|m| (m.item, m.positions))
                 .collect()
         };
         self.selected = 0;

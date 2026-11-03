@@ -74,12 +74,14 @@ fn build_request(cli: &Cli) -> anyhow::Result<OpenRequest> {
             root: path,
             file: None,
             fixed_size,
+            project: None,
         })
     } else {
         Ok(OpenRequest {
             root: root_for_file(&path),
             file: Some((path, line, col)),
             fixed_size,
+            project: None,
         })
     }
 }
@@ -88,12 +90,10 @@ fn load_themes(cli: &Cli) -> (ThemeRegistry, ThemeMode) {
     let mut registry = ThemeRegistry::new();
     let dir = std::env::var_os("LECTOR_THEMES_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::config_dir().map(|d| d.join("lector").join("themes")));
-    if let Some(dir) = dir {
-        let (_, errors) = registry.load_dir(&dir);
-        for err in errors {
-            tracing::warn!("theme: {err}");
-        }
+        .unwrap_or_else(lector_config::paths::themes_dir);
+    let (_, errors) = registry.load_dir(&dir);
+    for err in errors {
+        tracing::warn!("theme: {err}");
     }
     let mode = match &cli.theme {
         Some(name) => match registry.get(name) {
@@ -120,13 +120,35 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    let request = build_request(&cli)?;
+    let mut request = build_request(&cli)?;
+    // Settings, the project (git discovery, LSP config) and themes load on a
+    // background thread while GPUI starts up.
+    let root = request.root.clone();
+    let loader = std::thread::spawn(move || {
+        let (settings, warnings) = lector_config::load_settings_for(Some(&root));
+        let project = lector_workspace::Project::open(&root, settings.clone());
+        (settings, warnings, project)
+    });
     let (registry, mode) = load_themes(&cli);
 
     Application::new()
         .with_assets(lector_ui::assets::Assets)
         .run(move |cx| {
-            lector_ui::init(cx, registry, mode);
+            let Ok((settings, warnings, project)) = loader.join() else {
+                eprintln!("lector: startup failed");
+                cx.quit();
+                return;
+            };
+            match project {
+                Ok(project) => request.project = Some(project),
+                Err(err) => {
+                    eprintln!("lector: cannot open {}: {err}", request.root.display());
+                    cx.quit();
+                    return;
+                }
+            }
+            lector_ui::init(cx, registry, mode, (settings, warnings));
+            lector_ui_git::init(cx);
             if let Err(err) = lector_ui::open_workspace_window(cx, request) {
                 eprintln!("lector: failed to open window: {err:#}");
                 cx.quit();

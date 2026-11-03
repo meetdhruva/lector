@@ -152,3 +152,150 @@ mod tests {
         assert_eq!(results[0].0, 1);
     }
 }
+
+/// One ranked match of a [`NucleoList`].
+#[derive(Clone, Debug)]
+pub struct NucleoMatch<T> {
+    /// The item.
+    pub item: T,
+    /// Matched byte positions in the item's haystack.
+    pub positions: Vec<usize>,
+}
+
+/// A fuzzy-ranked list backed by `lector_search::Picker` (nucleo): items can
+/// be pushed from any thread; matching runs on nucleo's worker threads.
+pub struct NucleoList<T: Clone + Send + Sync + 'static> {
+    picker: lector_search::Picker<(T, std::sync::Arc<str>)>,
+    query: String,
+}
+
+impl<T: Clone + Send + Sync + 'static> NucleoList<T> {
+    /// Empty list. `paths` tunes scoring for file paths.
+    pub fn new(paths: bool) -> Self {
+        let notify: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {});
+        let picker = if paths {
+            lector_search::Picker::new_for_paths(notify)
+        } else {
+            lector_search::Picker::new(notify)
+        };
+        NucleoList {
+            picker,
+            query: String::new(),
+        }
+    }
+
+    /// A sendable handle that adds items (`push(item, haystack)`).
+    pub fn injector(&self) -> NucleoInjector<T> {
+        NucleoInjector(self.picker.injector())
+    }
+
+    /// Adds `item` matched against `haystack`.
+    pub fn push(&self, item: T, haystack: &str) {
+        self.picker
+            .injector()
+            .push((item, std::sync::Arc::from(haystack)), haystack);
+    }
+
+    /// Sets the query (nucleo syntax).
+    pub fn set_query(&mut self, query: &str) {
+        if query != self.query {
+            self.picker.set_query(query);
+            self.query = query.to_string();
+        }
+    }
+
+    /// Current query.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Lets matching progress for up to `ms`; true while still running.
+    pub fn tick(&mut self, ms: u64) -> bool {
+        self.picker.tick(ms)
+    }
+
+    /// Ticks until matching settles (at most ~`budget_ms`). For small lists.
+    pub fn settle(&mut self, budget_ms: u64) {
+        let start = std::time::Instant::now();
+        while self.picker.tick(5) && start.elapsed().as_millis() < budget_ms as u128 {}
+    }
+
+    /// Number of matches / items.
+    pub fn counts(&self) -> (u32, u32) {
+        (self.picker.matched_count(), self.picker.total_count())
+    }
+
+    /// The best `limit` matches with byte positions.
+    pub fn top(&self, limit: u32) -> Vec<NucleoMatch<T>> {
+        self.picker
+            .matches(0..limit)
+            .into_iter()
+            .map(|m| {
+                let (item, hay) = m.item;
+                NucleoMatch {
+                    item: item.clone(),
+                    positions: char_to_byte_positions(hay, &m.indices),
+                }
+            })
+            .collect()
+    }
+}
+
+/// Sendable injector for a [`NucleoList`].
+pub struct NucleoInjector<T: Clone + Send + Sync + 'static>(
+    lector_search::PickerInjector<(T, std::sync::Arc<str>)>,
+);
+
+impl<T: Clone + Send + Sync + 'static> Clone for NucleoInjector<T> {
+    fn clone(&self) -> Self {
+        NucleoInjector(self.0.clone())
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> NucleoInjector<T> {
+    /// Adds `item` matched against `haystack`.
+    pub fn push(&self, item: T, haystack: &str) {
+        self.0
+            .push((item, std::sync::Arc::from(haystack)), haystack);
+    }
+}
+
+/// Converts sorted char indices in `text` to byte offsets.
+pub fn char_to_byte_positions(text: &str, chars: &[u32]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(chars.len());
+    let mut wanted = chars.iter().peekable();
+    for (ci, (bi, _)) in text.char_indices().enumerate() {
+        match wanted.peek() {
+            Some(&&w) if w as usize == ci => {
+                out.push(bi);
+                wanted.next();
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod nucleo_tests {
+    use super::*;
+
+    #[test]
+    fn ranks_and_positions() {
+        let mut list = NucleoList::<usize>::new(true);
+        for (i, p) in ["src/main.rs", "crates/x/src/lib.rs", "README.md"]
+            .iter()
+            .enumerate()
+        {
+            list.push(i, p);
+        }
+        list.set_query("main");
+        list.settle(500);
+        let top = list.top(10);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].item, 0);
+        assert_eq!(top[0].positions, vec![4, 5, 6, 7]);
+        assert_eq!(char_to_byte_positions("aé b", &[0, 1, 3]), vec![0, 1, 4]);
+    }
+}

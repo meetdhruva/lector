@@ -169,6 +169,30 @@ impl ThemeState {
         });
     }
 
+    /// A copy of the theme registry (to reload user themes off the global).
+    pub fn registry_clone(cx: &App) -> ThemeRegistry {
+        cx.global::<ThemeState>().registry.clone()
+    }
+
+    /// Replaces the registry (e.g. after reloading the themes folder).
+    pub fn replace_registry(cx: &mut App, registry: ThemeRegistry) {
+        Self::update(cx, |s| s.registry = registry);
+    }
+
+    /// Applies a full configuration (from settings) in one refresh.
+    pub fn configure(cx: &mut App, mode: ThemeMode, light: &str, dark: &str, colorblind: bool) {
+        Self::update(cx, |s| {
+            s.mode = mode;
+            if s.registry.get(light).is_some() {
+                s.light_theme = light.to_string().into();
+            }
+            if s.registry.get(dark).is_some() {
+                s.dark_theme = dark.to_string().into();
+            }
+            s.colorblind_diff = colorblind;
+        });
+    }
+
     /// Toggles between the configured light and dark themes.
     pub fn toggle_appearance(cx: &mut App) {
         Self::update(cx, |s| {

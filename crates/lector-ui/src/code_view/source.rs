@@ -131,6 +131,19 @@ pub trait CodeSource: 'static {
         Some(row)
     }
 
+    /// Custom gutter label for `row` replacing the line number (e.g. the
+    /// "old new" number pair of a unified diff). Only used when
+    /// [`CodeSource::line_number_chars`] is `Some`.
+    fn line_number_label(&self, _row: u32) -> Option<SharedString> {
+        None
+    }
+
+    /// Width of the line-number column in characters when labels come from
+    /// [`CodeSource::line_number_label`]; `None` = numbers from `line_number`.
+    fn line_number_chars(&self) -> Option<usize> {
+        None
+    }
+
     /// Row backgrounds and range highlights for `rows` (diffs).
     fn row_decorations(&self, _rows: Range<u32>) -> Vec<RowDecoration> {
         Vec::new()
@@ -138,6 +151,12 @@ pub trait CodeSource: 'static {
 
     /// Language display name for the status bar.
     fn language_name(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// The full text as an immutable snapshot, when the source has one
+    /// (enables background search over the document).
+    fn text_snapshot(&self) -> Option<lector_text::Text> {
         None
     }
 }

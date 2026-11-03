@@ -17,8 +17,23 @@ smallvec.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 tracing.workspace = true
+lector-config.workspace = true
+lector-workspace.workspace = true
+lector-search.workspace = true
+lector-fs.workspace = true
+lector-syntax.workspace = true
+lector-text.workspace = true
+lector-git.workspace = true
+lector-diff.workspace = true
+lector-lsp.workspace = true
+parking_lot.workspace = true
+futures = "0.3"
+pulldown-cmark = { version = "0.13", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+resvg = { version = "0.45", default-features = false }
 
 [dev-dependencies]
+tempfile.workspace = true
 gpui = { version = "0.2.2", features = ["test-support"] }
 
 [features]

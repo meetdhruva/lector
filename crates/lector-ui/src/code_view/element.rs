@@ -111,6 +111,8 @@ pub(crate) struct LayoutSnapshot {
     pub tab_size: usize,
     pub fold_starts: HashSet<u32>,
     pub line_number_right: Pixels,
+    /// Right edge of the gutter annotation (blame) column; `bounds.left()` when hidden.
+    pub annotation_right: Pixels,
     pub diff_bar_x: Pixels,
     pub fold_x: Pixels,
     pub minimap_top_row: u32,
@@ -195,13 +197,20 @@ impl CodeView {
         let line_count = source.line_count().max(1);
 
         // Gutter: [pad][line numbers][gap][diff bar][fold column][pad].
-        let digits = (line_count.max(1) as f64).log10().floor() as usize + 1;
+        let digits = source
+            .line_number_chars()
+            .unwrap_or_else(|| (line_count.max(1) as f64).log10().floor() as usize + 1);
         let ln_width = if self.line_numbers_visible() {
             char_width * digits.max(3) as f32
         } else {
             px(0.)
         };
-        let line_number_right = bounds.left() + px(GUTTER_LEFT_PAD) + ln_width;
+        let annotation_width = self
+            .gutter_annotations()
+            .map(|a| (char_width * 0.9 * a.width_chars as f32 + px(18.)).round())
+            .unwrap_or(px(0.));
+        let annotation_right = bounds.left() + annotation_width;
+        let line_number_right = annotation_right + px(GUTTER_LEFT_PAD) + ln_width;
         let diff_bar_x = line_number_right + px(8.);
         let fold_x = diff_bar_x + px(5.);
         let gutter_width = (fold_x + px(FOLD_COLUMN) + px(4.)) - bounds.left();
@@ -538,12 +547,39 @@ impl CodeView {
             tab_size: tab,
             fold_starts,
             line_number_right,
+            annotation_right,
             diff_bar_x,
             fold_x,
             minimap_top_row,
         });
         self.last_layout = Some(snapshot.clone());
         snapshot
+    }
+
+    /// Window point (top-left of the glyph's line box) of `pos`, if it was
+    /// painted in the last frame. Used to anchor popovers.
+    pub fn point_for_pos(&self, pos: Pos) -> Option<Point<Pixels>> {
+        let l = self.last_layout.as_ref()?;
+        let rl = l
+            .rows
+            .iter()
+            .filter(|r| r.row == pos.row && pos.col >= r.seg_start)
+            .find(|r| pos.col <= r.seg_end || r.last_seg)?;
+        Some(point(l.text_origin_x + rl.x_for_col(pos.col), rl.y))
+    }
+
+    /// Line height of the last layout.
+    pub fn line_height(&self) -> Option<Pixels> {
+        self.last_layout.as_ref().map(|l| l.line_height)
+    }
+
+    /// First buffer row visible in the last frame (0 before the first paint).
+    pub fn top_visible_row(&self) -> u32 {
+        self.last_layout
+            .as_ref()
+            .and_then(|l| l.rows.first())
+            .map(|r| r.row)
+            .unwrap_or(0)
     }
 
     /// Buffer position for a window point, using the last layout.
@@ -679,6 +715,7 @@ impl Element for CodeElement {
         let search_matches: Vec<(u32, Range<usize>)> = search_matches.to_vec();
         let decorations = view.decorations().to_vec();
         let annotations = view.annotations().clone();
+        let gutter_annotations = view.gutter_annotations().cloned();
         let source = view.source().clone();
         let gutter_hovered = view.gutter_hovered;
         let folded: HashSet<u32> = layout
@@ -992,6 +1029,9 @@ impl Element for CodeElement {
                 &settings,
                 &theme,
             );
+            if let Some(ann) = &gutter_annotations {
+                paint_gutter_annotations(window, cx, &layout, ann, &settings, &theme);
+            }
 
             // Sticky header.
             if !layout.sticky.is_empty() {
@@ -1259,7 +1299,23 @@ fn paint_gutter(
     for rl in &layout.rows {
         // Line numbers.
         if rl.first_seg && layout.line_number_right > layout.bounds.left() + px(GUTTER_LEFT_PAD) {
-            if let Some(n) = source.line_number(rl.row) {
+            let custom = source
+                .line_number_chars()
+                .and_then(|_| source.line_number_label(rl.row));
+            if let Some(label) = custom {
+                let color = if rl.row == cursor_row {
+                    ui.line_number_active.hsla()
+                } else {
+                    ui.line_number.hsla()
+                };
+                let shaped = shape_plain(window, &label, layout.font_size * 0.93, color, settings);
+                let _ = shaped.paint(
+                    point(layout.line_number_right - shaped.width, rl.y),
+                    lh,
+                    window,
+                    cx,
+                );
+            } else if let Some(n) = source.line_number(rl.row) {
                 let is_cursor = rl.row == cursor_row;
                 let label = if settings.relative_line_numbers && !is_cursor {
                     rl.row.abs_diff(cursor_row).to_string()
@@ -1647,7 +1703,16 @@ fn register_mouse_handlers(
                 match event.button {
                     MouseButton::Left => {
                         if l.gutter_bounds.contains(&p) {
-                            if p.x >= l.fold_x && l.fold_starts.contains(&pos.row) {
+                            let annotation_cb = (p.x < l.annotation_right)
+                                .then(|| v.gutter_annotation_click_callback())
+                                .flatten()
+                                .and_then(|cb| {
+                                    let ix = v.gutter_annotations()?.block_at(pos.row)?;
+                                    Some((cb, ix))
+                                });
+                            if let Some((cb, ix)) = annotation_cb {
+                                cx.defer_in(window, move |_, window, cx| cb(ix, window, cx));
+                            } else if p.x >= l.fold_x && l.fold_starts.contains(&pos.row) {
                                 let folded = v.is_folded(pos.row);
                                 v.set_folded(pos.row, !folded, cx);
                             } else {
@@ -1815,4 +1880,97 @@ fn minimap_scroll_to(
     v.scroll.y = target.clamp(px(0.), l.max_scroll.y);
     cx.emit(CodeViewEvent::Scrolled);
     cx.notify();
+}
+
+/// Paints the left gutter annotation (blame) column.
+fn paint_gutter_annotations(
+    window: &mut Window,
+    cx: &mut App,
+    layout: &LayoutSnapshot,
+    ann: &super::GutterAnnotations,
+    settings: &EditorSettings,
+    theme: &lector_theme::Theme,
+) {
+    let ui = &theme.ui;
+    let lh = layout.line_height;
+    let left = layout.bounds.left();
+    let width = layout.annotation_right - left;
+    if width <= px(0.) {
+        return;
+    }
+    let font_size = layout.font_size * 0.86;
+    let shade = ui.text.hsla().opacity(0.045);
+    let mut last_block: Option<usize> = None;
+    // Rows under the sticky header are hidden; labels go on the first row below it.
+    let visible_top = layout.bounds.top() + layout.sticky_height() - lh * 0.5;
+    for rl in &layout.rows {
+        let Some(ix) = ann.block_at(rl.row) else {
+            last_block = None;
+            continue;
+        };
+        if rl.y < visible_top {
+            continue;
+        }
+        let block = &ann.blocks[ix];
+        let row_bounds = Bounds::new(point(left, rl.y), size(width, lh));
+        if block.shaded {
+            window.paint_quad(fill(row_bounds, shade));
+        }
+        if let Some(bar) = block.bar {
+            window.paint_quad(fill(
+                Bounds::new(point(left + px(3.), rl.y), size(px(2.), lh)),
+                bar,
+            ));
+        }
+        let first_visible = last_block != Some(ix);
+        last_block = Some(ix);
+        if !first_visible || !rl.first_seg {
+            continue;
+        }
+        // Separator above each block.
+        if rl.row == block.rows.start && rl.row > 0 {
+            window.paint_quad(fill(
+                Bounds::new(point(left, rl.y), size(width, px(1.))),
+                ui.border_variant.hsla().opacity(0.6),
+            ));
+        }
+        let color = if block.muted {
+            ui.text_faint.hsla()
+        } else {
+            ui.text_muted.hsla()
+        };
+        let detail = shape_plain(
+            window,
+            &block.detail,
+            font_size,
+            ui.text_faint.hsla(),
+            settings,
+        );
+        let detail_x = layout.annotation_right - px(8.) - detail.width;
+        let text_x = left + px(10.);
+        let max_text = (detail_x - px(8.) - text_x).max(px(0.));
+        // Truncate the label to the space left of the detail.
+        let mut text = block.text.to_string();
+        let mut shaped = shape_plain(window, &text, font_size, color, settings);
+        while shaped.width > max_text && !text.is_empty() {
+            let keep = text.chars().count().saturating_sub(2);
+            text = text.chars().take(keep).collect::<String>();
+            let label = format!("{}…", text.trim_end());
+            shaped = shape_plain(window, &label, font_size, color, settings);
+            if shaped.width <= max_text {
+                break;
+            }
+        }
+        let y = rl.y;
+        let _ = shaped.paint(point(text_x, y), lh, window, cx);
+        let _ = detail.paint(point(detail_x, y), lh, window, cx);
+    }
+    // Divider between annotations and line numbers.
+    window.paint_quad(fill(
+        Bounds::new(
+            point(layout.annotation_right - px(1.), layout.bounds.top()),
+            size(px(1.), layout.bounds.size.height),
+        ),
+        ui.border_variant.hsla(),
+    ));
 }

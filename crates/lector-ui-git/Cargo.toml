@@ -1,0 +1,28 @@
+[package]
+name = "lector-ui-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Git review views for Lector: changes, diffs, history, branches, blame."
+
+[dependencies]
+gpui = "0.2.2"
+lector-ui.workspace = true
+lector-workspace.workspace = true
+lector-git.workspace = true
+lector-diff.workspace = true
+lector-text.workspace = true
+lector-syntax.workspace = true
+lector-theme.workspace = true
+lector-icons.workspace = true
+lector-config.workspace = true
+lector-fs.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

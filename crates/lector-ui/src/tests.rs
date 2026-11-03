@@ -239,3 +239,96 @@ fn tree_view_expansion_and_keyboard(cx: &mut TestAppContext) {
         assert_eq!(t.selected_id().map(String::as_str), Some("src/views/a.rs"))
     });
 }
+
+/// End-to-end: a workspace over a real project folder loads the file list,
+/// opens a document with tree-sitter highlights and outline, and reveals a
+/// position (all work happens on background executors).
+#[gpui::test]
+fn workspace_opens_documents_from_project(cx: &mut TestAppContext) {
+    use crate::views::Workspace;
+
+    init(cx);
+    let mut settings = lector_config::Settings::default();
+    settings.lsp.enabled = false;
+    settings.session.restore = false;
+    let applied = settings.clone();
+    cx.update(|cx: &mut App| {
+        cx.set_global(crate::settings::AppSettings {
+            settings: std::sync::Arc::new(applied),
+            warnings: Default::default(),
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "struct Point {\n    x: i32,\n}\n\nfn main() {\n    let p = Point { x: 1 };\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nHello *world*.\n").unwrap();
+    std::fs::write(dir.path().join("data.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+    let project = lector_workspace::Project::open(dir.path(), settings).unwrap();
+    let root = project.root().to_path_buf();
+
+    let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
+    cx.run_until_parked();
+    workspace.read_with(cx, |ws, _| {
+        let files: Vec<&str> = ws.file_list().paths.iter().map(|p| &**p).collect();
+        assert_eq!(files, vec!["README.md", "data.bin", "src/main.rs"]);
+    });
+
+    let view = workspace
+        .update_in(cx, |ws, window, cx| {
+            ws.open_path_at(root.join("src/main.rs"), Some(6), Some(9), window, cx)
+        })
+        .expect("file view");
+    cx.run_until_parked();
+    view.read_with(cx, |v, cx| {
+        let doc = v.document().expect("loaded");
+        assert_eq!(doc.language().map(|l| l.name.as_str()), Some("Rust"));
+        assert!(doc.outline().iter().any(|i| i.name == "Point"));
+        let code = v.code_view().read(cx);
+        assert_eq!(code.cursor(), Pos::new(5, 8));
+        assert_eq!(code.line_text(4).as_ref(), "fn main() {");
+        assert_eq!(v.meta().unwrap().encoding.as_ref(), "UTF-8");
+    });
+    // Highlights arrive from the background for requested rows.
+    let source = view.read_with(cx, |v, cx| v.code_view().read(cx).source().clone());
+    let _ = source.highlights(0..7);
+    cx.run_until_parked();
+    assert!(source.highlights(0..7).iter().any(
+        |s| matches!(s.style, crate::code_view::SpanStyle::Capture(c) if c.starts_with("keyword"))
+    ));
+    assert!(!source.sticky_rows(1).is_empty());
+
+    // Binary files show a panel, not text.
+    let bin = workspace
+        .update_in(cx, |ws, window, cx| {
+            ws.open_path_at(root.join("data.bin"), None, None, window, cx)
+        })
+        .expect("file view");
+    cx.run_until_parked();
+    bin.read_with(cx, |v, _| assert!(v.meta().is_none()));
+    workspace.read_with(cx, |ws, cx| {
+        assert!(ws.active_code_view(cx).is_none());
+        assert_eq!(ws.file_views(cx).len(), 2);
+    });
+
+    // GoBack returns to the previous location (recorded on the jump).
+    cx.update(|window, cx| {
+        let focus = bin.focus_handle(cx);
+        window.focus(&focus);
+    });
+    cx.dispatch_action(crate::actions::workspace::GoBack);
+    cx.run_until_parked();
+    workspace.read_with(cx, |ws, cx| {
+        assert_eq!(ws.active_path(cx), Some(root.join("src/main.rs")));
+        let cursor = ws.active_code_view(cx).unwrap().read(cx).cursor();
+        assert_eq!(cursor, Pos::new(5, 8));
+    });
+    cx.dispatch_action(crate::actions::workspace::GoForward);
+    cx.run_until_parked();
+    workspace.read_with(cx, |ws, cx| {
+        assert_eq!(ws.active_path(cx), Some(root.join("data.bin")));
+    });
+}

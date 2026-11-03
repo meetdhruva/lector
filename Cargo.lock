@@ -4365,8 +4365,11 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs 6.0.0",
+ "lector-config",
  "lector-theme",
  "lector-ui",
+ "lector-ui-git",
+ "lector-workspace",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4520,18 +4523,70 @@ name = "lector-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "gpui",
+ "image",
+ "lector-config",
+ "lector-diff",
+ "lector-fs",
+ "lector-git",
  "lector-icons",
+ "lector-lsp",
+ "lector-search",
+ "lector-syntax",
+ "lector-text",
  "lector-theme",
+ "lector-workspace",
+ "parking_lot",
+ "pulldown-cmark",
+ "resvg",
  "smallvec",
+ "tempfile",
  "tracing",
  "unicode-segmentation",
  "unicode-width",
 ]
 
 [[package]]
+name = "lector-ui-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "lector-config",
+ "lector-diff",
+ "lector-fs",
+ "lector-git",
+ "lector-icons",
+ "lector-syntax",
+ "lector-text",
+ "lector-theme",
+ "lector-ui",
+ "lector-workspace",
+ "parking_lot",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "lector-workspace"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "lector-config",
+ "lector-diff",
+ "lector-fs",
+ "lector-git",
+ "lector-lsp",
+ "lector-search",
+ "lector-syntax",
+ "lector-text",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "libc"
@@ -5743,6 +5798,17 @@ checksum = "4dcd034599e63b970727f70d79e02d62390a4a84f7c6b827c27c46d5ac3fa622"
 dependencies = [
  "ar_archive_writer",
  "cc",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]
