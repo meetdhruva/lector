@@ -4,9 +4,12 @@ name: Release
 #   - push a tag `vX.Y.Z` (the version must match `workspace.package.version`), or
 #   - run manually (Actions → Release → Run workflow) with a tag; the tag is created
 #     at the selected commit if it does not exist yet.
+#   - push a `release/**` branch for a dry run: everything is built and uploaded as
+#     workflow artifacts, nothing is published.
 on:
   push:
     tags: ["v*"]
+    branches: ["release/**"]
   workflow_dispatch:
     inputs:
       tag:
@@ -37,15 +40,23 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
+      publish: ${{ steps.meta.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
       - name: Resolve version
         id: meta
         shell: bash
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${TAG#v}"
           CARGO_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)"
+          PUBLISH=true
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "branch" ]; then
+            # Dry run from a release/** branch.
+            TAG="v$CARGO_VERSION"
+            PUBLISH=false
+          else
+            TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          fi
+          VERSION="${TAG#v}"
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag $TAG does not match workspace version $CARGO_VERSION"
             exit 1
@@ -56,6 +67,7 @@ jobs:
             echo "tag=$TAG"
             echo "version=$VERSION"
             echo "prerelease=$PRERELEASE"
+            echo "publish=$PUBLISH"
           } >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
@@ -234,6 +246,7 @@ jobs:
   publish:
     name: Publish release
     needs: [prepare, linux, macos, windows]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

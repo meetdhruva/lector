@@ -8,7 +8,7 @@ use std::time::Duration;
 use notify_debouncer_full::notify::event::{AccessKind, MetadataKind, ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, NoCache,
 };
 
 use crate::{Error, Result};
@@ -49,7 +49,7 @@ pub enum WatchEvent {
 
 /// A running watcher; dropping it stops watching.
 pub struct Watcher {
-    _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer<RecommendedWatcher, NoCache>,
 }
 
 impl std::fmt::Debug for Watcher {
@@ -77,7 +77,11 @@ pub fn watch(
     // Don't follow symlinks (like the walker): a link to `/` or `$HOME` inside the
     // project would otherwise make the watcher crawl and watch that whole tree.
     let config = notify::Config::default().with_follow_symlinks(false);
-    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
+    // `NoCache` on every platform: the debouncer's file-id cache (its default on macOS
+    // and Windows) walks the whole tree *following symlinks* when watching starts,
+    // which is slow on large repos and never ends with a link to `/`. We only need
+    // path-level changes, so rename stitching by file id is not required.
+    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
         debounce,
         None,
         move |result: DebounceEventResult| {
@@ -85,7 +89,7 @@ pub fn watch(
                 sink(event);
             }
         },
-        RecommendedCache::new(),
+        NoCache::new(),
         config,
     )
     .map_err(Error::Notify)?;
@@ -149,22 +153,32 @@ fn classify(path: &Path, roots: &[PathBuf]) -> PathClass {
     }
 }
 
-/// Folds a later event kind for the same path into an earlier one.
-fn merge(old: FsEventKind, new: FsEventKind) -> Option<FsEventKind> {
+/// Folds a later event kind for the same path into an earlier one. Returns the
+/// merged kind and whether the sequence was contradictory (created and removed in
+/// the same batch, in either order), which is resolved against the disk later.
+fn merge(old: FsEventKind, new: FsEventKind) -> (FsEventKind, bool) {
     use FsEventKind::*;
     match (old, new) {
-        (Created, Removed) => None,
-        (Created, _) => Some(Created),
-        (Removed, Created | Modified) => Some(Modified),
-        (_, new) => Some(new),
+        (Created, Removed) | (Removed, Created) => (new, true),
+        (Created, _) => (Created, false),
+        (Removed, Modified) => (Modified, true),
+        (_, new) => (new, false),
     }
 }
 
 #[derive(Default)]
 struct Batch {
-    events: Vec<Option<FsEvent>>,
+    events: Vec<Slot>,
     index: HashMap<PathBuf, usize>,
     git_changed: bool,
+}
+
+struct Slot {
+    event: FsEvent,
+    /// The first kind seen for this path in the batch.
+    first: FsEventKind,
+    /// Created and removed within the batch: the final state comes from the disk.
+    contradictory: bool,
 }
 
 impl Batch {
@@ -174,25 +188,44 @@ impl Batch {
             PathClass::GitState => self.git_changed = true,
             PathClass::File => match self.index.get(path) {
                 Some(&slot) => {
-                    let merged = self.events[slot].as_ref().map(|event| event.kind);
-                    let merged = match merged {
-                        Some(old) => merge(old, kind),
-                        None => Some(kind),
-                    };
-                    self.events[slot] = merged.map(|kind| FsEvent {
-                        path: path.to_path_buf(),
-                        kind,
-                    });
+                    let slot = &mut self.events[slot];
+                    let (merged, contradictory) = merge(slot.event.kind, kind);
+                    slot.event.kind = merged;
+                    slot.contradictory |= contradictory;
                 }
                 None => {
                     self.index.insert(path.to_path_buf(), self.events.len());
-                    self.events.push(Some(FsEvent {
-                        path: path.to_path_buf(),
-                        kind,
-                    }));
+                    self.events.push(Slot {
+                        event: FsEvent {
+                            path: path.to_path_buf(),
+                            kind,
+                        },
+                        first: kind,
+                        contradictory: false,
+                    });
                 }
             },
         }
+    }
+
+    /// The batch's file events. Contradictory sequences are settled by whether the
+    /// path exists now: backends disagree on what they report (FSEvents, for one,
+    /// tags a deletion with the file's earlier "created" and "modified" flags too).
+    fn into_file_events(self) -> Vec<FsEvent> {
+        self.events
+            .into_iter()
+            .map(|slot| {
+                let mut event = slot.event;
+                if slot.contradictory {
+                    event.kind = match exists_kind(&event.path) {
+                        FsEventKind::Removed => FsEventKind::Removed,
+                        _ if slot.first == FsEventKind::Created => FsEventKind::Created,
+                        _ => FsEventKind::Modified,
+                    };
+                }
+                event
+            })
+            .collect()
     }
 }
 
@@ -266,11 +299,12 @@ fn convert(result: DebounceEventResult, roots: &[PathBuf]) -> Vec<WatchEvent> {
         }
     }
     let mut out = Vec::new();
-    let files: Vec<FsEvent> = batch.events.into_iter().flatten().collect();
+    let git_changed = batch.git_changed;
+    let files = batch.into_file_events();
     if !files.is_empty() {
         out.push(WatchEvent::Files(files));
     }
-    if batch.git_changed {
+    if git_changed {
         out.push(WatchEvent::GitStateChanged);
     }
     out
@@ -331,52 +365,71 @@ mod tests {
 
     #[test]
     fn converts_and_coalesces_batches() {
-        let roots = roots();
+        // A real directory: contradictory sequences are settled against the disk.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let roots = vec![root.clone()];
+        let p = |rel: &str| root.join(rel);
+        let s = |rel: &str| p(rel).to_string_lossy().into_owned();
+        std::fs::write(p("c.txt"), "recreated").unwrap();
+        std::fs::write(p("f.rs"), "kept").unwrap();
         let events = vec![
-            event(EventKind::Create(CreateKind::File), &["/repo/a.txt"]),
+            event(EventKind::Create(CreateKind::File), &[&s("a.txt")]),
             event(
                 EventKind::Modify(ModifyKind::Data(DataChange::Any)),
-                &["/repo/a.txt"],
+                &[&s("a.txt")],
             ),
             event(
                 EventKind::Modify(ModifyKind::Data(DataChange::Any)),
-                &["/repo/b.txt"],
+                &[&s("b.txt")],
             ),
-            event(EventKind::Create(CreateKind::File), &["/repo/tmp~"]),
-            event(EventKind::Remove(RemoveKind::File), &["/repo/tmp~"]),
-            event(EventKind::Remove(RemoveKind::File), &["/repo/c.txt"]),
-            event(EventKind::Create(CreateKind::File), &["/repo/c.txt"]),
+            // Editor temp file: created and deleted within the batch.
+            event(EventKind::Create(CreateKind::File), &[&s("tmp~")]),
+            event(EventKind::Remove(RemoveKind::File), &[&s("tmp~")]),
+            // Atomic save: removed and recreated.
+            event(EventKind::Remove(RemoveKind::File), &[&s("c.txt")]),
+            event(EventKind::Create(CreateKind::File), &[&s("c.txt")]),
             event(
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
-                &["/repo/d", "/repo/e"],
+                &[&s("d"), &s("e")],
             ),
+            // FSEvents-style deletion carrying the file's earlier flags.
+            event(EventKind::Create(CreateKind::File), &[&s("g.rs")]),
             event(
                 EventKind::Modify(ModifyKind::Data(DataChange::Any)),
-                &["/repo/.git/index"],
+                &[&s("g.rs")],
+            ),
+            event(EventKind::Remove(RemoveKind::File), &[&s("g.rs")]),
+            // ...and the same flags on a file that still exists.
+            event(EventKind::Create(CreateKind::File), &[&s("f.rs")]),
+            event(EventKind::Remove(RemoveKind::File), &[&s("f.rs")]),
+            event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                &[&s(".git/index")],
             ),
             event(
                 EventKind::Create(CreateKind::File),
-                &["/repo/.git/refs/heads/x"],
+                &[&s(".git/refs/heads/x")],
             ),
             event(
                 EventKind::Create(CreateKind::File),
-                &["/repo/.git/objects/12/34"],
+                &[&s(".git/objects/12/34")],
             ),
         ];
         let out = convert(Ok(events), &roots);
-        let file = |path: &str, kind| FsEvent {
-            path: PathBuf::from(path),
-            kind,
-        };
+        let file = |rel: &str, kind| FsEvent { path: p(rel), kind };
         assert_eq!(
             out,
             vec![
                 WatchEvent::Files(vec![
-                    file("/repo/a.txt", FsEventKind::Created),
-                    file("/repo/b.txt", FsEventKind::Modified),
-                    file("/repo/c.txt", FsEventKind::Modified),
-                    file("/repo/d", FsEventKind::Removed),
-                    file("/repo/e", FsEventKind::Created),
+                    file("a.txt", FsEventKind::Created),
+                    file("b.txt", FsEventKind::Modified),
+                    file("tmp~", FsEventKind::Removed),
+                    file("c.txt", FsEventKind::Modified),
+                    file("d", FsEventKind::Removed),
+                    file("e", FsEventKind::Created),
+                    file("g.rs", FsEventKind::Removed),
+                    file("f.rs", FsEventKind::Created),
                 ]),
                 WatchEvent::GitStateChanged,
             ]

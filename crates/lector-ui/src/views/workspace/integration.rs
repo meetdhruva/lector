@@ -362,6 +362,10 @@ impl Workspace {
                         // Inside an ignored or excluded folder (e.g. target/).
                         continue;
                     }
+                    if matches!(ev.kind, lector_fs::FsEventKind::Removed) && !known_file {
+                        // A path we never listed (e.g. an editor's temp file) went away.
+                        continue;
+                    }
                     if !matches!(ev.kind, lector_fs::FsEventKind::Modified) || !known_file {
                         structural = true;
                     }
