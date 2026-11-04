@@ -9,24 +9,31 @@ use std::sync::Arc;
 
 use gpui::{
     div, img, prelude::*, px, AnyView, App, ClickEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, ImageSource, Pixels, SharedString, Subscription, Task, WeakEntity,
-    Window,
+    Focusable, FontWeight, Hsla, ImageSource, MouseButton, MouseDownEvent, Pixels, SharedString,
+    Subscription, Task, WeakEntity, Window,
 };
 use lector_config::DiffLayout;
 use lector_diff::{DiffOptions, DiffStats, Whitespace};
-use lector_git::{ChangeKind, FileChange};
+use lector_git::{ChangeKind, Changeset, FileChange, Side};
 use lector_ui::actions::diff as diff_actions;
+use lector_ui::actions::editor as editor_actions;
+use lector_ui::actions::git as git_actions;
 use lector_ui::code_view::{CodeSource, CodeView, CodeViewEvent, EditorSettings, Pos, Selection};
+use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
 use lector_ui::icons::{FileIcon, Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{self, diff_options, DiffKind, FileDiff, ReviewFile};
+use lector_workspace::review::{
+    self, diff_options, DiffKind, FileDiff, HunkAction, LineSelection, ReviewFile,
+};
 
+use crate::confirm::{confirm, ConfirmSpec};
 use crate::diff_source::{display_rows, hunk_display_starts, DiffColumn, DiffMeta, DiffSource};
-use crate::store::GitStore;
+use crate::staging::{run_op, unstage_paths_for, GitOp};
+use crate::store::{GitStore, GitStoreEvent};
 use crate::util::{format_size, kind_color, kind_label, split_path};
 
 /// What a [`DiffView`] shows.
@@ -110,6 +117,12 @@ pub struct DiffView {
     current_hunk: Option<usize>,
     viewed: Option<ViewedTarget>,
     last_layout: Layout,
+    /// Hunk to put the cursor on after the next load (after staging one).
+    pending_hunk: Option<usize>,
+    /// Last failed stage / unstage / discard (shown in a banner).
+    op_error: Option<SharedString>,
+    op_task: Option<Task<()>>,
+    menu: ContextMenuState,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -154,7 +167,12 @@ impl DiffView {
         let new_view = empty_view(cx);
         let unified_view = empty_view(cx);
         let ignore_whitespace = store.read(cx).settings(cx).diff.ignore_whitespace;
-        let mut subscriptions = Vec::new();
+        let mut subscriptions = vec![cx.subscribe(&store, |this, _, _: &GitStoreEvent, cx| {
+            // Index / working-tree sides change with every stage, unstage or edit.
+            if this.tracks_worktree() && this.op_task.is_none() {
+                this.reload(cx);
+            }
+        })];
         for (view, column) in [
             (&old_view, DiffColumn::Old),
             (&new_view, DiffColumn::New),
@@ -184,6 +202,10 @@ impl DiffView {
             current_hunk: None,
             viewed: None,
             last_layout: Layout::Split,
+            pending_hunk: None,
+            op_error: None,
+            op_task: None,
+            menu: ContextMenuState::default(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -294,6 +316,9 @@ impl DiffView {
                         this.error = None;
                         this.loaded = Some(loaded);
                         this.rebuild(cx);
+                        if let Some(k) = this.pending_hunk.take() {
+                            this.select_hunk(k, cx);
+                        }
                         cx.emit(DiffViewEvent::Loaded);
                     }
                     Err(e) => this.error = Some(e.into()),
@@ -406,6 +431,9 @@ impl DiffView {
     ) {
         match event {
             CodeViewEvent::Scrolled if column != DiffColumn::Unified => {
+                if !self.hunk_actions().is_empty() {
+                    cx.notify(); // keeps the hunk toolbars next to their hunks
+                }
                 let offset = view.read(cx).scroll_offset();
                 let other = if column == DiffColumn::Old {
                     &self.new_view
@@ -414,6 +442,11 @@ impl DiffView {
                 };
                 if other.read(cx).scroll_offset() != offset {
                     other.update(cx, |o, cx| o.set_scroll_offset(offset, cx));
+                }
+            }
+            CodeViewEvent::Scrolled => {
+                if !self.hunk_actions().is_empty() {
+                    cx.notify();
                 }
             }
             CodeViewEvent::SelectionChanged => {
@@ -504,6 +537,17 @@ impl DiffView {
                 }
             }
         };
+        self.select_hunk(next, cx);
+        true
+    }
+
+    /// Puts the cursor on hunk `k` (clamped to the last one) and scrolls to it.
+    fn select_hunk(&mut self, k: usize, cx: &mut Context<Self>) {
+        let starts = self.hunk_starts();
+        let Some(last) = starts.len().checked_sub(1) else {
+            return;
+        };
+        let next = k.min(last);
         self.current_hunk = Some(next);
         let row = starts[next];
         let views: Vec<_> = match self.last_layout {
@@ -517,7 +561,6 @@ impl DiffView {
             });
         }
         cx.notify();
-        true
     }
 
     fn toggle_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -616,6 +659,380 @@ impl DiffView {
         let path = target.file.path().to_string();
         cx.emit(DiffViewEvent::ViewedToggled(path, new_state));
         cx.notify();
+    }
+
+    // Staging (v0.2).
+
+    /// Whether either side is the index or the working tree (changes on git writes).
+    fn tracks_worktree(&self) -> bool {
+        match &self.target {
+            Some(DiffTarget::Change(c)) => [&c.old, &c.new]
+                .iter()
+                .any(|s| matches!(s, Side::Index(_) | Side::Workdir(_))),
+            Some(DiffTarget::FileVsRev { .. }) => true,
+            None => false,
+        }
+    }
+
+    /// The changeset this diff belongs to, when it is `Unstaged` or `Staged`.
+    pub fn changeset(&self) -> Option<Changeset> {
+        let key = &self.viewed.as_ref()?.key;
+        match review::parse_changeset_key(key)? {
+            cs @ (Changeset::Unstaged | Changeset::Staged) => Some(cs),
+            _ => None,
+        }
+    }
+
+    /// Hunk actions offered for this diff (Unstaged: stage + discard; Staged: unstage).
+    pub fn hunk_actions(&self) -> &'static [HunkAction] {
+        let text = self
+            .loaded
+            .as_ref()
+            .is_some_and(|l| l.diff.kind == DiffKind::Text && !l.diff.is_identical());
+        match (text, self.changeset()) {
+            (true, Some(cs)) => HunkAction::available_for(&cs),
+            _ => &[],
+        }
+    }
+
+    /// The hunk at the cursor (or the next one below it, else the last one).
+    fn hunk_at_cursor(&self, cx: &App) -> Option<usize> {
+        let loaded = self.loaded.as_ref()?;
+        let (src, view, unified) = self.active_source_in(cx)?;
+        let row = view.read(cx).cursor().row;
+        if let Some(crate::diff_source::DisplayRow::Row(ix)) = src.rows().get(row as usize) {
+            let hunk = if unified {
+                loaded.diff.unified.get(*ix).and_then(|r| r.hunk)
+            } else {
+                loaded.diff.split.get(*ix).and_then(|r| r.hunk)
+            };
+            if hunk.is_some() {
+                return hunk;
+            }
+        }
+        let starts = self.hunk_starts();
+        starts
+            .iter()
+            .position(|s| *s >= row)
+            .or_else(|| starts.len().checked_sub(1))
+    }
+
+    fn active_source_in(&self, cx: &App) -> Option<(Rc<DiffSource>, Entity<CodeView>, bool)> {
+        let (old, new, uni) = self.sources.as_ref()?;
+        Some(match self.last_layout {
+            Layout::Unified => (uni.clone(), self.unified_view.clone(), true),
+            Layout::Split => {
+                let old_sel = !self.old_view.read(cx).selection().is_empty();
+                let new_sel = !self.new_view.read(cx).selection().is_empty();
+                if old_sel && !new_sel {
+                    (old.clone(), self.old_view.clone(), false)
+                } else {
+                    (new.clone(), self.new_view.clone(), false)
+                }
+            }
+        })
+    }
+
+    /// Diff rows covered by the selection (old and new line numbers of changed rows).
+    fn selected_lines(&self, cx: &App) -> Option<LineSelection> {
+        let (src, view, _) = self.active_source_in(cx)?;
+        let sel = view.read(cx).selection();
+        if sel.is_empty() {
+            return None;
+        }
+        let (a, b) = sel.range();
+        let end = if b.col == 0 && b.row > a.row {
+            b.row
+        } else {
+            b.row + 1
+        };
+        let mut out = LineSelection::default();
+        for row in a.row..end {
+            let Some((old, new, kind)) = src.lines_at(row) else {
+                continue;
+            };
+            if kind == lector_diff::RowKind::Context {
+                continue;
+            }
+            if let Some(o) = old {
+                out.old.push(o..o + 1);
+            }
+            if let Some(n) = new {
+                out.new.push(n..n + 1);
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Stages / unstages / discards hunk `hunk`, or the selected lines when `lines`.
+    pub fn hunk_action(
+        &mut self,
+        action: HunkAction,
+        hunk: Option<usize>,
+        lines: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.hunk_actions().contains(&action) {
+            return;
+        }
+        let (Some(changeset), Some(loaded), Some(DiffTarget::Change(change))) =
+            (self.changeset(), self.loaded.as_ref(), self.target.clone())
+        else {
+            return;
+        };
+        let k = hunk.or_else(|| self.hunk_at_cursor(cx));
+        let selection = if lines {
+            self.selected_lines(cx)
+        } else {
+            k.and_then(|k| loaded.diff.hunk_selection(k))
+        };
+        let Some(selection) = selection else {
+            return;
+        };
+        let op = GitOp::Hunk {
+            changeset,
+            change: change.clone(),
+            action,
+            selection,
+        };
+        if action == HunkAction::Discard && self.store.read(cx).settings(cx).git.confirm_discard {
+            let Some(ws) = self.store.read(cx).workspace.upgrade() else {
+                return;
+            };
+            let what = if lines {
+                "the selected lines"
+            } else {
+                "this hunk"
+            };
+            let spec = ConfirmSpec {
+                title: format!("Discard {what}?").into(),
+                message: vec![
+                    format!(
+                        "The working-tree changes of {what} in {} are reverted to the staged \
+                         version. Other changes in the file are kept.",
+                        change.path()
+                    )
+                    .into(),
+                    "This cannot be undone.".into(),
+                ],
+                items: Vec::new(),
+                confirm_label: "Discard".into(),
+            };
+            let this = cx.entity().downgrade();
+            confirm(&ws, spec, window, cx, move |_, cx| {
+                let _ = this.update(cx, |v, cx| v.run_hunk_op(op, k, cx));
+            });
+            return;
+        }
+        self.run_hunk_op(op, k, cx);
+    }
+
+    fn run_hunk_op(&mut self, op: GitOp, hunk: Option<usize>, cx: &mut Context<Self>) {
+        let task = run_op(&self.store, op, cx);
+        self.op_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.op_task = None;
+                match result {
+                    Ok(_) => {
+                        this.op_error = None;
+                        // The hunk now at the same index is the next one.
+                        this.pending_hunk = hunk;
+                        this.reload(cx);
+                    }
+                    Err(e) => this.op_error = Some(e.into()),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Stages / unstages / discards the whole file of this diff.
+    fn file_action(&mut self, action: HunkAction, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(cs), Some(DiffTarget::Change(change))) = (self.changeset(), self.target.clone())
+        else {
+            cx.propagate();
+            return;
+        };
+        let op = match (action, cs) {
+            (HunkAction::Stage, Changeset::Unstaged) => {
+                GitOp::Stage(vec![change.path().to_string()])
+            }
+            (HunkAction::Unstage, Changeset::Staged) => GitOp::Unstage(unstage_paths_for(&change)),
+            (HunkAction::Discard, Changeset::Unstaged) => {
+                let Some(views) = self.store.read(cx).views.clone() else {
+                    return;
+                };
+                let path = change.path().to_string();
+                views.changes.update(cx, |p, cx| {
+                    p.request_discard(vec![path], Vec::new(), window, cx)
+                });
+                return;
+            }
+            _ => return,
+        };
+        self.run_hunk_op(op, None, cx);
+    }
+
+    fn deploy_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let actions = self.hunk_actions();
+        let has_lines = self.selected_lines(cx).is_some();
+        let focus = self
+            .active_source_in(cx)
+            .map(|(_, v, _)| v.focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone());
+        let this = cx.entity().downgrade();
+        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.context(focus);
+            let entry = |menu: ContextMenu,
+                         label: &'static str,
+                         icon: IconName,
+                         action: HunkAction,
+                         lines: bool| {
+                let t = this.clone();
+                menu.icon_entry(label, icon, move |window, cx| {
+                    let _ = t.update(cx, |v, cx| v.hunk_action(action, None, lines, window, cx));
+                })
+            };
+            for action in actions {
+                menu = match (action, has_lines) {
+                    (HunkAction::Stage, true) => {
+                        entry(menu, "Stage Selected Lines", IconName::Plus, *action, true)
+                    }
+                    (HunkAction::Unstage, true) => entry(
+                        menu,
+                        "Unstage Selected Lines",
+                        IconName::Minus,
+                        *action,
+                        true,
+                    ),
+                    (HunkAction::Discard, true) => entry(
+                        menu,
+                        "Discard Selected Lines…",
+                        IconName::Undo,
+                        *action,
+                        true,
+                    ),
+                    _ => menu,
+                };
+            }
+            for action in actions {
+                menu = match action {
+                    HunkAction::Stage => entry(menu, "Stage Hunk", IconName::Plus, *action, false),
+                    HunkAction::Unstage => {
+                        entry(menu, "Unstage Hunk", IconName::Minus, *action, false)
+                    }
+                    HunkAction::Discard => {
+                        entry(menu, "Discard Hunk…", IconName::Undo, *action, false)
+                    }
+                };
+            }
+            menu.separator()
+                .icon_action("Copy", IconName::Copy, Box::new(editor_actions::Copy))
+                .icon_action(
+                    "Open File",
+                    IconName::FileCode,
+                    Box::new(diff_actions::OpenInEditor),
+                )
+        });
+        self.menu
+            .deploy(menu, position, window, cx, |this: &mut Self| &mut this.menu);
+        cx.notify();
+    }
+
+    /// Floating Stage / Unstage / Discard buttons next to each visible hunk.
+    fn render_hunk_toolbars(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let actions = self.hunk_actions();
+        if actions.is_empty() {
+            return Vec::new();
+        }
+        let theme = cx.theme().clone();
+        let ui = &theme.ui;
+        let lh = Self::line_height(cx);
+        let view = match self.last_layout {
+            Layout::Split => &self.new_view,
+            Layout::Unified => &self.unified_view,
+        };
+        let scroll = view.read(cx).scroll_offset().y;
+        let viewport = window.viewport_size().height;
+        let busy = self.op_task.is_some();
+        let current = self.current_hunk.or_else(|| self.hunk_at_cursor(cx));
+        let mut out = Vec::new();
+        for (k, start) in self.hunk_starts().iter().enumerate() {
+            let y = lh * *start as f32 - scroll;
+            if y < -lh || y > viewport {
+                continue;
+            }
+            let top = (y - lh + (lh - px(20.)) / 2.).max(px(0.));
+            let mut bar = h_flex()
+                .absolute()
+                .top(top)
+                .right(px(18.))
+                .h(px(20.))
+                .px(px(2.))
+                .gap(px(1.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(if current == Some(k) {
+                    ui.border_focused.hsla()
+                } else {
+                    ui.border.hsla()
+                })
+                .bg(ui.elevated.hsla())
+                .shadow_sm()
+                .text_size(metrics::TEXT_XS);
+            for action in actions {
+                let (label, icon, tip): (&str, IconName, &str) = match action {
+                    HunkAction::Stage => ("Stage", IconName::Plus, "Stage Hunk (s)"),
+                    HunkAction::Unstage => ("Unstage", IconName::Minus, "Unstage Hunk (u)"),
+                    HunkAction::Discard => ("Discard", IconName::Undo, "Discard Hunk…"),
+                };
+                let action = *action;
+                bar = bar.child(
+                    h_flex()
+                        .id(("hunk-action", k * 4 + action as usize))
+                        .h(px(16.))
+                        .px(px(5.))
+                        .gap(px(3.))
+                        .rounded(px(3.))
+                        .text_color(if busy {
+                            ui.text_faint.hsla()
+                        } else {
+                            ui.text_muted.hsla()
+                        })
+                        .when(!busy, |el| {
+                            el.cursor_pointer()
+                                .hover(|s| s.bg(ui.hover.hsla()).text_color(ui.text.hsla()))
+                        })
+                        .child(
+                            Icon::new(icon)
+                                .size(IconSize::XSmall)
+                                .color(ui.text_muted.hsla()),
+                        )
+                        .child(label)
+                        .tooltip(Tooltip::text(tip))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            if this.op_task.is_none() {
+                                this.hunk_action(action, Some(k), false, window, cx);
+                            }
+                        })),
+                );
+            }
+            out.push(bar.into_any_element());
+        }
+        out
     }
 
     // Rendering.
@@ -1086,6 +1503,8 @@ impl Render for DiffView {
             self.current_hunk = None;
         }
         let ui = cx.theme().ui.clone();
+        let has_actions = !self.hunk_actions().is_empty();
+        let toolbars = self.render_hunk_toolbars(window, cx);
         v_flex()
             .id("diff-view")
             .key_context(contexts::DIFF_VIEW)
@@ -1129,8 +1548,117 @@ impl Render for DiffView {
                     cx.propagate();
                 }
             }))
+            .on_action(cx.listener(|this, _: &git_actions::StageHunk, window, cx| {
+                if this.hunk_actions().contains(&HunkAction::Stage) {
+                    this.hunk_action(HunkAction::Stage, None, false, window, cx)
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &git_actions::UnstageHunk, window, cx| {
+                    if this.hunk_actions().contains(&HunkAction::Unstage) {
+                        this.hunk_action(HunkAction::Unstage, None, false, window, cx)
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &git_actions::DiscardHunk, window, cx| {
+                    if this.hunk_actions().contains(&HunkAction::Discard) {
+                        this.hunk_action(HunkAction::Discard, None, false, window, cx)
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &git_actions::StageSelectedLines, window, cx| {
+                    if this.hunk_actions().contains(&HunkAction::Stage) {
+                        this.hunk_action(HunkAction::Stage, None, true, window, cx)
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &git_actions::UnstageSelectedLines, window, cx| {
+                    if this.hunk_actions().contains(&HunkAction::Unstage) {
+                        this.hunk_action(HunkAction::Unstage, None, true, window, cx)
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .on_action(cx.listener(|this, _: &git_actions::Stage, window, cx| {
+                this.file_action(HunkAction::Stage, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &git_actions::Unstage, window, cx| {
+                this.file_action(HunkAction::Unstage, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &git_actions::DiscardChanges, window, cx| {
+                    this.file_action(HunkAction::Discard, window, cx)
+                }),
+            )
             .child(self.render_header(layout, cx))
-            .child(div().flex_1().min_h_0().child(self.render_body(layout, cx)))
+            .when_some(self.op_error.clone(), |el, e| {
+                el.child(
+                    h_flex()
+                        .flex_none()
+                        .items_start()
+                        .gap(px(8.))
+                        .px(px(12.))
+                        .py(px(6.))
+                        .border_b_1()
+                        .border_color(ui.error.hsla().opacity(0.6))
+                        .bg(ui.error.hsla().opacity(0.08))
+                        .child(
+                            Icon::new(IconName::CircleX)
+                                .size(IconSize::Small)
+                                .color(ui.error.hsla()),
+                        )
+                        .child(
+                            div()
+                                .id("diff-op-error")
+                                .flex_1()
+                                .max_h(px(120.))
+                                .overflow_y_scroll()
+                                .text_size(metrics::TEXT_SM)
+                                .text_color(ui.text.hsla())
+                                .child(e),
+                        )
+                        .child(
+                            IconButton::new("diff-op-error-close", IconName::Close)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Dismiss"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.op_error = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .when(has_actions, |el| {
+                        el.capture_any_mouse_down(cx.listener(
+                            |this, e: &MouseDownEvent, window, cx| {
+                                if e.button == MouseButton::Right {
+                                    cx.stop_propagation();
+                                    this.deploy_menu(e.position, window, cx);
+                                }
+                            },
+                        ))
+                    })
+                    .child(self.render_body(layout, cx))
+                    .children(toolbars),
+            )
+            .children(self.menu.render())
     }
 }
 

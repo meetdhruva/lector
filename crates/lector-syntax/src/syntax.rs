@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tree_sitter::{ParseOptions, Parser, Tree};
 
 use crate::error::{Result, SyntaxError};
-use crate::input::{ChunkReader, TextInput};
+use crate::input::{ChunkReader, Point, TextInput};
 use crate::language::Language;
 use crate::outline::OutlineItem;
 
@@ -59,6 +59,7 @@ pub(crate) fn parse_tree<T: TextInput + ?Sized>(
     text: &T,
     ranges: Option<&[tree_sitter::Range]>,
     cancel: Option<&AtomicBool>,
+    old_tree: Option<&Tree>,
 ) -> Result<Tree> {
     PARSERS.with(|cell| {
         let mut parsers = cell.borrow_mut();
@@ -92,11 +93,11 @@ pub(crate) fn parse_tree<T: TextInput + ?Sized>(
                 };
                 parser.parse_with_options(
                     &mut read,
-                    None,
+                    old_tree,
                     Some(ParseOptions::new().progress_callback(&mut progress)),
                 )
             }
-            None => parser.parse_with_options(&mut read, None, None),
+            None => parser.parse_with_options(&mut read, old_tree, None),
         };
         // A cancelled parse leaves the parser mid-state; always start fresh.
         parser.reset();
@@ -132,9 +133,51 @@ impl Syntax {
                 max: MAX_PARSE_BYTES,
             });
         }
-        let tree = parse_tree(lang, text, None, cancel)?;
+        let tree = parse_tree(lang, text, None, cancel, None)?;
         Ok(Syntax {
             lang: lang.clone(),
+            tree,
+            shared: Arc::new(Shared::default()),
+        })
+    }
+
+    /// Incrementally re-parses after `edits` were applied to the text this tree
+    /// was parsed from; `text` is the text *after* all edits.
+    ///
+    /// `edits` must be sequentially valid, in the order given (each one
+    /// expressed against the text left by the previous ones), which is what
+    /// `lector_buffer::Transaction::deltas` provides. Invalid edits (inverted
+    /// ranges, positions past the new text) fall back to a full parse instead
+    /// of failing. `self` is left untouched; the result has fresh caches.
+    pub fn edit_and_reparse<T: TextInput + ?Sized>(
+        &self,
+        text: &T,
+        edits: &[SyntaxEdit],
+    ) -> Result<Syntax> {
+        let len = text.len();
+        if len > MAX_PARSE_BYTES {
+            return Err(SyntaxError::TooLarge {
+                len,
+                max: MAX_PARSE_BYTES,
+            });
+        }
+        let valid = edits
+            .iter()
+            .all(|e| e.start_byte <= e.old_end_byte && e.start_byte <= e.new_end_byte);
+        let old = if valid && !edits.is_empty() {
+            let mut tree = self.tree.clone();
+            for e in edits {
+                tree.edit(&e.to_input_edit());
+            }
+            Some(tree)
+        } else if edits.is_empty() {
+            Some(self.tree.clone())
+        } else {
+            None
+        };
+        let tree = parse_tree(&self.lang, text, None, None, old.as_ref())?;
+        Ok(Syntax {
+            lang: self.lang.clone(),
             tree,
             shared: Arc::new(Shared::default()),
         })
@@ -166,6 +209,41 @@ impl Syntax {
         };
         let node = root.named_descendant_for_byte_range(start, end)?;
         Some(NodeInfo::from_node(&node))
+    }
+}
+
+/// One text change for [`Syntax::edit_and_reparse`]. Same shape and field
+/// names as `lector_buffer::EditDelta` (this crate does not depend on it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyntaxEdit {
+    /// Byte offset where the replaced range starts.
+    pub start_byte: usize,
+    /// Byte offset where the replaced range ended, before the edit.
+    pub old_end_byte: usize,
+    /// Byte offset where the inserted text ends, after the edit.
+    pub new_end_byte: usize,
+    /// Point of `start_byte`.
+    pub start: Point,
+    /// Point of `old_end_byte` before the edit.
+    pub old_end: Point,
+    /// Point of `new_end_byte` after the edit.
+    pub new_end: Point,
+}
+
+impl SyntaxEdit {
+    fn to_input_edit(self) -> tree_sitter::InputEdit {
+        let p = |p: Point| tree_sitter::Point {
+            row: p.row as usize,
+            column: p.column as usize,
+        };
+        tree_sitter::InputEdit {
+            start_byte: self.start_byte,
+            old_end_byte: self.old_end_byte,
+            new_end_byte: self.new_end_byte,
+            start_position: p(self.start),
+            old_end_position: p(self.old_end),
+            new_end_position: p(self.new_end),
+        }
     }
 }
 

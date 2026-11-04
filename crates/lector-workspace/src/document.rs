@@ -144,6 +144,77 @@ impl Document {
         }
     }
 
+    /// A snapshot of the same file with edited `text` (v0.3 editing).
+    ///
+    /// Path, kind, language, encoding and the detected line ending and
+    /// indentation (the file's style, used when saving) are kept; `syntax`
+    /// must have been parsed from `text` (or be `None` while a reparse is
+    /// pending — syntax-derived data is then empty). Caches start empty.
+    pub fn with_text(&self, text: Text, syntax: Option<Syntax>) -> Document {
+        let inner = &self.inner;
+        Document {
+            inner: Arc::new(Inner {
+                path: inner.path.clone(),
+                rel: inner.rel.clone(),
+                kind: inner.kind,
+                size: text.len() as u64,
+                encoding: inner.encoding,
+                lossy: inner.lossy,
+                text: Some(text),
+                language: inner.language.clone(),
+                syntax,
+                line_ending: inner.line_ending,
+                indentation: inner.indentation,
+                highlight_cache: Mutex::new(HashMap::new()),
+                outline: OnceLock::new(),
+                folds: OnceLock::new(),
+            }),
+        }
+    }
+
+    /// The same snapshot under another path (after "Save As"). The language
+    /// is detected again from the new name.
+    pub fn with_path(
+        &self,
+        path: PathBuf,
+        rel: Option<String>,
+        languages: &LanguageRegistry,
+    ) -> Document {
+        let inner = &self.inner;
+        let language = languages.language_for_path(&path, None);
+        let same_language = match (&language, &inner.language) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let syntax = if same_language {
+            inner.syntax.clone()
+        } else {
+            match (&language, &inner.text) {
+                (Some(lang), Some(t)) if !t.is_mapped() => Syntax::parse(lang, t).ok(),
+                _ => None,
+            }
+        };
+        Document {
+            inner: Arc::new(Inner {
+                path,
+                rel,
+                kind: inner.kind,
+                size: inner.size,
+                encoding: inner.encoding,
+                lossy: inner.lossy,
+                text: inner.text.clone(),
+                language,
+                syntax,
+                line_ending: inner.line_ending,
+                indentation: inner.indentation,
+                highlight_cache: Mutex::new(HashMap::new()),
+                outline: OnceLock::new(),
+                folds: OnceLock::new(),
+            }),
+        }
+    }
+
     /// Absolute path.
     pub fn path(&self) -> &Path {
         &self.inner.path
@@ -352,34 +423,47 @@ impl Document {
     /// Change marks against `HEAD` for the diff gutter. Untracked/added files: every row Added.
     /// Empty outside a repository, for binary or very large files.
     pub fn diff_gutter(&self, project: &Project) -> Vec<GutterMark> {
-        let (Some(text), Some(rel), Some(repo)) = (self.text(), self.rel_path(), project.repo())
+        match self.gutter_base(project) {
+            Some(base) => self.gutter_against(&base),
+            None => Vec::new(),
+        }
+    }
+
+    /// The text the diff gutter compares against (`HEAD` version; empty for
+    /// untracked files), or `None` when this document has no gutter (outside
+    /// a repository, binary in `HEAD`, very large). Blocking (reads git).
+    pub fn gutter_base(&self, project: &Project) -> Option<String> {
+        let (Some(_), Some(rel), Some(repo)) = (self.text(), self.rel_path(), project.repo())
         else {
-            return Vec::new();
+            return None;
         };
         if self.is_large() {
-            return Vec::new();
+            return None;
         }
-        let old = match repo.head_text(&project.repo_path(rel)) {
+        match repo.head_text(&project.repo_path(rel)) {
             Ok(Some(bytes)) => {
                 if lector_diff::is_binary(&bytes) {
-                    return Vec::new();
+                    return None;
                 }
-                String::from_utf8_lossy(&bytes).into_owned()
+                Some(String::from_utf8_lossy(&bytes).into_owned())
             }
-            Ok(None) => {
-                if project.git_status().get(rel).is_none() {
-                    return Vec::new();
-                }
-                String::new()
-            }
-            Err(_) => return Vec::new(),
+            Ok(None) => project.git_status().get(rel).map(|_| String::new()),
+            Err(_) => None,
+        }
+    }
+
+    /// Diff gutter marks of this text against `base` (see [`Document::gutter_base`]).
+    /// Ignores CRLF-vs-LF differences.
+    pub fn gutter_against(&self, base: &str) -> Vec<GutterMark> {
+        let Some(text) = self.text() else {
+            return Vec::new();
         };
         let new = text.to_string();
         let opts = DiffOptions {
             whitespace: Whitespace::IgnoreEol,
             ..DiffOptions::default()
         };
-        gutter_marks(&diff_lines(&old, &new, &opts))
+        gutter_marks(&diff_lines(base, &new, &opts))
     }
 }
 

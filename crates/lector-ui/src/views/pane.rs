@@ -59,6 +59,14 @@ pub trait PaneItem: 'static {
     fn item_key(&self, _cx: &App) -> Option<SharedString> {
         None
     }
+    /// Unsaved changes (tab dot, close prompts).
+    fn is_dirty(&self, _cx: &App) -> bool {
+        false
+    }
+    /// Editing is blocked in an otherwise editable item (lock on the tab).
+    fn is_read_only(&self, _cx: &App) -> bool {
+        false
+    }
 }
 
 /// A file opened in a [`CodeView`].
@@ -240,10 +248,12 @@ impl Pane {
     ) {
         let id = self.next_id;
         self.next_id += 1;
+        item_opened(item.as_ref(), cx);
         let entry = PaneEntry { id, item, preview };
         let ix = if preview {
             if let Some(ix) = self.entries.iter().position(|e| e.preview) {
-                self.entries[ix] = entry;
+                let old = std::mem::replace(&mut self.entries[ix], entry);
+                item_closed(old.item.as_ref(), cx);
                 ix
             } else {
                 let ix = (self.active + 1).min(self.entries.len());
@@ -263,6 +273,7 @@ impl Pane {
     pub fn add_item_in_background(&mut self, item: Box<dyn PaneItem>, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
+        item_opened(item.as_ref(), cx);
         let ix = (self.active + 1).min(self.entries.len());
         self.entries.insert(
             ix,
@@ -317,12 +328,58 @@ impl Pane {
         self.activate(ix, true, window, cx);
     }
 
-    /// Closes item `ix`.
+    /// Closes item `ix`, asking first when it has unsaved changes that no
+    /// other tab keeps (Save / Don't Save / Cancel).
     pub fn close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.entries.get(ix).map(|e| e.id) else {
+            return;
+        };
+        self.close_ids(vec![id], window, cx);
+    }
+
+    /// File views among `ids` whose unsaved changes would be lost by closing
+    /// them (their document has no view outside the closing set).
+    fn dirty_views_among(&self, ids: &[usize], cx: &App) -> Vec<Entity<crate::editor::FileView>> {
+        let closing: Vec<Entity<crate::editor::FileView>> = self
+            .entries
+            .iter()
+            .filter(|e| ids.contains(&e.id))
+            .filter_map(|e| e.item.file_view())
+            .collect();
+        dirty_unshared(&closing, cx)
+    }
+
+    /// Closes the items with entry ids `ids` (after the unsaved-changes prompt).
+    fn close_ids(&mut self, ids: Vec<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self.dirty_views_among(&ids, cx);
+        if dirty.is_empty() {
+            self.close_ids_now(&ids, window, cx);
+            return;
+        }
+        let confirm = crate::editor::confirm_discard_or_save(dirty, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(true) = confirm.await {
+                let _ = this.update_in(cx, |this, window, cx| this.close_ids_now(&ids, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn close_ids_now(&mut self, ids: &[usize], window: &mut Window, cx: &mut Context<Self>) {
+        for id in ids {
+            if let Some(ix) = self.entries.iter().position(|e| e.id == *id) {
+                self.close_without_prompt(ix, window, cx);
+            }
+        }
+    }
+
+    /// Closes item `ix` immediately (unsaved changes are discarded).
+    pub fn close_without_prompt(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.entries.len() {
             return;
         }
         let entry = self.entries.remove(ix);
+        item_closed(entry.item.as_ref(), cx);
         cx.emit(PaneEvent::ItemClosed(entry.item.path(cx)));
         if self.entries.is_empty() {
             self.active = 0;
@@ -343,23 +400,39 @@ impl Pane {
         self.close(ix, window, cx);
     }
 
-    /// Closes all items except `keep`.
+    /// Closes all items except `keep` (one prompt for all unsaved files).
     pub fn close_others(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
         if keep >= self.entries.len() {
             return;
         }
         let keep_id = self.entries[keep].id;
-        while let Some(ix) = self.entries.iter().position(|e| e.id != keep_id) {
-            self.close(ix, window, cx);
-        }
+        let ids = self
+            .entries
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| *id != keep_id)
+            .collect();
+        self.close_ids(ids, window, cx);
     }
 
     /// Closes all items right of `ix`.
     pub fn close_to_right(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        while self.entries.len() > ix + 1 {
-            let last = self.entries.len() - 1;
-            self.close(last, window, cx);
-        }
+        let ids = self.entries.iter().skip(ix + 1).map(|e| e.id).collect();
+        self.close_ids(ids, window, cx);
+    }
+
+    /// Closes every item (one prompt for all unsaved files).
+    pub fn close_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.entries.iter().map(|e| e.id).collect();
+        self.close_ids(ids, window, cx);
+    }
+
+    /// File views of this pane.
+    pub fn file_views(&self) -> Vec<Entity<crate::editor::FileView>> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.item.file_view())
+            .collect()
     }
 
     fn relative_path(&self, path: &Path) -> String {
@@ -424,6 +497,54 @@ impl Pane {
         cx.notify();
     }
 
+    /// The tab bar's "…" menu (added by the UI-access work): tab and split
+    /// commands for the active tab, dispatched from it.
+    fn deploy_overflow_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let context = Focusable::focus_handle(self, cx);
+        let has_path = self.active_item().and_then(|i| i.path(cx)).is_some();
+        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+            let menu = menu
+                .context(context)
+                .icon_action("Close Tab", IconName::Close, Box::new(CloseTab))
+                .action("Close Other Tabs", Box::new(CloseOtherTabs))
+                .action("Close Tabs to the Right", Box::new(CloseTabsToRight))
+                .action("Close All Tabs", Box::new(CloseAllTabs))
+                .action("Reopen Closed Tab", Box::new(ReopenClosedTab))
+                .separator()
+                .icon_action("Split Right", IconName::Columns, Box::new(SplitRight))
+                .icon_action("Split Down", IconName::Rows, Box::new(SplitDown));
+            if has_path {
+                menu.separator()
+                    .icon_action(
+                        "Reveal in Files",
+                        IconName::Files,
+                        Box::new(RevealActiveFile),
+                    )
+                    .icon_action(
+                        "Copy Path",
+                        IconName::Copy,
+                        Box::new(crate::actions::editor::CopyPath),
+                    )
+                    .action(
+                        "Copy Relative Path",
+                        Box::new(crate::actions::editor::CopyRelativePath),
+                    )
+            } else {
+                menu
+            }
+        });
+        self.context_menu
+            .deploy(menu, position, window, cx, |this: &mut Self| {
+                &mut this.context_menu
+            });
+        cx.notify();
+    }
+
     fn tab_detail(&self, ix: usize, cx: &App) -> Option<SharedString> {
         // Disambiguate equal titles with the parent directory.
         let title = self.entries[ix].item.title(cx);
@@ -458,6 +579,8 @@ impl Render for Pane {
                 Tab::new(("tab", entry.id), title)
                     .detail(self.tab_detail(ix, cx))
                     .icon(icon)
+                    .dirty(entry.item.is_dirty(cx))
+                    .read_only(entry.item.is_read_only(cx))
                     .active(ix == self.active)
                     .focused_pane(self.is_active_pane)
                     .preview(entry.preview)
@@ -504,10 +627,10 @@ impl Render for Pane {
                         .end_child(
                             IconButton::new("pane-more", IconName::MoreHorizontal)
                                 .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("More"))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ToggleCommandPalette), cx)
-                                }),
+                                .tooltip(Tooltip::text("More Actions"))
+                                .on_click(cx.listener(|pane, e: &gpui::ClickEvent, window, cx| {
+                                    pane.deploy_overflow_menu(e.position(), window, cx)
+                                })),
                         ),
                 )
             })
@@ -642,6 +765,55 @@ impl PaneNode {
                 resizable_split(("pane-split", depth), state, kids, cx).into_any_element()
             }
         }
+    }
+}
+
+/// Of `closing` (file views about to close), the dirty ones whose document
+/// has no other view left open: closing them would lose changes. One view per
+/// document is returned.
+pub fn dirty_unshared(
+    closing: &[Entity<crate::editor::FileView>],
+    cx: &App,
+) -> Vec<Entity<crate::editor::FileView>> {
+    let mut out: Vec<Entity<crate::editor::FileView>> = Vec::new();
+    for view in closing {
+        let model = view.read(cx).model().clone();
+        if !model.read(cx).is_dirty(cx) {
+            continue;
+        }
+        if out.iter().any(|v| v.read(cx).model() == &model) {
+            continue;
+        }
+        let closing_views = closing
+            .iter()
+            .filter(|v| v.read(cx).model() == &model)
+            .count();
+        if closing_views >= model.read(cx).view_count().max(1) {
+            out.push(view.clone());
+        }
+    }
+    out
+}
+
+/// Counts the tabs showing a document (so closing the last one prompts).
+fn item_opened(item: &dyn PaneItem, cx: &mut App) {
+    if let Some(view) = item.file_view() {
+        let model = view.read(cx).model().clone();
+        model.update(cx, |m, _| m.add_view());
+    }
+}
+
+/// A tab left its pane. When it was the document's last tab, the document
+/// leaves the registry: reopening the file loads it fresh from disk.
+fn item_closed(item: &dyn PaneItem, cx: &mut App) {
+    if let Some(view) = item.file_view() {
+        let model = view.read(cx).model().clone();
+        model.update(cx, |m, cx| {
+            m.remove_view();
+            if m.view_count() == 0 {
+                m.unregister(cx);
+            }
+        });
     }
 }
 

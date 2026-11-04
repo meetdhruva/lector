@@ -1,6 +1,6 @@
 [package]
 name = "lector-git"
-description = "Read-only git access for Lector: status, diffs, log, graph, blame, permalinks"
+description = "Git access for Lector: status, diffs, log, graph, blame, permalinks (gix), staging and commits (git CLI)"
 version.workspace = true
 edition.workspace = true
 # gix 0.90 requires Rust 1.88.

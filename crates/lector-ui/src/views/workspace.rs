@@ -17,6 +17,8 @@ use super::pane::{new_pane, CodeItem, Pane, PaneEvent, PaneItem, PaneNode};
 use crate::editor::{FileView, Reveal};
 use lector_workspace::Project;
 
+mod chrome;
+mod editing;
 mod integration;
 use super::sidebar::{Sidebar, SidebarPanel};
 use super::theme_selector::ThemeSelectorDelegate;
@@ -26,12 +28,12 @@ use crate::components::modal::ModalLayer;
 use crate::components::picker::Picker;
 use crate::components::split::{clamp_width, panel_resize_handle, DraggedPanelEdge};
 use crate::components::tree_view::TreeViewEvent;
-use crate::components::{
-    binding_text_for_action, h_flex, metrics, v_flex, Button, IconButton, Tooltip,
-};
+use crate::components::{h_flex, metrics, v_flex, Button, Tooltip};
 use crate::icons::{Icon, IconName, IconSize};
 use crate::keymap::contexts;
 use crate::theme::{ActiveTheme, ColorExt, ThemeState};
+pub use chrome::{no_folder_project, no_folder_root};
+pub use editing::quit_with_prompts;
 use integration::Integration;
 pub use integration::TabRestorer;
 
@@ -148,6 +150,12 @@ pub struct Workspace {
     window_title: String,
     lsp_status: SharedString,
     toast: Option<(SharedString, u64)>,
+    has_folder: bool,
+    app_menu: Entity<super::app_menu::AppMenuBar>,
+    welcome: Option<Entity<super::welcome::WelcomeView>>,
+    title_drag_pending: bool,
+    chrome_menu: crate::components::ContextMenuState,
+    lsp_popover: crate::components::popover::Popover<super::lsp_status::LspStatusPopover>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -163,6 +171,15 @@ impl Workspace {
     /// Workspace over `project` (its root folder). The file tree, git
     /// status, symbol index and watchers start in the background.
     pub fn new(project: Project, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with(project, true, window, cx)
+    }
+
+    fn new_with(
+        project: Project,
+        has_folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let root = project.root().to_path_buf();
         let name: SharedString = project.name().to_string().into();
         let branch = read_git_branch(&root);
@@ -182,6 +199,17 @@ impl Workspace {
             },
         ));
         subscriptions.push(Self::subscribe_pane(&pane, window, cx));
+        subscriptions.push(cx.subscribe(
+            &sidebar,
+            |this, _, event: &super::sidebar::SidebarEvent, cx| match event {
+                super::sidebar::SidebarEvent::RefreshFiles => {
+                    if this.has_folder {
+                        this.rescan_files(false, cx);
+                        this.refresh_git_status(cx);
+                    }
+                }
+            },
+        ));
         subscriptions.push(cx.observe_window_appearance(window, |_, window, cx| {
             ThemeState::sync_with_window(window, cx);
         }));
@@ -208,9 +236,22 @@ impl Workspace {
             window_title: String::new(),
             lsp_status: "LSP: off".into(),
             toast: None,
+            has_folder,
+            app_menu: cx.new(super::app_menu::AppMenuBar::new),
+            welcome: None,
+            title_drag_pending: false,
+            chrome_menu: Default::default(),
+            lsp_popover: Default::default(),
             _subscriptions: subscriptions,
         };
+        if !has_folder {
+            this.name = "Lector".into();
+            this.branch = None;
+            this.sidebar.update(cx, |s, cx| s.set_has_folder(false, cx));
+        }
+        this.subscribe_app_menu(window, cx);
         this.start_integration(window, cx);
+        this.start_editing(window, cx);
         this
     }
 
@@ -283,6 +324,7 @@ impl Workspace {
                             window.focus(&focus);
                         }
                     }
+                    this.focus_welcome_if_empty(window, cx);
                     cx.notify();
                 }
                 PaneEvent::ItemClosed(path) => {
@@ -349,6 +391,11 @@ impl Workspace {
     /// The sidebar.
     pub fn sidebar(&self) -> &Entity<Sidebar> {
         &self.sidebar
+    }
+
+    /// Whether the sidebar is shown.
+    pub fn is_sidebar_visible(&self) -> bool {
+        self.sidebar_visible
     }
 
     /// The modal layer.
@@ -655,212 +702,14 @@ impl Workspace {
         }
     }
 
-    fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open Folder".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await {
-                if let Some(root) = paths.into_iter().next() {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        let (settings, _) = lector_config::load_settings_for(Some(&root));
-                        match Project::open(&root, settings) {
-                            Ok(project) => {
-                                if let Err(err) =
-                                    lector_config::RecentProjects::new().record(project.root())
-                                {
-                                    tracing::warn!("cannot record recent project: {err}");
-                                }
-                                this.save_session_now(cx);
-                                let ws = cx.new(|cx| Workspace::new(project, window, cx));
-                                ws.update(cx, |ws, cx| {
-                                    ws.restore_session(window, cx);
-                                });
-                                window.replace_root(cx, |_, _| WorkspaceRoot { workspace: ws });
-                            }
-                            Err(err) => this.show_toast(format!("Cannot open folder: {err}"), cx),
-                        }
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
     // Rendering.
 
-    fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ui = cx.theme().ui.clone();
-        let csd = matches!(window.window_decorations(), Decorations::Client { .. });
-        let mac = cfg!(target_os = "macos");
-        let palette_key = binding_text_for_action(&ToggleCommandPalette, cx).unwrap_or_default();
-        let finder_key = binding_text_for_action(&ToggleFileFinder, cx).unwrap_or_default();
-        let _ = finder_key;
-        h_flex()
-            .id("title-bar")
-            .h(metrics::TITLE_BAR_HEIGHT)
-            .flex_none()
-            .w_full()
-            .px(px(10.))
-            .when(mac, |el| el.pl(px(80.)))
-            .bg(ui.title_bar_bg.hsla())
-            .border_b_1()
-            .border_color(ui.border.hsla())
-            .text_size(metrics::TEXT)
-            .on_mouse_down(MouseButton::Left, move |e, window, _| {
-                if e.click_count == 2 {
-                    window.titlebar_double_click();
-                } else if csd {
-                    window.start_window_move();
-                }
-            })
-            .child(
-                h_flex()
-                    .flex_1()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(20.))
-                            .rounded(px(5.))
-                            .bg(ui.accent.hsla())
-                            .text_color(ui.accent_foreground.hsla())
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("L"),
-                    )
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(ui.title_bar_fg.hsla())
-                            .child(self.name.clone()),
-                    )
-                    .when_some(self.branch.clone(), |el, branch| {
-                        el.child(
-                            h_flex()
-                                .id("branch-pill")
-                                .gap(px(4.))
-                                .h(px(22.))
-                                .px(px(8.))
-                                .rounded(px(11.))
-                                .bg(ui.hover.hsla())
-                                .border_1()
-                                .border_color(ui.border_variant.hsla())
-                                .text_size(metrics::TEXT_SM)
-                                .text_color(ui.text_muted.hsla())
-                                .cursor_pointer()
-                                .hover(|s| s.bg(ui.active.hsla()))
-                                .tooltip(Tooltip::for_action("Branches", &ShowBranches))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ShowBranches), cx)
-                                })
-                                .child(
-                                    Icon::new(IconName::GitBranch)
-                                        .size(IconSize::XSmall)
-                                        .color(ui.text_muted.hsla()),
-                                )
-                                .child(branch),
-                        )
-                    }),
-            )
-            .child(
-                h_flex()
-                    .id("palette-trigger")
-                    .flex_none()
-                    .w(px(440.))
-                    .h(px(26.))
-                    .px(px(10.))
-                    .gap(px(8.))
-                    .rounded(px(6.))
-                    .bg(ui.input_bg.hsla())
-                    .border_1()
-                    .border_color(ui.border.hsla())
-                    .text_size(metrics::TEXT_SM)
-                    .text_color(ui.text_faint.hsla())
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(ui.text_faint.hsla()))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(ToggleCommandPalette), cx)
-                    })
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size(IconSize::XSmall)
-                            .color(ui.text_faint.hsla()),
-                    )
-                    .child(div().flex_1().child("Search files, symbols, commands…"))
-                    .child(div().text_size(metrics::TEXT_XS).child(palette_key)),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .justify_end()
-                    .gap(px(2.))
-                    .child(
-                        IconButton::new("toggle-sidebar", IconName::PanelLeft)
-                            .icon_size(IconSize::Small)
-                            .selected(self.sidebar_visible)
-                            .tooltip(Tooltip::for_action("Toggle Sidebar", &ToggleSidebar))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleSidebar), cx)
-                            }),
-                    )
-                    .child(
-                        IconButton::new("split", IconName::Columns)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::for_action("Split Right", &SplitRight))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(SplitRight), cx)
-                            }),
-                    )
-                    .child(
-                        IconButton::new(
-                            "theme",
-                            if cx.theme().appearance.is_dark() {
-                                IconName::Sun
-                            } else {
-                                IconName::Moon
-                            },
-                        )
-                        .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::for_action("Toggle Light/Dark", &ToggleAppearance))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleAppearance), cx)
-                        }),
-                    )
-                    .when(csd && !mac, |el| {
-                        el.child(div().w(px(8.)))
-                            .child(
-                                IconButton::new("win-min", IconName::Minus)
-                                    .icon_size(IconSize::Small)
-                                    .on_click(|_, window, _| window.minimize_window()),
-                            )
-                            .child(
-                                IconButton::new("win-max", IconName::Square)
-                                    .icon_size(IconSize::XSmall)
-                                    .on_click(|_, window, _| window.zoom_window()),
-                            )
-                            .child(
-                                IconButton::new("win-close", IconName::Close)
-                                    .icon_size(IconSize::Small)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(CloseWindow), cx)
-                                    }),
-                            )
-                    }),
-            )
-    }
-
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
         let ui = cx.theme().ui.clone();
         let settings = EditorSettings::get(cx);
         let view = self.active_code_view(cx);
-        let meta = self.active_file_view(cx).and_then(|v| v.read(cx).meta());
+        let meta = self.active_file_view(cx).and_then(|v| v.read(cx).meta(cx));
         let (cursor, language, selection) = match &view {
             Some(view) => {
                 let v = view.read(cx);
@@ -883,8 +732,9 @@ impl Workspace {
                         format!("{lines} lines selected")
                     })
                 };
+                let carets = self.selection_count_suffix(cx).unwrap_or_default();
                 (
-                    Some(format!("Ln {line}, Col {col}")),
+                    Some(format!("Ln {line}, Col {col}{carets}")),
                     v.source().language_name(),
                     selection,
                 )
@@ -956,6 +806,7 @@ impl Workspace {
                 h_flex()
                     .flex_none()
                     .gap(px(2.))
+                    .children(self.render_edit_status(cx))
                     .when_some(selection, |el, text| {
                         el.child(item("status-sel", text.into()))
                     })
@@ -969,10 +820,12 @@ impl Workspace {
                         )
                     })
                     .when_some(meta.clone(), |el, m| {
-                        el.child(
-                            item("status-indent", m.indentation)
-                                .tooltip(Tooltip::text("Indentation detected from the file")),
-                        )
+                        el.child(item("status-indent", m.indentation).tooltip(
+                            Tooltip::with_meta(
+                                "Indentation",
+                                "Detected from the file (tab size from settings)",
+                            ),
+                        ))
                     })
                     .when_some(meta.clone(), |el, m| {
                         if m.lossy {
@@ -985,16 +838,54 @@ impl Workspace {
                                     )),
                             )
                         } else {
-                            el.child(item("status-encoding", m.encoding))
+                            el.child(item("status-encoding", m.encoding).tooltip(
+                                Tooltip::with_meta("Encoding", "Kept as is when the file is saved"),
+                            ))
                         }
                     })
-                    .when_some(meta, |el, m| el.child(item("status-eol", m.line_ending)))
-                    .when_some(language, |el, l| el.child(item("status-language", l)))
-                    .when_some(self.integ.lsp_status.clone(), |el, (label, tip)| {
+                    .when_some(meta, |el, m| {
+                        let tip = if m.line_ending.as_ref() == "CRLF" {
+                            "Windows line endings (\\r\\n), kept when saving"
+                        } else {
+                            "Unix line endings (\\n), kept when saving"
+                        };
+                        el.child(
+                            item("status-eol", m.line_ending)
+                                .tooltip(Tooltip::with_meta("Line Endings", tip)),
+                        )
+                    })
+                    .when_some(language, |el, l| {
+                        el.child(item("status-language", l).tooltip(Tooltip::with_meta(
+                            "Language",
+                            "Detected from the file name and contents",
+                        )))
+                    })
+                    .when(self.has_folder, |el| {
+                        let (label, tip) = self.integ.lsp_status.clone().unwrap_or_else(|| {
+                            ("LSP".into(), "No language server for this file".into())
+                        });
+                        let popover_open = self.lsp_popover.is_open();
                         el.child(
                             item("status-lsp", label)
                                 .icon(IconName::CircleDot)
-                                .tooltip(Tooltip::text(tip)),
+                                .selected(popover_open)
+                                .when(!popover_open, |b| {
+                                    b.tooltip(Tooltip::with_meta(
+                                        tip,
+                                        "Click for all language servers",
+                                    ))
+                                })
+                                .on_click(move |_, window, cx| {
+                                    // Above the status bar, right-aligned.
+                                    let size = window.viewport_size();
+                                    let position = gpui::point(
+                                        size.width - px(8.),
+                                        size.height - metrics::STATUS_BAR_HEIGHT - px(4.),
+                                    );
+                                    let _ = weak.update(cx, |ws, cx| {
+                                        ws.toggle_lsp_popover(position, window, cx)
+                                    });
+                                }),
                         )
                     }),
             )
@@ -1141,21 +1032,32 @@ impl Render for Workspace {
                     .unwrap_or_default(),
                 self.name
             ),
+            None if !self.has_folder => "Lector".to_string(),
             None => format!("{} — Lector", self.name),
         };
+        let title = format!("{}{title}", self.title_dirty_marker(cx));
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title;
         }
 
         let sidebar_width = self.sidebar_width;
-        let center = self.center.render(0, cx);
+        let center = if self.center_is_empty(cx) {
+            let welcome = self.welcome_view(window, cx);
+            gpui::AnyView::from(welcome)
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element()
+        } else {
+            self.center.render(0, cx)
+        };
         let mut root = v_flex();
         let registrations = std::mem::take(&mut self.action_registrations);
         for register in &registrations {
             root = register(root, window, cx);
         }
         self.action_registrations = registrations;
+        let root = self.register_chrome_actions(root, cx);
+        let root = self.register_editing_actions(root, cx);
         root.id("workspace")
             .key_context(contexts::WORKSPACE)
             .track_focus(&self.focus_handle)
@@ -1231,8 +1133,6 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::open_keymap_file))
             .on_action(cx.listener(Self::open_settings_file))
-            .on_action(cx.listener(Self::open_folder))
-            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_drag_move(
                 cx.listener(|this, e: &DragMoveEvent<DraggedPanelEdge>, window, cx| {
                     if e.drag(cx).id == "sidebar-edge" {
@@ -1269,6 +1169,8 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
             .children(self.render_toast(cx))
+            .children(self.chrome_menu.render())
+            .children(self.lsp_popover.render())
             .child(self.modal_layer.clone())
             .children(self.render_resize_edges(window))
     }

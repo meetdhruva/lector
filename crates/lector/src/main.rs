@@ -6,6 +6,8 @@
     windows_subsystem = "windows"
 )]
 
+mod logging;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -28,6 +30,10 @@ struct Cli {
     /// Theme name (e.g. "Lector Light"). Defaults to following the OS appearance.
     #[arg(long)]
     theme: Option<String>,
+
+    /// Open a window without a folder (the welcome screen), ignoring PATH.
+    #[arg(long)]
+    welcome: bool,
 }
 
 /// Splits `PATH[:LINE[:COL]]`, preferring an existing path verbatim.
@@ -50,22 +56,6 @@ fn parse_target(arg: &str) -> (PathBuf, Option<u32>, Option<u32>) {
         }
         _ => (PathBuf::from(arg), None, None),
     }
-}
-
-/// The project root for a file: the nearest ancestor with `.git`, else its folder.
-fn root_for_file(file: &Path) -> PathBuf {
-    let parent = file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mut dir = Some(parent.as_path());
-    while let Some(d) = dir {
-        if d.join(".git").exists() {
-            return d.to_path_buf();
-        }
-        dir = d.parent();
-    }
-    parent
 }
 
 /// Whether `dir` is a reasonable project to open implicitly (when no path was given).
@@ -99,46 +89,34 @@ fn is_sensible_default_dir(dir: &Path) -> bool {
         .any(|prefix| lower == *prefix || lower.starts_with(&format!("{prefix}/")))
 }
 
-/// Lector's own welcome project, shown on first launch from a desktop launcher.
-fn welcome_project() -> anyhow::Result<PathBuf> {
-    let dir = lector_config::paths::data_dir().join("welcome");
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    let file = dir.join("WELCOME.md");
-    std::fs::write(&file, WELCOME_MD)
-        .with_context(|| format!("cannot write {}", file.display()))?;
-    Ok(file)
-}
-
-const WELCOME_MD: &str = "# Welcome to Lector\n\n\
-Lector is a fast, reading-first code viewer and git review tool.\n\n\
-## Get started\n\n\
-- **Open a folder:** `Ctrl+O` (`Cmd+O` on macOS), or *File → Open Folder…*\n\
-- **From a terminal:** `lector path/to/repo` or `lector src/main.rs:42`\n\
-- **Command palette:** `Ctrl+Shift+P` (`Cmd+Shift+P`) lists every command\n\
-- **Find files:** `Ctrl+P` (`Cmd+P`); **search the project:** `Ctrl+Shift+F`\n\
-- **Review changes:** `Ctrl+Shift+G` opens the Changes panel\n\n\
-Lector never modifies your files or repositories.\n\n\
-Press `Ctrl+Shift+V` (`Cmd+Shift+V`) to preview this file as Markdown.\n";
-
-/// The target to open when no path was given on the command line.
-fn default_target() -> anyhow::Result<String> {
+/// The target to open when no path was given on the command line: the
+/// current directory when it is a sensible project, else the most recent
+/// project that still exists. `None` opens a window with the welcome view.
+fn default_target() -> Option<String> {
     if let Ok(cwd) = std::env::current_dir() {
         if is_sensible_default_dir(&cwd) {
-            return Ok(cwd.to_string_lossy().into_owned());
+            return Some(cwd.to_string_lossy().into_owned());
         }
     }
-    if let Some(recent) = lector_config::RecentProjects::new().most_recent_existing() {
-        return Ok(recent.to_string_lossy().into_owned());
-    }
-    Ok(welcome_project()?.to_string_lossy().into_owned())
+    lector_config::RecentProjects::new()
+        .most_recent_existing()
+        .map(|recent| recent.to_string_lossy().into_owned())
 }
 
-fn build_request(cli: &Cli) -> anyhow::Result<OpenRequest> {
-    let arg = match cli.path.clone() {
-        Some(arg) => arg,
-        None => default_target()?,
-    };
-    request_for_target(&arg)
+/// The window to open at startup; `None` = a window without a folder.
+fn build_request(cli: &Cli) -> anyhow::Result<Option<OpenRequest>> {
+    if cli.welcome {
+        return Ok(None);
+    }
+    match cli.path.clone().or_else(default_target) {
+        Some(arg) => request_for_target(&arg).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Fixed window size for headless screenshots (`LECTOR_SCREENSHOT`).
+fn screenshot_size() -> Option<(f32, f32)> {
+    std::env::var_os("LECTOR_SCREENSHOT").map(|_| (1600., 1000.))
 }
 
 /// Builds an open request for `PATH[:LINE[:COL]]`.
@@ -146,7 +124,7 @@ fn request_for_target(arg: &str) -> anyhow::Result<OpenRequest> {
     let (path, line, col) = parse_target(arg);
     let path =
         dunce::canonicalize(&path).with_context(|| format!("cannot open {}", path.display()))?;
-    let fixed_size = std::env::var_os("LECTOR_SCREENSHOT").map(|_| (1600., 1000.));
+    let fixed_size = screenshot_size();
     if path.is_dir() {
         Ok(OpenRequest {
             root: path,
@@ -156,7 +134,7 @@ fn request_for_target(arg: &str) -> anyhow::Result<OpenRequest> {
         })
     } else {
         Ok(OpenRequest {
-            root: root_for_file(&path),
+            root: lector_ui::root_for_file(&path),
             file: Some((path, line, col)),
             fixed_size,
             project: None,
@@ -174,12 +152,8 @@ fn path_from_open_url(raw: &str) -> Option<PathBuf> {
     }
 }
 
-/// Records `root` as a recent project unless it is Lector's own welcome project.
+/// Records `root` as a recent project.
 fn record_recent(root: &Path) {
-    let welcome = lector_config::paths::data_dir().join("welcome");
-    if root.starts_with(&welcome) {
-        return;
-    }
     if let Err(err) = lector_config::RecentProjects::new().record(root) {
         tracing::warn!("cannot record recent project: {err}");
     }
@@ -225,21 +199,17 @@ fn load_themes(cli: &Cli) -> (ThemeRegistry, ThemeMode) {
 
 fn main() -> anyhow::Result<()> {
     lector_ui::startup::mark_process_start();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
     let cli = Cli::parse();
+    logging::init();
     let mut request = build_request(&cli)?;
     // Settings, the project (git discovery, LSP config) and themes load on a
     // background thread while GPUI starts up.
-    let root = request.root.clone();
+    let root = request.as_ref().map(|r| r.root.clone());
     let loader = std::thread::spawn(move || {
-        let (settings, warnings) = lector_config::load_settings_for(Some(&root));
-        let project = lector_workspace::Project::open(&root, settings.clone());
+        let (settings, warnings) = lector_config::load_settings_for(root.as_deref());
+        let project = root
+            .as_ref()
+            .map(|root| lector_workspace::Project::open(root, settings.clone()));
         (settings, warnings, project)
     });
     let (registry, mode) = load_themes(&cli);
@@ -255,8 +225,12 @@ fn main() -> anyhow::Result<()> {
         // Dock icon clicked with no windows open: reopen the default project.
         if cx.windows().is_empty() {
             match default_target() {
-                Ok(target) => open_target_window(cx, &target),
-                Err(err) => eprintln!("lector: {err:#}"),
+                Some(target) => open_target_window(cx, &target),
+                None => {
+                    if let Err(err) = lector_ui::open_empty_window(cx, screenshot_size()) {
+                        eprintln!("lector: failed to open window: {err:#}");
+                    }
+                }
             }
         }
     });
@@ -278,20 +252,26 @@ fn main() -> anyhow::Result<()> {
             cx.quit();
             return;
         };
-        match project {
-            Ok(project) => request.project = Some(project),
-            Err(err) => {
-                eprintln!("lector: cannot open {}: {err}", request.root.display());
-                cx.quit();
-                return;
+        if let (Some(request), Some(project)) = (request.as_mut(), project) {
+            match project {
+                Ok(project) => request.project = Some(project),
+                Err(err) => {
+                    eprintln!("lector: cannot open {}: {err}", request.root.display());
+                    cx.quit();
+                    return;
+                }
             }
+            record_recent(&request.root);
         }
-        record_recent(&request.root);
         lector_ui::startup::log("app ready, project open");
         lector_ui::init(cx, registry, mode, (settings, warnings));
         lector_ui_git::init(cx);
         lector_ui::startup::log("ui initialized");
-        if let Err(err) = lector_ui::open_workspace_window(cx, request) {
+        let opened = match request {
+            Some(request) => lector_ui::open_workspace_window(cx, request),
+            None => lector_ui::open_empty_window(cx, screenshot_size()),
+        };
+        if let Err(err) = opened {
             eprintln!("lector: failed to open window: {err:#}");
             cx.quit();
         }

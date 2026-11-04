@@ -1,7 +1,18 @@
-//! File tabs backed by `lector_workspace::Document`: the code view with
-//! breadcrumbs, banners, hover popovers, and image / binary previews.
+//! File tabs backed by a shared [`DocumentModel`]: the (editable) code view
+//! with breadcrumbs, banners, hover popovers, and image / binary previews.
+//!
+//! Editing seams (see `docs/ARCHITECTURE.md`, "Editing"):
+//! * one [`DocumentModel`] per open file, shared by all of its tabs, owns the
+//!   [`crate::code_view::EditBuffer`]; each tab's [`CodeView`] edits it with
+//!   its own carets;
+//! * [`register_before_save`] adds hooks run before every save (format on
+//!   save);
+//! * external edits (LSP formatting, rename, code actions) go through
+//!   [`DocumentModel::apply_edits`] (one undo step, carets mapped).
 
+pub mod compare;
 pub mod image_view;
+pub mod model;
 pub mod source;
 
 use std::cell::Cell;
@@ -10,22 +21,24 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use futures::channel::mpsc;
-use futures::StreamExt;
 use gpui::{
     anchored, deferred, div, prelude::*, px, AnyElement, AnyView, App, Corner, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, Pixels, Point, SharedString, Subscription,
-    Task, WeakEntity, Window,
+    EventEmitter, FocusHandle, Focusable, FontWeight, Pixels, Point, PromptLevel, SharedString,
+    Subscription, Task, WeakEntity, Window,
 };
 use lector_fs::{FileKind, ImageFormat};
 use lector_syntax::{OutlineItem, SymbolKind};
 use lector_workspace::{Document, Indentation, LineEnding, Project};
 
+pub use model::{
+    document_for_path, open_documents, register_before_save, BeforeSaveHook, DocumentEvent,
+    DocumentModel, SaveOutcome,
+};
 pub use source::{DocumentSource, SourceState, HIGHLIGHT_CHUNK};
 
-use crate::actions::editor::{ClearSelection, GoToDefinition, Hover};
+use crate::actions::editor::{ClearSelection, GoToDefinition, Hover, RevertFile, Save, SaveAs};
 use crate::code_view::{CodeView, CodeViewEvent, HoverTarget, InMemorySource, Pos, Selection};
-use crate::components::{h_flex, metrics, v_flex};
+use crate::components::{h_flex, metrics, v_flex, Button, ButtonStyle};
 use crate::icons::{FileIcon, Icon, IconName, IconSize};
 use crate::markdown::{self, Block, RenderOptions};
 use crate::settings::AppSettings;
@@ -65,6 +78,12 @@ pub enum FileViewEvent {
     Loaded,
     /// The cursor moved (breadcrumbs / outline follow it).
     CursorMoved,
+    /// Unsaved-changes or read-only state changed (tab, title, status bar).
+    StateChanged,
+    /// The settled outline changed (outline panel).
+    OutlineChanged,
+    /// The file was saved under another path.
+    PathChanged,
 }
 
 struct HoverPopover {
@@ -77,7 +96,7 @@ struct HoverPopover {
 /// Status-bar facts about the document.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocumentMeta {
-    /// "UTF-8", ...
+    /// "UTF-8", "UTF-8 with BOM", ...
     pub encoding: SharedString,
     /// Decoding replaced invalid bytes.
     pub lossy: bool,
@@ -87,6 +106,12 @@ pub struct DocumentMeta {
     pub indentation: SharedString,
     /// Memory-mapped large file (no syntax).
     pub large: bool,
+    /// Unsaved changes.
+    pub dirty: bool,
+    /// Editing is blocked in this tab.
+    pub read_only: bool,
+    /// The file type can be edited at all (read-only can be toggled).
+    pub editable: bool,
 }
 
 /// A file tab: code view (with breadcrumbs) or image / binary preview.
@@ -94,22 +119,20 @@ pub struct FileView {
     path: PathBuf,
     rel_path: SharedString,
     project: Project,
+    model: Entity<DocumentModel>,
     focus_handle: FocusHandle,
     code_view: Entity<CodeView>,
     is_text: Rc<Cell<bool>>,
     content: Content,
-    doc: Option<Document>,
-    state: Rc<SourceState>,
     pending_reveal: Option<Reveal>,
     hover: Option<HoverPopover>,
-    crumbs: Option<(u32, Vec<OutlineItem>)>,
+    crumbs: Option<(u32, u64, Vec<OutlineItem>)>,
     show_svg_source: bool,
-    highlight_task: Option<Task<()>>,
-    load_task: Option<Task<()>>,
-    gutter_task: Option<Task<()>>,
     hover_task: Option<Task<()>>,
-    reload_pending: bool,
+    image_task: Option<Task<()>>,
+    save_task: Option<Task<()>>,
     focus_pending: bool,
+    setup_done: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,12 +156,14 @@ fn is_image_path(path: &Path) -> bool {
 }
 
 impl FileView {
-    /// Opens `path` (absolute) from `project`, loading in the background.
+    /// Opens `path` (absolute) from `project`, loading in the background (or
+    /// sharing the document of another tab showing the same file).
     pub fn new(path: PathBuf, project: Project, cx: &mut Context<Self>) -> Self {
         let rel_path: SharedString = project
             .relative_path(&path)
             .unwrap_or_else(|| path.display().to_string())
             .into();
+        let model = DocumentModel::open(path.clone(), project.clone(), 0, cx);
         let code_view = cx.new(|cx| {
             let mut v = CodeView::new(Rc::new(InMemorySource::new("")), cx);
             v.set_path(Some(path.clone()));
@@ -163,47 +188,187 @@ impl FileView {
                 window.dispatch_action(Box::new(GoToDefinition), cx);
             });
         });
-        let subscription = cx.subscribe(
-            &code_view,
-            |this, _, event: &CodeViewEvent, cx| match event {
-                CodeViewEvent::SelectionChanged => {
-                    cx.emit(FileViewEvent::CursorMoved);
-                    cx.notify();
-                }
-                CodeViewEvent::HoverMoved(pos) => this.hover_moved(*pos, cx),
-                CodeViewEvent::Scrolled => {
-                    if this.hover.as_ref().is_some_and(|h| !h.hovered) {
-                        this.hover = None;
+        let code_view_sub =
+            cx.subscribe(
+                &code_view,
+                |this, _, event: &CodeViewEvent, cx| match event {
+                    CodeViewEvent::SelectionChanged => {
+                        cx.emit(FileViewEvent::CursorMoved);
                         cx.notify();
                     }
-                }
-            },
-        );
+                    CodeViewEvent::HoverMoved(pos) => this.hover_moved(*pos, cx),
+                    CodeViewEvent::Scrolled => {
+                        if this.hover.as_ref().is_some_and(|h| !h.hovered) {
+                            this.hover = None;
+                            cx.notify();
+                        }
+                    }
+                    CodeViewEvent::Edited => {
+                        if this.hover.take().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    CodeViewEvent::ReadOnlyChanged => {
+                        cx.emit(FileViewEvent::StateChanged);
+                        cx.notify();
+                    }
+                },
+            );
+        let model_sub = cx.subscribe(&model, |this, _, event: &DocumentEvent, cx| {
+            this.model_event(event, cx)
+        });
         let is_text = Rc::new(Cell::new(!is_image_path(&path)));
         let mut view = FileView {
             path,
             rel_path,
             project,
+            model,
             focus_handle: cx.focus_handle(),
             code_view,
             is_text,
             content: Content::Loading,
-            doc: None,
-            state: Rc::new(SourceState::default()),
             pending_reveal: None,
             hover: None,
             crumbs: None,
             show_svg_source: false,
-            highlight_task: None,
-            load_task: None,
-            gutter_task: None,
             hover_task: None,
-            reload_pending: false,
+            image_task: None,
+            save_task: None,
             focus_pending: false,
-            _subscriptions: vec![subscription],
+            setup_done: false,
+            _subscriptions: vec![code_view_sub, model_sub],
         };
-        view.load(false, cx);
+        if view.model.read(cx).is_loaded() {
+            view.setup_from_model(cx);
+        }
         view
+    }
+
+    fn model_event(&mut self, event: &DocumentEvent, cx: &mut Context<Self>) {
+        match event {
+            DocumentEvent::Loaded => {
+                self.setup_from_model(cx);
+            }
+            DocumentEvent::SourceChanged => {
+                if let Some(source) = self.model.read(cx).source() {
+                    self.code_view.update(cx, |v, cx| v.set_source(source, cx));
+                }
+                cx.notify();
+            }
+            DocumentEvent::Repaint => {
+                self.code_view.update(cx, |_, cx| cx.notify());
+            }
+            DocumentEvent::Settled => {
+                self.crumbs = None;
+                cx.emit(FileViewEvent::OutlineChanged);
+                cx.notify();
+            }
+            DocumentEvent::DirtyChanged | DocumentEvent::Saved | DocumentEvent::ConflictChanged => {
+                cx.emit(FileViewEvent::StateChanged);
+                cx.notify();
+            }
+            DocumentEvent::PathChanged => {
+                let path = self.model.read(cx).path().to_path_buf();
+                self.rel_path = self
+                    .project
+                    .relative_path(&path)
+                    .unwrap_or_else(|| path.display().to_string())
+                    .into();
+                self.code_view
+                    .update(cx, |v, _| v.set_path(Some(path.clone())));
+                self.path = path;
+                cx.emit(FileViewEvent::PathChanged);
+                cx.emit(FileViewEvent::StateChanged);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Connects the code view to the loaded model and picks the content.
+    fn setup_from_model(&mut self, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        if let Some(err) = model.load_error().cloned() {
+            if !self.setup_done {
+                self.is_text.set(false);
+                self.content = Content::Error(err);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(doc) = model.live_document().cloned() else {
+            return;
+        };
+        let source = model.source();
+        let buffer = model.buffer().cloned();
+        let editable = model.is_editable();
+        let read_only = AppSettings::get(cx).editor.read_only || !editable;
+        let first_setup = !self.setup_done;
+        self.code_view.update(cx, |v, cx| {
+            if let Some(source) = source {
+                v.set_source(source, cx);
+            }
+            v.set_buffer(buffer, false, cx);
+            if first_setup || !editable {
+                v.set_read_only(read_only, cx);
+            }
+        });
+        self.crumbs = None;
+        self.hover = None;
+        match doc.kind() {
+            FileKind::Image(format) => {
+                let svg = doc.text().is_some();
+                let path = self.path.clone();
+                let format = *format;
+                let size = doc.size();
+                self.image_task = Some(cx.spawn(async move |this, cx| {
+                    let info = cx
+                        .background_executor()
+                        .spawn({
+                            let path = path.clone();
+                            async move { ImageInfo::read(&path, format, size) }
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        match &this.content {
+                            Content::Image(view) => view.update(cx, |v, cx| v.set_info(info, cx)),
+                            _ => {
+                                let view = cx.new(|cx| ImageView::new(path, info, svg, cx));
+                                this._subscriptions.push(cx.subscribe(
+                                    &view,
+                                    |this, _, _: &image_view::ImageViewEvent, cx| {
+                                        this.show_svg_source = true;
+                                        this.is_text.set(true);
+                                        this.focus_pending = true;
+                                        cx.notify();
+                                    },
+                                ));
+                                this.content = Content::Image(view);
+                            }
+                        }
+                        this.is_text.set(this.show_svg_source);
+                        cx.notify();
+                    });
+                }));
+            }
+            FileKind::Text => {
+                self.content = Content::Text;
+                self.is_text.set(true);
+            }
+            FileKind::Directory => {
+                self.content = Content::Error("This is a folder".into());
+                self.is_text.set(false);
+            }
+            _ => {
+                self.content = Content::Binary;
+                self.is_text.set(false);
+            }
+        }
+        self.setup_done = true;
+        if let Some(reveal) = self.pending_reveal.take() {
+            self.apply_reveal(reveal, cx);
+        }
+        cx.emit(FileViewEvent::Loaded);
+        cx.notify();
     }
 
     /// Absolute path.
@@ -221,6 +386,11 @@ impl FileView {
         &self.project
     }
 
+    /// The shared document model.
+    pub fn model(&self) -> &Entity<DocumentModel> {
+        &self.model
+    }
+
     /// The code view (also used for SVG source).
     pub fn code_view(&self) -> &Entity<CodeView> {
         &self.code_view
@@ -231,9 +401,16 @@ impl FileView {
         self.is_text.clone()
     }
 
-    /// The loaded document.
-    pub fn document(&self) -> Option<&Document> {
-        self.doc.as_ref()
+    /// The settled document: outline and folds are computed; while typing
+    /// it may lag the text by a few hundred milliseconds. Use
+    /// [`FileView::live_document`] for anything that needs exact offsets.
+    pub fn document<'a>(&self, cx: &'a App) -> Option<&'a Document> {
+        self.model.read(cx).settled_document()
+    }
+
+    /// The latest snapshot (text always matches the buffer).
+    pub fn live_document<'a>(&self, cx: &'a App) -> Option<&'a Document> {
+        self.model.read(cx).live_document()
     }
 
     /// Whether the content is still loading.
@@ -241,14 +418,40 @@ impl FileView {
         matches!(self.content, Content::Loading)
     }
 
+    /// Unsaved changes.
+    pub fn is_dirty(&self, cx: &App) -> bool {
+        self.model.read(cx).is_dirty(cx)
+    }
+
+    /// Whether editing is blocked in this tab.
+    pub fn is_read_only(&self, cx: &App) -> bool {
+        self.code_view.read(cx).is_read_only()
+    }
+
     /// Status-bar facts.
-    pub fn meta(&self) -> Option<DocumentMeta> {
-        let doc = self.doc.as_ref()?;
+    pub fn meta(&self, cx: &App) -> Option<DocumentMeta> {
+        let model = self.model.read(cx);
+        let doc = model.live_document()?;
         if !self.is_text.get() {
             return None;
         }
+        let buffer_indent = model.buffer().map(|b| b.read(cx).buffer().options().indent);
+        let indentation: SharedString = match (buffer_indent, doc.indentation()) {
+            (Some(lector_buffer::IndentStyle::Tabs), _) | (None, Indentation::Tabs) => {
+                "Tabs".into()
+            }
+            (Some(lector_buffer::IndentStyle::Spaces(n)), _) | (None, Indentation::Spaces(n)) => {
+                format!("Spaces: {n}").into()
+            }
+        };
+        let encoding: SharedString = match model.save_encoding() {
+            lector_buffer::save::Encoding::Utf8Bom if model.is_editable() => {
+                "UTF-8 with BOM".into()
+            }
+            _ => doc.encoding().to_string().into(),
+        };
         Some(DocumentMeta {
-            encoding: doc.encoding().to_string().into(),
+            encoding,
             lossy: doc.lossy(),
             line_ending: match doc.line_ending() {
                 LineEnding::Lf => "LF",
@@ -256,24 +459,24 @@ impl FileView {
                 LineEnding::Mixed => "Mixed",
             }
             .into(),
-            indentation: match doc.indentation() {
-                Indentation::Tabs => "Tabs".into(),
-                Indentation::Spaces(n) => format!("Spaces: {n}").into(),
-            },
+            indentation,
             large: doc.is_large(),
+            dirty: model.is_dirty(cx),
+            read_only: self.code_view.read(cx).is_read_only(),
+            editable: model.is_editable(),
         })
     }
 
-    /// Byte offset of the cursor in the document text.
+    /// Byte offset of the cursor in the live document text.
     pub fn cursor_offset(&self, cx: &App) -> Option<usize> {
-        let text = self.doc.as_ref()?.text()?;
+        let text = self.live_document(cx)?.text()?;
         let pos = self.code_view.read(cx).cursor();
         Some(text.point_to_offset(lector_text::Point::new(pos.row, pos.col as u32)))
     }
 
     /// Moves the cursor / selection to `reveal` (deferred until loaded).
     pub fn reveal(&mut self, reveal: Reveal, cx: &mut Context<Self>) {
-        if self.doc.is_none() {
+        if !self.setup_done {
             self.pending_reveal = Some(reveal);
             return;
         }
@@ -294,199 +497,183 @@ impl FileView {
         });
     }
 
-    /// Reloads from disk (file changed), keeping scroll and selection.
+    /// The file changed on disk: reload a clean buffer in place (keeping
+    /// carets), or show the "changed on disk" banner for a dirty one.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.load_task.is_some() {
-            self.reload_pending = true;
-            return;
-        }
-        self.load(true, cx);
-    }
-
-    fn load(&mut self, reload: bool, cx: &mut Context<Self>) {
-        let project = self.project.clone();
-        let path = self.path.clone();
-        let target_row = if reload {
-            self.code_view.read(cx).top_visible_row()
-        } else {
-            self.pending_reveal.as_ref().map_or(0, |r| r.row)
-        };
-        self.load_task = Some(cx.spawn(async move |this, cx| {
-            let loaded = cx
-                .background_executor()
-                .spawn(async move {
-                    let doc = project.load_document(&path)?;
-                    // Pre-compute lazily cached data off the main thread.
-                    let _ = doc.outline();
-                    let _ = doc.fold_ranges();
-                    let mut chunks = Vec::new();
-                    if doc.syntax().is_some() {
-                        let first = target_row.saturating_sub(40) / HIGHLIGHT_CHUNK;
-                        let last = (target_row + 120) / HIGHLIGHT_CHUNK;
-                        for chunk in first..=last {
-                            let rows = chunk * HIGHLIGHT_CHUNK..(chunk + 1) * HIGHLIGHT_CHUNK;
-                            if rows.start >= doc.line_count() {
-                                break;
-                            }
-                            chunks.push((chunk, Arc::new(doc.line_highlights(rows))));
-                        }
-                    }
-                    let image = match doc.kind() {
-                        FileKind::Image(format) => {
-                            Some(ImageInfo::read(&path, *format, doc.size()))
-                        }
-                        _ => None,
-                    };
-                    anyhow::Ok((doc, chunks, image))
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.load_task = None;
-                match loaded {
-                    Ok((doc, chunks, image)) => this.loaded(doc, chunks, image, cx),
-                    Err(err) => {
-                        if !reload {
-                            this.is_text.set(false);
-                            this.content = Content::Error(err.to_string().into());
-                        }
-                        cx.notify();
-                    }
-                }
-                if std::mem::take(&mut this.reload_pending) {
-                    this.load(true, cx);
-                }
-            });
-        }));
-    }
-
-    fn loaded(
-        &mut self,
-        doc: Document,
-        chunks: Vec<(u32, Arc<Vec<lector_workspace::LineHighlights>>)>,
-        image: Option<ImageInfo>,
-        cx: &mut Context<Self>,
-    ) {
-        let state = Rc::new(SourceState::default());
-        for (chunk, lines) in chunks {
-            state.insert_chunk(chunk, lines);
-        }
-        let (tx, rx) = mpsc::unbounded();
-        let source = Rc::new(DocumentSource::new(doc.clone(), state.clone(), Some(tx)));
-        self.state = state;
-        self.code_view.update(cx, |v, cx| v.set_source(source, cx));
-        self.spawn_highlighter(doc.clone(), rx, cx);
-        self.crumbs = None;
-        self.hover = None;
-        match (doc.kind(), image) {
-            (FileKind::Image(_), Some(info)) => {
-                let svg = doc.text().is_some();
-                match &self.content {
-                    Content::Image(view) => view.update(cx, |v, cx| v.set_info(info, cx)),
-                    _ => {
-                        let path = self.path.clone();
-                        let view = cx.new(|cx| ImageView::new(path, info, svg, cx));
-                        self._subscriptions.push(cx.subscribe(
-                            &view,
-                            |this, _, _: &image_view::ImageViewEvent, cx| {
-                                this.show_svg_source = true;
-                                this.is_text.set(true);
-                                this.focus_pending = true;
-                                cx.notify();
-                            },
-                        ));
-                        self.content = Content::Image(view);
-                    }
-                }
-                self.is_text.set(self.show_svg_source);
-            }
-            (FileKind::Text, _) => {
-                self.content = Content::Text;
-                self.is_text.set(true);
-            }
-            (FileKind::Directory, _) => {
-                self.content = Content::Error("This is a folder".into());
-                self.is_text.set(false);
-            }
-            _ => {
-                self.content = Content::Binary;
-                self.is_text.set(false);
-            }
-        }
-        self.doc = Some(doc);
-        if let Some(reveal) = self.pending_reveal.take() {
-            self.apply_reveal(reveal, cx);
-        }
-        self.refresh_gutter(cx);
-        cx.emit(FileViewEvent::Loaded);
-        cx.notify();
-    }
-
-    fn spawn_highlighter(
-        &mut self,
-        doc: Document,
-        mut rx: mpsc::UnboundedReceiver<u32>,
-        cx: &mut Context<Self>,
-    ) {
-        let state = self.state.clone();
-        let code_view = self.code_view.downgrade();
-        self.highlight_task = Some(cx.spawn(async move |_, cx| {
-            while let Some(first) = rx.next().await {
-                let mut batch = vec![first];
-                while let Ok(chunk) = rx.try_recv() {
-                    batch.push(chunk);
-                }
-                // Newest requests are what is visible now.
-                batch.reverse();
-                for chunk in batch.drain(batch.len().min(4)..) {
-                    state.cancel_chunk(chunk);
-                }
-                let doc = doc.clone();
-                let work = batch.clone();
-                let results = cx
-                    .background_executor()
-                    .spawn(async move {
-                        work.into_iter()
-                            .map(|chunk| {
-                                let rows = chunk * HIGHLIGHT_CHUNK..(chunk + 1) * HIGHLIGHT_CHUNK;
-                                (chunk, Arc::new(doc.line_highlights(rows)))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await;
-                for (chunk, lines) in results {
-                    state.insert_chunk(chunk, lines);
-                }
-                if code_view.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        }));
+        self.model.update(cx, |m, cx| m.file_changed_on_disk(cx));
     }
 
     /// Recomputes the diff gutter vs HEAD in the background.
     pub fn refresh_gutter(&mut self, cx: &mut Context<Self>) {
-        let Some(doc) = self.doc.clone() else { return };
-        if !AppSettings::get(cx).git.show_gutter || doc.text().is_none() {
-            self.state.set_gutter(Vec::new());
+        self.model.update(cx, |m, cx| m.refresh_gutter(cx));
+    }
+
+    /// Saves (prompting Overwrite / Reload / Cancel when the file changed on
+    /// disk). Resolves to `true` when the buffer is saved (or was clean).
+    pub fn save(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<bool>> {
+        let model = self.model.clone();
+        if !model.read(cx).is_editable() {
+            return Task::ready(Ok(true));
+        }
+        let name = self.file_name();
+        let save = model.update(cx, |m, cx| m.save(false, cx));
+        cx.spawn_in(window, async move |_, cx| {
+            match save.await? {
+                SaveOutcome::Saved | SaveOutcome::Unchanged => Ok(true),
+                SaveOutcome::Conflict => {
+                    let answer = cx.update(|window, cx| {
+                        window.prompt(
+                            PromptLevel::Warning,
+                            &format!("“{name}” changed on disk since it was opened."),
+                            Some("Overwrite it with your version, reload it (discarding your changes), or cancel."),
+                            &["Overwrite", "Reload", "Cancel"],
+                            cx,
+                        )
+                    })?;
+                    match answer.await {
+                        Ok(0) => {
+                            let force = model.update(cx, |m, cx| m.save(true, cx))?;
+                            Ok(force.await? == SaveOutcome::Saved)
+                        }
+                        Ok(1) => {
+                            model.update(cx, |m, cx| m.revert(cx))?;
+                            Ok(false)
+                        }
+                        _ => Ok(false),
+                    }
+                }
+            }
+        })
+    }
+
+    fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
+    fn save_action(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.read(cx).is_editable() {
+            cx.propagate();
             return;
         }
-        let project = self.project.clone();
-        let state = self.state.clone();
-        let code_view = self.code_view.downgrade();
-        self.gutter_task = Some(cx.spawn(async move |_, cx| {
-            let marks = cx
-                .background_executor()
-                .spawn(async move { source::convert_gutter(&doc.diff_gutter(&project)) })
-                .await;
-            state.set_gutter(marks);
-            let _ = code_view.update(cx, |_, cx| cx.notify());
+        let task = self.save(window, cx);
+        self.save_task = Some(cx.spawn(async move |_, _| {
+            if let Err(err) = task.await {
+                tracing::warn!("save failed: {err:#}");
+            }
         }));
+    }
+
+    /// Prompts for a new path and saves there; the tab follows the new file.
+    pub fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.read(cx).is_editable() {
+            return;
+        }
+        let dir = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.project.root().to_path_buf());
+        let name = self.file_name();
+        let receiver = cx.prompt_for_new_path(&dir, Some(&name));
+        let model = self.model.clone();
+        self.save_task = Some(cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(path))) = receiver.await else {
+                return;
+            };
+            if let Some(other) = cx
+                .update(|_, cx| document_for_path(&path, cx))
+                .ok()
+                .flatten()
+            {
+                if other != model {
+                    tracing::warn!("{} is open in another tab", path.display());
+                }
+            }
+            let Ok(task) = model.update(cx, |m, cx| m.save_as(path, cx)) else {
+                return;
+            };
+            if let Err(err) = task.await {
+                tracing::warn!("save as failed: {err:#}");
+            }
+        }));
+    }
+
+    fn save_as_action(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.read(cx).is_editable() {
+            cx.propagate();
+            return;
+        }
+        self.save_as(window, cx);
+    }
+
+    /// Asks for confirmation (when dirty) and reloads from disk.
+    pub fn revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.model.clone();
+        if !model.read(cx).is_dirty(cx) {
+            model.update(cx, |m, cx| m.revert(cx));
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Revert “{}”?", self.file_name()),
+            Some("Your unsaved changes will be lost. The file is reloaded from disk."),
+            &["Revert", "Cancel"],
+            cx,
+        );
+        self.save_task = Some(cx.spawn(async move |_, cx| {
+            if answer.await == Ok(0) {
+                let _ = model.update(cx, |m, cx| m.revert(cx));
+            }
+        }));
+    }
+
+    fn revert_action(&mut self, _: &RevertFile, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.read(cx).is_editable() {
+            cx.propagate();
+            return;
+        }
+        self.revert(window, cx);
+    }
+
+    /// Opens a comparison of the file on disk with the buffer.
+    fn compare_with_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        let Some(conflict) = model.conflict() else {
+            return;
+        };
+        let disk = conflict
+            .disk
+            .text()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let mine = model
+            .buffer()
+            .map(|b| b.read(cx).text().to_string())
+            .unwrap_or_default();
+        let name = self.file_name();
+        let item = compare::CompareItem::new(
+            format!("{name} (disk ↔ yours)"),
+            Some(self.path.clone()),
+            &disk,
+            &mine,
+            cx,
+        );
+        compare::open_compare_item(item, window, cx);
     }
 
     // Hover.
 
     fn show_hover(&mut self, target: HoverTarget, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(doc) = self.doc.clone() else { return };
+        let Some(doc) = self.live_document(cx).cloned() else {
+            return;
+        };
         let Some(text) = doc.text() else { return };
         let offset = text.point_to_offset(lector_text::Point::new(
             target.pos.row,
@@ -539,7 +726,8 @@ impl FileView {
         if hover.hovered {
             return;
         }
-        let inside = match (pos, self.doc.as_ref().and_then(|d| d.text())) {
+        let model = self.model.read(cx);
+        let inside = match (pos, model.live_document().and_then(|d| d.text())) {
             (Some(pos), Some(text)) => {
                 let off = text.point_to_offset(lector_text::Point::new(pos.row, pos.col as u32));
                 hover.word.start <= off && off <= hover.word.end
@@ -570,26 +758,35 @@ impl FileView {
     }
 
     /// Enclosing symbols at the cursor (outermost first), for breadcrumbs.
+    /// Uses the settled snapshot (debounced while typing).
     pub fn symbols_at_cursor(&mut self, cx: &App) -> Vec<OutlineItem> {
-        let Some(doc) = &self.doc else {
+        let Some(doc) = self.model.read(cx).settled_document().cloned() else {
             return Vec::new();
         };
         let Some(text) = doc.text() else {
             return Vec::new();
         };
+        let version = text.version();
         let row = self.code_view.read(cx).cursor().row;
-        if let Some((r, items)) = &self.crumbs {
-            if *r == row {
+        if let Some((r, v, items)) = &self.crumbs {
+            if *r == row && *v == version {
                 return items.clone();
             }
         }
-        let items = symbols_containing_row(doc, text, row);
-        self.crumbs = Some((row, items.clone()));
+        let items =
+            symbols_containing_row(&doc, text, row.min(text.line_count().saturating_sub(1)));
+        self.crumbs = Some((row, version, items.clone()));
         items
     }
 
     fn jump_to_symbol(&mut self, item: &OutlineItem, cx: &mut Context<Self>) {
-        let Some(text) = self.doc.as_ref().and_then(|d| d.text()) else {
+        let Some(text) = self
+            .model
+            .read(cx)
+            .settled_document()
+            .and_then(|d| d.text())
+            .cloned()
+        else {
             return;
         };
         let p = text.offset_to_point(item.name_range.start);
@@ -618,6 +815,75 @@ impl FileView {
     }
 
     // Rendering.
+
+    fn render_conflict_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.model.read(cx).conflict()?;
+        let ui = cx.theme().ui.clone();
+        let warn = cx.theme().git.modified.hsla();
+        let weak = cx.entity().downgrade();
+        let button = |id: &'static str, label: &'static str, style: ButtonStyle| {
+            Button::new(id, label).compact().style(style)
+        };
+        Some(
+            h_flex()
+                .id("disk-conflict-banner")
+                .h(px(32.))
+                .flex_none()
+                .px(px(12.))
+                .gap(px(8.))
+                .bg(warn.opacity(0.12))
+                .border_b_1()
+                .border_color(warn.opacity(0.45))
+                .text_size(metrics::TEXT_SM)
+                .text_color(ui.text.hsla())
+                .child(
+                    Icon::new(IconName::AlertTriangle)
+                        .size(IconSize::Small)
+                        .color(warn),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child("This file changed on disk. You have unsaved changes."),
+                )
+                .child(
+                    button(
+                        "conflict-reload",
+                        "Reload (discard mine)",
+                        ButtonStyle::Outlined,
+                    )
+                    .on_click({
+                        let weak = weak.clone();
+                        move |_, _, cx| {
+                            let _ = weak
+                                .update(cx, |this, cx| this.model.update(cx, |m, cx| m.revert(cx)));
+                        }
+                    }),
+                )
+                .child(
+                    button("conflict-keep", "Keep Mine", ButtonStyle::Outlined).on_click({
+                        let weak = weak.clone();
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.model.update(cx, |m, cx| m.keep_mine(cx))
+                            });
+                        }
+                    }),
+                )
+                .child(
+                    button("conflict-compare", "Compare", ButtonStyle::Accent).on_click({
+                        let weak = weak.clone();
+                        move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| this.compare_with_disk(window, cx));
+                        }
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
 
     fn render_breadcrumbs(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();
@@ -713,20 +979,18 @@ impl FileView {
     }
 
     fn render_banner(&self, cx: &App) -> Option<AnyElement> {
-        let doc = self.doc.as_ref()?;
+        let model = self.model.read(cx);
+        let doc = model.live_document()?;
         let ui = &cx.theme().ui;
-        let config_dir = lector_config::paths::config_dir();
-        let message: SharedString = if self.path.starts_with(&config_dir) {
-            "Lector never edits files — change this one in your editor; it reloads live.".into()
-        } else if doc.is_large() {
+        let message: SharedString = if doc.is_large() {
             format!(
-                "Large file ({}) — syntax highlighting off",
+                "Large file ({}) — syntax highlighting off, read-only",
                 format_size(doc.size())
             )
             .into()
-        } else if doc.lossy() {
+        } else if doc.lossy() || (!model.is_editable() && matches!(doc.kind(), FileKind::Text)) {
             format!(
-                "Opened as {} — some bytes could not be decoded and are shown as \u{FFFD}",
+                "Opened as {} — some bytes could not be decoded and are shown as \u{FFFD}; read-only to keep the file intact",
                 doc.encoding()
             )
             .into()
@@ -822,7 +1086,7 @@ impl FileView {
 
     fn render_binary(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = cx.theme().ui.clone();
-        let size = self.doc.as_ref().map_or(0, |d| d.size());
+        let size = self.live_document(cx).map_or(0, |d| d.size());
         let path = self.path.clone();
         centered_panel(
             IconName::Binary,
@@ -1022,13 +1286,17 @@ impl Render for FileView {
             )
             .into_any_element(),
         };
-        let show_crumbs = self.is_text.get() && self.doc.is_some();
+        let show_crumbs = self.is_text.get() && self.setup_done;
+        let conflict_banner = self.render_conflict_banner(cx);
         let weak = cx.entity().downgrade();
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::hover_action))
             .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(Self::save_action))
+            .on_action(cx.listener(Self::save_as_action))
+            .on_action(cx.listener(Self::revert_action))
             .when(show_crumbs, |el| el.child(self.render_breadcrumbs(cx)))
             .when(svg_toggle, |el| {
                 let showing_source = self.show_svg_source;
@@ -1074,6 +1342,7 @@ impl Render for FileView {
                         ),
                 )
             })
+            .children(conflict_banner)
             .when_some(
                 self.is_text.get().then(|| self.render_banner(cx)).flatten(),
                 |el, banner| el.child(banner),
@@ -1089,26 +1358,16 @@ pub struct FileItem {
     pub view: Entity<FileView>,
     code_view: Entity<CodeView>,
     is_text: Rc<Cell<bool>>,
-    path: PathBuf,
-    title: SharedString,
 }
 
 impl FileItem {
     /// Item for `view`.
     pub fn new(view: Entity<FileView>, cx: &App) -> Self {
         let v = view.read(cx);
-        let path = v.path().to_path_buf();
-        let title = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
-            .into();
         FileItem {
             code_view: v.code_view().clone(),
             is_text: v.is_text_flag(),
             view,
-            path,
-            title,
         }
     }
 
@@ -1119,16 +1378,22 @@ impl FileItem {
 }
 
 impl PaneItem for FileItem {
-    fn title(&self, _: &App) -> SharedString {
-        self.title.clone()
+    fn title(&self, cx: &App) -> SharedString {
+        self.view
+            .read(cx)
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+            .into()
     }
 
-    fn icon(&self, _: &App) -> TabIcon {
-        TabIcon::File(self.title.clone())
+    fn icon(&self, cx: &App) -> TabIcon {
+        TabIcon::File(self.title(cx))
     }
 
-    fn path(&self, _: &App) -> Option<PathBuf> {
-        Some(self.path.clone())
+    fn path(&self, cx: &App) -> Option<PathBuf> {
+        Some(self.view.read(cx).path().to_path_buf())
     }
 
     fn view(&self) -> AnyView {
@@ -1147,9 +1412,18 @@ impl PaneItem for FileItem {
         Some(self.view.clone())
     }
 
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.view.read(cx).is_dirty(cx)
+    }
+
+    fn is_read_only(&self, cx: &App) -> bool {
+        let v = self.view.read(cx);
+        self.is_text.get() && v.model().read(cx).is_editable() && v.is_read_only(cx)
+    }
+
     fn clone_item(&self, _window: &mut Window, cx: &mut App) -> Option<Box<dyn PaneItem>> {
         let project = self.view.read(cx).project().clone();
-        let path = self.path.clone();
+        let path = self.view.read(cx).path().to_path_buf();
         let selection = self.code_view.read(cx).selection();
         let view = cx.new(|cx| {
             let mut v = FileView::new(path, project, cx);
@@ -1165,4 +1439,55 @@ impl PaneItem for FileItem {
         });
         Some(Box::new(FileItem::new(view, cx)))
     }
+}
+
+/// Closes the window after asking about unsaved changes in `workspace`
+/// (Save All / Don't Save / Cancel). Resolves to `true` when it may close.
+pub fn confirm_discard_or_save(
+    dirty: Vec<Entity<FileView>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<anyhow::Result<bool>> {
+    if dirty.is_empty() {
+        return Task::ready(Ok(true));
+    }
+    let names: Vec<String> = dirty.iter().map(|v| v.read(cx).file_name()).collect();
+    let (message, detail) = if names.len() == 1 {
+        (
+            format!(
+                "Do you want to save the changes you made to “{}”?",
+                names[0]
+            ),
+            "Your changes will be lost if you don't save them.".to_string(),
+        )
+    } else {
+        (
+            format!("Do you want to save the changes to {} files?", names.len()),
+            format!(
+                "{}\n\nYour changes will be lost if you don't save them.",
+                names.join("\n")
+            ),
+        )
+    };
+    let save_label = if names.len() == 1 { "Save" } else { "Save All" };
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        &message,
+        Some(&detail),
+        &[save_label, "Don't Save", "Cancel"],
+        cx,
+    );
+    window.spawn(cx, async move |cx| match answer.await {
+        Ok(0) => {
+            for view in dirty {
+                let task = view.update_in(cx, |v, window, cx| v.save(window, cx))?;
+                if !task.await? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Ok(1) => Ok(true),
+        _ => Ok(false),
+    })
 }

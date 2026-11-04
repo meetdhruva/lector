@@ -85,21 +85,21 @@ fn code_view_mouse_selection_modes(cx: &mut TestAppContext) {
     });
     view.update_in(cx, |v, window, cx| {
         // Double click selects a word; dragging extends by words.
-        v.begin_selection(Pos::new(0, 6), 2, false, window, cx);
+        v.begin_selection(Pos::new(0, 6), 2, false, false, window, cx);
         assert_eq!(v.selected_text(), "foo_bar");
         v.extend_selection(Pos::new(1, 2), cx);
         assert_eq!(v.selected_text(), "foo_bar = 1;\nnext");
         v.end_selection();
 
         // Triple click selects the whole line including its newline.
-        v.begin_selection(Pos::new(1, 3), 3, false, window, cx);
+        v.begin_selection(Pos::new(1, 3), 3, false, false, window, cx);
         assert_eq!(v.selected_text(), "next line\n");
         v.end_selection();
 
         // Click then shift-click extends.
-        v.begin_selection(Pos::new(0, 4), 1, false, window, cx);
+        v.begin_selection(Pos::new(0, 4), 1, false, false, window, cx);
         v.end_selection();
-        v.begin_selection(Pos::new(2, 2), 1, true, window, cx);
+        v.begin_selection(Pos::new(2, 2), 1, true, false, window, cx);
         v.end_selection();
         assert_eq!(v.selected_text(), "foo_bar = 1;\nnext line\nla");
     });
@@ -284,13 +284,13 @@ fn workspace_opens_documents_from_project(cx: &mut TestAppContext) {
         .expect("file view");
     cx.run_until_parked();
     view.read_with(cx, |v, cx| {
-        let doc = v.document().expect("loaded");
+        let doc = v.document(cx).expect("loaded");
         assert_eq!(doc.language().map(|l| l.name.as_str()), Some("Rust"));
         assert!(doc.outline().iter().any(|i| i.name == "Point"));
         let code = v.code_view().read(cx);
         assert_eq!(code.cursor(), Pos::new(5, 8));
         assert_eq!(code.line_text(4).as_ref(), "fn main() {");
-        assert_eq!(v.meta().unwrap().encoding.as_ref(), "UTF-8");
+        assert_eq!(v.meta(cx).unwrap().encoding.as_ref(), "UTF-8");
     });
     // Highlights arrive from the background for requested rows.
     let source = view.read_with(cx, |v, cx| v.code_view().read(cx).source().clone());
@@ -308,7 +308,7 @@ fn workspace_opens_documents_from_project(cx: &mut TestAppContext) {
         })
         .expect("file view");
     cx.run_until_parked();
-    bin.read_with(cx, |v, _| assert!(v.meta().is_none()));
+    bin.read_with(cx, |v, cx| assert!(v.meta(cx).is_none()));
     workspace.read_with(cx, |ws, cx| {
         assert!(ws.active_code_view(cx).is_none());
         assert_eq!(ws.file_views(cx).len(), 2);

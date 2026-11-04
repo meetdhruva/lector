@@ -11,7 +11,13 @@ description = "UI-free text editing model for Lector: multi-cursor selections, e
 [dependencies]
 lector-text.workspace = true
 unicode-segmentation.workspace = true
-smallvec.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
+unicode-segmentation.workspace = true
 proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "buffer"
+harness = false

@@ -272,6 +272,17 @@ fn canonical_spelling(path: &Path) -> Option<PathBuf> {
 impl Project {
     /// Opens `root`. Discovers the git repository (if any); never fails because of git.
     pub fn open(root: &Path, settings: Settings) -> Result<Project> {
+        Self::open_with(root, settings, true)
+    }
+
+    /// Opens `root` without discovering a git repository or starting language
+    /// servers: a placeholder project for a window with no folder open.
+    pub fn open_detached(root: &Path, mut settings: Settings) -> Result<Project> {
+        settings.lsp.enabled = false;
+        Self::open_with(root, settings, false)
+    }
+
+    fn open_with(root: &Path, settings: Settings, discover_git: bool) -> Result<Project> {
         let root = dunce::canonicalize(root)?;
         if !root.is_dir() {
             return Err(Error::Other(format!(
@@ -283,7 +294,12 @@ impl Project {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.to_string_lossy().into_owned());
-        let repo = match Repo::discover(&root) {
+        let discovered = if discover_git {
+            Repo::discover(&root)
+        } else {
+            Err(lector_git::Error::NotARepository(root.clone()))
+        };
+        let repo = match discovered {
             Ok(r) if !r.is_bare() => Some(r),
             Ok(_) => None,
             Err(e) => {

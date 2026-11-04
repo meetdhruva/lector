@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7d66412ae54760301c69ac09c2ab9615513973898ea76bee15c819dba425900f # shrinks to init = ([], [0], 0), chars = [6, 6, 0]
+cc fd07ef369f4a06e427e589858ed19ebfff43796eba05f11a47c841701524af9d # shrinks to init = ([2], [5, 3, 30], 0), ops = [Cut, DeleteLine]
+cc b51dc23334d64b3bd91b31a194e02939ed686b6d24b4b8a2057b4df265edaa76 # shrinks to init = ([10, 27, 10, 0, 0, 9], [0], 0), ops = [SelectWord(0), Backspace, CaretBelow, Cut]
+cc 9179e1285c5b3459e2e3001ffc87c1a88f91eb34d9af4582a532a4b7fb933cea # shrinks to init = ([], [0], 0), ops = [ToggleComment, SelectAll, PasteLines]
+cc 0c7c3242f17cfd7afbac964f241d5d1ee57d3fc69a37c6532fe8c50ec40c45db # shrinks to init = ([], [0], 0), ops = [Typed(0), Group([Undo])]
+cc 4fc165be4a8e5f5d2bf5979df69c72379f3c1e57babf2a66c7df1edc5af53e0b # shrinks to init = ([14, 14, 14, 14, 14, 2, 22, 0, 5, 13, 4], [92, 111, 165], 0), ops = [DeleteWordLeft, ApplyEdits([(200, 3, 14), (257, 0, 0)])]
+cc a688877c555d9dc0c7b61b74160b3f2de69aee61c7a46c1f9acc079f110c5490 # shrinks to init = ([20], [72], 0), chars = [6]

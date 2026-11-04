@@ -12,7 +12,9 @@ use gpui::{
 use super::file_tree::FsTreeDelegate;
 use crate::actions::workspace::*;
 use crate::components::tree_view::TreeView;
-use crate::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
+use crate::components::{
+    h_flex, metrics, v_flex, Button, ButtonStyle, ContextMenuState, IconButton, Tooltip,
+};
 use crate::icons::{Icon, IconName, IconSize};
 use crate::theme::{ActiveTheme, ColorExt};
 
@@ -80,19 +82,36 @@ impl SidebarPanel {
         }
     }
 
-    fn empty_state(self) -> (&'static str, &'static str) {
+    fn empty_state(self, has_folder: bool) -> (&'static str, &'static str) {
+        if !has_folder {
+            return match self {
+                SidebarPanel::Search => ("No folder open", "Open a folder to search its files."),
+                SidebarPanel::Outline => {
+                    ("No symbols", "Symbols of the active file will appear here.")
+                }
+                _ => (
+                    "No folder open",
+                    "Open a folder to browse its files and review its changes.",
+                ),
+            };
+        }
         match self {
             SidebarPanel::Files => ("No folder open", "Open a folder to browse its files."),
-            SidebarPanel::Changes => (
-                "No changes",
-                "Uncommitted changes and reviews will appear here.",
+            SidebarPanel::Changes | SidebarPanel::History | SidebarPanel::Branches => (
+                "Not a git repository",
+                "Changes, history and branches appear for folders inside a git repository.",
             ),
-            SidebarPanel::History => ("History", "Commits of the current branch will appear here."),
-            SidebarPanel::Branches => ("Branches", "Local and remote branches, tags and stashes."),
-            SidebarPanel::Search => ("Search", "Search across the project (ctrl-shift-f)."),
+            SidebarPanel::Search => ("Search", "Search across the project."),
             SidebarPanel::Outline => ("No symbols", "Symbols of the active file will appear here."),
         }
     }
+}
+
+/// Events emitted by the [`Sidebar`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarEvent {
+    /// The Files panel's Refresh button: rescan the project's files.
+    RefreshFiles,
 }
 
 /// The sidebar view.
@@ -101,7 +120,11 @@ pub struct Sidebar {
     file_tree: Entity<TreeView<FsTreeDelegate>>,
     panels: HashMap<SidebarPanel, AnyView>,
     focus_handle: FocusHandle,
+    has_folder: bool,
+    gear_menu: ContextMenuState,
 }
+
+impl gpui::EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Focusable for Sidebar {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -125,7 +148,30 @@ impl Sidebar {
             file_tree,
             panels: HashMap::new(),
             focus_handle: cx.focus_handle(),
+            has_folder: true,
+            gear_menu: ContextMenuState::default(),
         }
+    }
+
+    /// Marks the window as having no folder open (empty states with Open
+    /// Folder buttons instead of the file tree).
+    pub fn set_has_folder(&mut self, has_folder: bool, cx: &mut Context<Self>) {
+        self.has_folder = has_folder;
+        cx.notify();
+    }
+
+    fn deploy_gear_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = super::app_menu::build_settings_menu(self.focus_handle.clone(), window, cx);
+        self.gear_menu
+            .deploy(menu, position, window, cx, |this: &mut Self| {
+                &mut this.gear_menu
+            });
+        cx.notify();
     }
 
     /// The file tree.
@@ -218,14 +264,19 @@ impl Sidebar {
                 .tooltip(Tooltip::for_action("Toggle Light/Dark", &ToggleAppearance))
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleAppearance), cx)),
             )
-            .child(
+            .child({
+                let weak = cx.entity().downgrade();
                 IconButton::new("activity-settings", IconName::Settings)
                     .icon_size(IconSize::Medium)
                     .square(px(34.))
                     .color(ui.text_faint.hsla())
-                    .tooltip(Tooltip::for_action("Settings", &OpenSettings))
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
-            )
+                    .selected(self.gear_menu.is_open())
+                    .tooltip(Tooltip::text("Settings and Help"))
+                    .on_click(move |e, window, cx| {
+                        let position = e.position();
+                        let _ = weak.update(cx, |s, cx| s.deploy_gear_menu(position, window, cx));
+                    })
+            })
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -252,37 +303,55 @@ impl Sidebar {
                     h_flex()
                         .gap(px(2.))
                         .child(
-                            IconButton::new("files-reveal", IconName::Eye)
+                            IconButton::new("files-open-folder", IconName::FolderPlus)
                                 .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::for_action(
-                                    "Reveal Active File",
-                                    &RevealActiveFile,
-                                ))
+                                .tooltip(Tooltip::for_action("Open Folder…", &OpenFolder))
                                 .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(RevealActiveFile), cx)
+                                    window.dispatch_action(Box::new(OpenFolder), cx)
                                 }),
                         )
-                        .child(
-                            IconButton::new("files-refresh", IconName::Refresh)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Refresh"))
-                                .on_click(move |_, _, cx| tree.update(cx, |t, cx| t.refresh(cx))),
-                        )
-                        .child(
-                            IconButton::new("files-collapse", IconName::ChevronsDownUp)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Collapse All"))
-                                .on_click(move |_, _, cx| {
-                                    tree2.update(cx, |t, cx| t.collapse_all(cx))
-                                }),
-                        ),
+                        .when(self.has_folder, |el| {
+                            el.child(
+                                IconButton::new("files-reveal", IconName::Eye)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::for_action(
+                                        "Reveal Active File",
+                                        &RevealActiveFile,
+                                    ))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(RevealActiveFile), cx)
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("files-refresh", IconName::Refresh)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Refresh"))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        tree.update(cx, |t, cx| t.refresh(cx));
+                                        cx.emit(SidebarEvent::RefreshFiles);
+                                    })),
+                            )
+                            .child(
+                                IconButton::new("files-collapse", IconName::ChevronsDownUp)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Collapse All"))
+                                    .on_click(move |_, _, cx| {
+                                        tree2.update(cx, |t, cx| {
+                                            t.collapse_all(cx);
+                                            let root = t.delegate.root().to_path_buf();
+                                            t.set_expanded(&root, true, cx);
+                                        })
+                                    }),
+                            )
+                        }),
                 )
             })
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();
-        let (title, body) = self.active.empty_state();
+        let (title, body) = self.active.empty_state(self.has_folder);
+        let show_open = !self.has_folder && !matches!(self.active, SidebarPanel::Outline);
         v_flex()
             .size_full()
             .items_center()
@@ -308,6 +377,32 @@ impl Sidebar {
                     .text_center()
                     .child(body),
             )
+            .when(show_open, |el| {
+                el.child(
+                    v_flex()
+                        .mt(px(12.))
+                        .w(px(200.))
+                        .gap(px(6.))
+                        .child(
+                            Button::new("sidebar-open-folder", "Open Folder…")
+                                .icon(IconName::FolderOpen)
+                                .style(ButtonStyle::Accent)
+                                .full_width()
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(OpenFolder), cx)
+                                }),
+                        )
+                        .child(
+                            Button::new("sidebar-open-recent", "Open Recent…")
+                                .icon(IconName::History)
+                                .style(ButtonStyle::Outlined)
+                                .full_width()
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(OpenRecent), cx)
+                                }),
+                        ),
+                )
+            })
     }
 }
 
@@ -315,7 +410,9 @@ impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();
         let content = match self.active {
-            SidebarPanel::Files => self.file_tree.clone().into_any_element(),
+            SidebarPanel::Files if self.has_folder => self.file_tree.clone().into_any_element(),
+            SidebarPanel::Files => self.render_empty(cx).into_any_element(),
+            SidebarPanel::Search if !self.has_folder => self.render_empty(cx).into_any_element(),
             panel => match self.panels.get(&panel) {
                 Some(view) => view.clone().into_any_element(),
                 None => self.render_empty(cx).into_any_element(),
@@ -335,5 +432,6 @@ impl Render for Sidebar {
                     .child(self.render_header(cx))
                     .child(div().flex_1().min_h_0().pt(px(4.)).child(content)),
             )
+            .children(self.gear_menu.render())
     }
 }

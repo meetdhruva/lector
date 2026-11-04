@@ -26,7 +26,7 @@ pub use language::{Language, LanguageRegistry};
 pub use names::{highlight_id_for_capture, HighlightId, HIGHLIGHT_NAMES};
 pub use outline::{OutlineItem, SymbolKind};
 pub use symbols::{SymbolIndex, SymbolLocation};
-pub use syntax::{NodeInfo, Syntax, MAX_PARSE_BYTES};
+pub use syntax::{NodeInfo, Syntax, SyntaxEdit, MAX_PARSE_BYTES};
 pub use tags::Tag;
 
 #[cfg(test)]

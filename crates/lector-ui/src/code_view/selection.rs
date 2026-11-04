@@ -72,6 +72,55 @@ impl Selection {
     }
 }
 
+/// Sorts selections by start and merges overlapping ones (carets at the same
+/// position, or ranges that overlap; touching non-empty ranges stay apart).
+/// Returns the merged list and the new index of `primary`.
+pub fn normalize(mut selections: Vec<Selection>, primary: usize) -> (Vec<Selection>, usize) {
+    if selections.is_empty() {
+        return (vec![Selection::default()], 0);
+    }
+    let mut indexed: Vec<(usize, Selection)> = selections.drain(..).enumerate().collect();
+    indexed.sort_by_key(|(_, s)| s.range());
+    let mut out: Vec<Selection> = Vec::with_capacity(indexed.len());
+    let mut primary_out = 0;
+    let primary_ix = primary.min(indexed.len() - 1);
+    for (ix, sel) in indexed {
+        if let Some(last) = out.last_mut() {
+            let (ls, le) = last.range();
+            let (s, e) = sel.range();
+            // Overlapping ranges, or a caret touching a range edge / another caret.
+            let overlaps = s < le || (s == le && (s == e || ls == le));
+            if overlaps {
+                let start = ls.min(s);
+                let end = le.max(e);
+                let reversed = last.head < last.anchor;
+                *last = if reversed {
+                    Selection {
+                        anchor: end,
+                        head: start,
+                        goal_column: None,
+                    }
+                } else {
+                    Selection {
+                        anchor: start,
+                        head: end,
+                        goal_column: last.goal_column,
+                    }
+                };
+                if ix == primary_ix {
+                    primary_out = out.len() - 1;
+                }
+                continue;
+            }
+        }
+        if ix == primary_ix {
+            primary_out = out.len();
+        }
+        out.push(sel);
+    }
+    (out, primary_out)
+}
+
 /// Read access to lines for movement.
 pub trait LineAccess {
     /// Number of rows.

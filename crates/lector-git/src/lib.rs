@@ -1,4 +1,4 @@
-//! Read-only git access for Lector.
+//! Git access for Lector: gix-backed reads plus CLI-backed writes ([`write`]).
 //!
 //! [`Repo`] wraps a [gitoxide](https://github.com/GitoxideLabs/gitoxide)
 //! repository for all read paths (status, diffs between trees/index/worktree,
@@ -6,8 +6,10 @@
 //! file history (`log --follow`) shell out to the `git` CLI.
 //!
 //! Guarantees:
-//! * Nothing ever writes to the repository: no index refresh write-back, no lock
-//!   files (`GIT_OPTIONAL_LOCKS=0` for CLI calls), no ref or config changes.
+//! * Read paths never write to the repository: no index refresh write-back, no lock
+//!   files (`GIT_OPTIONAL_LOCKS=0` for CLI calls), no ref or config changes. Writes
+//!   (stage, unstage, discard, apply, commit) live in [`write`], go through the git
+//!   CLI and are only called for explicit user actions.
 //! * No panics on repository data; all failures are [`Error`]s.
 //! * Line numbers are 0-based `u32`; paths are repository-relative with `/`.
 //!
@@ -26,6 +28,7 @@ mod permalink;
 mod repo;
 mod status;
 mod types;
+pub mod write;
 
 pub use error::{Error, Result};
 pub use graph::{graph, EdgeKind, GraphEdge, GraphRow};
@@ -36,3 +39,4 @@ pub use types::{
     BlameHunk, Branch, ChangeKind, Changeset, CommitDetail, CommitInfo, FileChange, HeadInfo,
     LogQuery, RefKind, RefLabel, Remote, Side, Signature, Stash, StatusEntry, Tag,
 };
+pub use write::{CommitOptions, PatchTarget};

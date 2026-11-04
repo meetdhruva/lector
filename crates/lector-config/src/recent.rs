@@ -62,6 +62,19 @@ impl RecentProjects {
             serde_json::to_vec_pretty(&RecentFile { projects }).map_err(std::io::Error::other)?;
         write_atomic(&self.file, &bytes)
     }
+
+    /// Forgets `root` (e.g. a project that no longer exists). Missing entries are fine.
+    pub fn remove(&self, root: &Path) -> std::io::Result<()> {
+        let mut projects = self.list();
+        let before = projects.len();
+        projects.retain(|p| p != root);
+        if projects.len() == before {
+            return Ok(());
+        }
+        let bytes =
+            serde_json::to_vec_pretty(&RecentFile { projects }).map_err(std::io::Error::other)?;
+        write_atomic(&self.file, &bytes)
+    }
 }
 
 #[cfg(test)]
@@ -84,6 +97,10 @@ mod tests {
         assert_eq!(store.most_recent_existing(), None);
         std::fs::create_dir(dir.path().join("p24")).unwrap();
         assert_eq!(store.most_recent_existing(), Some(dir.path().join("p24")));
+        store.remove(&dir.path().join("p3")).unwrap();
+        assert!(!store.list().contains(&dir.path().join("p3")));
+        assert_eq!(store.list().len(), MAX_RECENT_PROJECTS - 1);
+        store.remove(&dir.path().join("missing")).unwrap();
     }
 
     #[test]

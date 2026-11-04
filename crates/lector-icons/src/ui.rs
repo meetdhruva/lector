@@ -218,6 +218,40 @@ ui_icons! {
     Globe => "globe",
     /// Light bulb / hint.
     Lightbulb => "lightbulb",
+    /// Locked (read-only).
+    Lock => "lock",
+    /// Unlocked (editable).
+    LockOpen => "lock-open",
+    /// Save.
+    Save => "save",
+    /// Keyboard (key bindings).
+    Keyboard => "keyboard",
+    /// Bug (report an issue).
+    Bug => "bug",
+    /// Open a folder.
+    FolderPlus => "folder-plus",
+    /// Close a folder.
+    FolderX => "folder-x",
+    /// Palette (themes).
+    Palette => "palette",
+    /// Enter full screen.
+    Maximize => "maximize-2",
+    /// Leave full screen.
+    Minimize => "minimize-2",
+    /// A window (new window).
+    AppWindow => "app-window",
+    /// Window caption: minimize (Lector's own 1px glyph, `assets/lucide/lector-*.svg`).
+    WindowMinimize => "lector-win-minimize",
+    /// Window caption: maximize.
+    WindowMaximize => "lector-win-maximize",
+    /// Window caption: restore.
+    WindowRestore => "lector-win-restore",
+    /// Window caption: close.
+    WindowClose => "lector-win-close",
+    /// Discard / revert changes.
+    Undo => "undo-2",
+    /// Delete.
+    Trash => "trash-2",
 }
 
 /// SVG bytes of a UI icon.

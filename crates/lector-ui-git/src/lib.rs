@@ -6,11 +6,14 @@
 pub mod blame;
 pub mod branches_panel;
 pub mod changes_panel;
+pub mod commit_composer;
+pub mod confirm;
 pub mod diff_source;
 pub mod diff_view;
 pub mod history_panel;
 pub mod ref_picker;
 pub mod review_tab;
+pub mod staging;
 pub mod store;
 pub mod util;
 
@@ -18,14 +21,14 @@ use std::rc::Rc;
 
 use gpui::{actions, App, AppContext, ClipboardItem, Entity, SharedString, Window};
 use lector_git::Oid;
-use lector_ui::actions::{editor, workspace as ws_actions};
+use lector_ui::actions::{editor, git as git_actions, workspace as ws_actions};
 use lector_ui::code_view::{CodeSource, CodeView};
 use lector_ui::views::pane::CodeItem;
 use lector_ui::views::sidebar::SidebarPanel;
 use lector_ui::views::Workspace;
 
 use crate::branches_panel::BranchesPanel;
-use crate::changes_panel::ChangesPanel;
+use crate::changes_panel::{ChangesPanel, PathOp};
 use crate::diff_source::RevisionSource;
 use crate::diff_view::{open_diff, DiffTarget};
 use crate::history_panel::{HistoryPanel, HistoryScope};
@@ -77,7 +80,7 @@ pub fn init(cx: &mut App) {
             })
         });
         ws.sidebar().update(cx, |sb, cx| {
-            sb.set_panel_view(SidebarPanel::Changes, changes.into(), cx);
+            sb.set_panel_view(SidebarPanel::Changes, changes.clone().into(), cx);
             sb.set_panel_view(SidebarPanel::History, history.into(), cx);
             sb.set_panel_view(SidebarPanel::Branches, branches.into(), cx);
         });
@@ -135,6 +138,7 @@ pub fn init(cx: &mut App) {
                 show_history_scope(&s, HistoryScope::Lines(rel, a.row..end), window, cx)
             });
         });
+        register_git_actions(ws, &store, &changes);
         let s = store.clone();
         ws.register_action(move |ws, _: &editor::CopyPermalink, window, cx| {
             copy_permalink(ws, &s, window, cx);
@@ -186,6 +190,90 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// `git::*` workspace actions, so menus and the palette can stage, discard and
+/// commit from anywhere. When the Changes list, the commit editor or a diff has
+/// focus, their own handlers run first; these act on the active file.
+fn register_git_actions(
+    ws: &mut Workspace,
+    store: &Entity<GitStore>,
+    changes: &Entity<ChangesPanel>,
+) {
+    fn path_action<A: gpui::Action>(
+        ws: &mut Workspace,
+        store: &Entity<GitStore>,
+        changes: &Entity<ChangesPanel>,
+        op: PathOp,
+    ) {
+        let (s, c) = (store.clone(), changes.clone());
+        ws.register_action(move |ws, _: &A, window, cx| {
+            let Some(rel) = active_rel_path(ws, &s, cx) else {
+                return;
+            };
+            let c = c.clone();
+            window.defer(cx, move |window, cx| {
+                c.update(cx, |p, cx| p.path_op(&rel, op, window, cx));
+            });
+        });
+    }
+    path_action::<git_actions::Stage>(ws, store, changes, PathOp::Stage);
+    path_action::<git_actions::Unstage>(ws, store, changes, PathOp::Unstage);
+    path_action::<git_actions::DiscardChanges>(ws, store, changes, PathOp::Discard);
+
+    let c = changes.clone();
+    ws.register_action(move |_, _: &git_actions::StageAll, window, cx| {
+        let c = c.clone();
+        window.defer(cx, move |_, cx| c.update(cx, |p, cx| p.stage_all(None, cx)));
+    });
+    let c = changes.clone();
+    ws.register_action(move |_, _: &git_actions::UnstageAll, window, cx| {
+        let c = c.clone();
+        window.defer(cx, move |_, cx| c.update(cx, |p, cx| p.unstage_all(cx)));
+    });
+    let c = changes.clone();
+    ws.register_action(move |_, _: &git_actions::DiscardAll, window, cx| {
+        let c = c.clone();
+        window.defer(cx, move |window, cx| {
+            c.update(cx, |p, cx| p.discard_all(None, window, cx))
+        });
+    });
+    let c = changes.clone();
+    ws.register_action(move |_, _: &git_actions::Refresh, window, cx| {
+        let c = c.clone();
+        window.defer(cx, move |_, cx| c.update(cx, |p, cx| p.refresh(cx)));
+    });
+    let c = changes.clone();
+    ws.register_action(move |ws, _: &git_actions::FocusCommitMessage, window, cx| {
+        let showing = ws.is_sidebar_visible()
+            && ws.sidebar().read(cx).active_panel() == SidebarPanel::Changes;
+        let c = c.clone();
+        window.defer(cx, move |window, cx| {
+            if !showing {
+                window.dispatch_action(Box::new(ws_actions::ShowChanges), cx);
+            }
+            let composer = c.read(cx).composer().clone();
+            window.defer(cx, move |window, cx| {
+                composer.read(cx).focus_message(window, cx);
+            });
+        });
+    });
+    let c = changes.clone();
+    ws.register_action(move |_, _: &git_actions::Commit, window, cx| {
+        let c = c.clone();
+        window.defer(cx, move |window, cx| {
+            let composer = c.read(cx).composer().clone();
+            composer.update(cx, |p, cx| p.commit(window, cx));
+        });
+    });
+    let c = changes.clone();
+    ws.register_action(move |_, _: &git_actions::ToggleAmend, window, cx| {
+        let c = c.clone();
+        window.defer(cx, move |_, cx| {
+            let composer = c.read(cx).composer().clone();
+            composer.update(cx, |p, cx| p.toggle_amend(cx));
+        });
+    });
 }
 
 fn restore_tab(

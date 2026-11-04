@@ -9,6 +9,7 @@ pub mod popover;
 pub mod scrollbar;
 pub mod split;
 pub mod tabs;
+pub mod text_area;
 pub mod text_input;
 pub mod tooltip;
 pub mod tree_view;

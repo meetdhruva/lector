@@ -25,6 +25,8 @@ pub struct Tab {
     active: bool,
     focused_pane: bool,
     preview: bool,
+    dirty: bool,
+    read_only: bool,
     on_click: Option<Handler>,
     on_close: Option<Handler>,
     on_secondary: Option<MouseHandler>,
@@ -41,6 +43,8 @@ impl Tab {
             active: false,
             focused_pane: true,
             preview: false,
+            dirty: false,
+            read_only: false,
             on_click: None,
             on_close: None,
             on_secondary: None,
@@ -74,6 +78,18 @@ impl Tab {
     /// Preview tabs render in italics and are replaced by the next preview.
     pub fn preview(mut self, preview: bool) -> Self {
         self.preview = preview;
+        self
+    }
+
+    /// Unsaved changes: a dot replaces the close button until hovered.
+    pub fn dirty(mut self, dirty: bool) -> Self {
+        self.dirty = dirty;
+        self
+    }
+
+    /// Editing is blocked: a small lock after the title.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -124,23 +140,45 @@ impl RenderOnce for Tab {
         let group: SharedString = format!("tab-{:?}", self.id).into();
         let active = self.active;
 
+        let dirty = self.dirty;
         let close = self.on_close.clone().map(|on_close| {
-            div()
-                .id(close_id)
+            let x = div()
+                .absolute()
+                .inset_0()
                 .flex()
                 .items_center()
                 .justify_center()
+                .invisible()
+                .when(active && !dirty, |el| el.visible())
+                .group_hover(group.clone(), |s| s.visible())
+                .child(Icon::new(IconName::Close).size(IconSize::XSmall).color(fg));
+            let dot = div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(!dirty, |el| el.invisible())
+                .group_hover(group.clone(), |s| s.invisible())
+                .child(div().size(px(8.)).rounded_full().bg(fg));
+            div()
+                .id(close_id)
+                .relative()
+                .flex_none()
                 .size(px(18.))
                 .rounded(px(4.))
-                .invisible()
-                .when(active, |el| el.visible())
-                .group_hover(group.clone(), |s| s.visible())
                 .hover(move |s| s.bg(hover))
-                .child(Icon::new(IconName::Close).size(IconSize::XSmall).color(fg))
+                .child(dot)
+                .child(x)
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     on_close(window, cx)
                 })
+        });
+        let lock = self.read_only.then(|| {
+            Icon::new(IconName::Lock)
+                .size(IconSize::XSmall)
+                .color(ui.text_faint.hsla())
         });
 
         let mut tab = h_flex()
@@ -180,6 +218,7 @@ impl RenderOnce for Tab {
                     .when(self.preview, |el| el.italic())
                     .child(self.title),
             )
+            .children(lock)
             .when_some(self.detail, |el, detail| {
                 el.child(
                     div()

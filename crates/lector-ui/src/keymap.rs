@@ -36,6 +36,12 @@ pub mod contexts {
     pub const CONTEXT_MENU: &str = "ContextMenu";
     /// A tree view.
     pub const TREE_VIEW: &str = "TreeView";
+    /// A multi-line text area (also carries `TextInput`).
+    pub const TEXT_AREA: &str = "TextArea";
+    /// The Changes panel file list.
+    pub const CHANGES_PANEL: &str = "ChangesPanel";
+    /// The commit message editor.
+    pub const COMMIT_EDITOR: &str = "CommitEditor";
 }
 
 const fn mac() -> bool {
@@ -193,6 +199,9 @@ pub fn default_keymap() -> Vec<KeySpec> {
         add("enter".into(), "picker::Confirm", Some(ctx));
         add("escape".into(), "picker::Cancel", Some(ctx));
     }
+    // Secondary confirm (e.g. open a recent project in a new window); the
+    // delegate reads the held modifier.
+    add(primary("cmd-enter"), "picker::Confirm", Some(PICKER));
     let tv = Some(TREE_VIEW);
     add("up".into(), "picker::SelectPrev", tv);
     add("down".into(), "picker::SelectNext", tv);
@@ -230,6 +239,59 @@ pub fn default_keymap() -> Vec<KeySpec> {
             ti,
         );
     }
+
+    // Multi-line text areas (commit message); `text_input::*` above applies too.
+    let ta = Some(TEXT_AREA);
+    for (keys, action) in [
+        ("enter", "text_area::Newline"),
+        ("shift-enter", "text_area::Newline"),
+        ("up", "text_area::MoveUp"),
+        ("down", "text_area::MoveDown"),
+        ("shift-up", "text_area::SelectUp"),
+        ("shift-down", "text_area::SelectDown"),
+        ("pageup", "text_area::PageUp"),
+        ("pagedown", "text_area::PageDown"),
+        ("shift-home", "text_area::SelectToLineStart"),
+        ("shift-end", "text_area::SelectToLineEnd"),
+        ("cmd-z", "text_area::Undo"),
+        ("cmd-shift-z", "text_area::Redo"),
+    ] {
+        add(primary(keys), action, ta);
+    }
+    let word = if mac() { "alt" } else { "ctrl" };
+    add(format!("{word}-left"), "text_area::WordLeft", ta);
+    add(format!("{word}-right"), "text_area::WordRight", ta);
+    add(
+        format!("{word}-shift-left"),
+        "text_area::SelectWordLeft",
+        ta,
+    );
+    add(
+        format!("{word}-shift-right"),
+        "text_area::SelectWordRight",
+        ta,
+    );
+    add(format!("{word}-backspace"), "text_area::DeleteWordLeft", ta);
+    if mac() {
+        add("cmd-up".into(), "text_area::MoveToStart", ta);
+        add("cmd-down".into(), "text_area::MoveToEnd", ta);
+        add("cmd-shift-up".into(), "text_area::SelectToStart", ta);
+        add("cmd-shift-down".into(), "text_area::SelectToEnd", ta);
+        add("cmd-left".into(), "text_input::Home", ta);
+        add("cmd-right".into(), "text_input::End", ta);
+    } else {
+        add("ctrl-home".into(), "text_area::MoveToStart", ta);
+        add("ctrl-end".into(), "text_area::MoveToEnd", ta);
+        add("ctrl-shift-home".into(), "text_area::SelectToStart", ta);
+        add("ctrl-shift-end".into(), "text_area::SelectToEnd", ta);
+        add("ctrl-y".into(), "text_area::Redo", ta);
+    }
+
+    // Changes panel list (`space` = git::Stage comes from lector-config's keymap).
+    let cp = Some(CHANGES_PANEL);
+    add("up".into(), "picker::SelectPrev", cp);
+    add("down".into(), "picker::SelectNext", cp);
+    add("enter".into(), "picker::Confirm", cp);
     out
 }
 

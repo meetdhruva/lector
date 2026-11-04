@@ -74,7 +74,7 @@ impl OutlinePanel {
         let rows = self
             .file_view
             .as_ref()
-            .and_then(|v| v.read(cx).document().cloned())
+            .and_then(|v| v.read(cx).document(cx).cloned())
             .and_then(|doc| {
                 let text = doc.text()?.clone();
                 Some(
@@ -124,7 +124,7 @@ impl OutlinePanel {
             return;
         };
         let v = view.read(cx);
-        let Some(doc) = v.document() else { return };
+        let Some(doc) = v.document(cx) else { return };
         let Some(text) = doc.text() else { return };
         let row = v.code_view().read(cx).cursor().row;
         let innermost = symbols_containing_row(doc, text, row).pop();

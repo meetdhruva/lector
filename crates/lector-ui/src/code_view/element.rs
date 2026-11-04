@@ -9,10 +9,10 @@ use std::rc::Rc;
 
 use gpui::{
     fill, point, px, quad, relative, size, App, BorderStyle, Bounds, ContentMask, Corners,
-    CursorStyle, DispatchPhase, Element, ElementId, Entity, FontStyle, FontWeight, GlobalElementId,
-    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style,
-    TextRun, TransformationMatrix, Window,
+    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, FontStyle,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, ShapedLine,
+    SharedString, Style, TextRun, TransformationMatrix, Window,
 };
 use smallvec::SmallVec;
 
@@ -246,8 +246,20 @@ impl CodeView {
         if self.display_map_key() != Some(key) {
             let mut map = DisplayMap::new(line_count);
             map.set_folds(self.active_folds());
-            if wrap_cols.is_some() {
-                map.set_wrap(wrap_cols, tab, |r| source.line(r).to_string());
+            if let Some(cols) = wrap_cols {
+                // Per-row wrap counts survive edits (only edited rows are
+                // re-measured), so typing in a wrapped file stays cheap.
+                let counts = self.wrap_counts(cols, tab, line_count, source.version());
+                let mut counts = counts.borrow_mut();
+                for row in 0..line_count as usize {
+                    if counts[row].is_none() {
+                        let text = source.line(row as u32);
+                        counts[row] = Some(wrap_segments(&text, cols, tab).len() as u32 - 1);
+                    }
+                }
+                map.set_wrap_counts(cols, |r| {
+                    counts.get(r as usize).copied().flatten().unwrap_or(0)
+                });
             }
             self.set_display_map(map, key);
         }
@@ -711,6 +723,18 @@ impl Element for CodeElement {
         let view = self.view.read(cx);
         let focused = view.focus_handle.is_focused(window);
         let selection = view.selection();
+        let selections: Vec<super::Selection> = view.selections().to_vec();
+        let single_caret = selections.len() == 1;
+        let cursor_visible = view.cursor_visible;
+        let editable = view.is_editable();
+        let focus_handle = view.focus_handle.clone();
+        let marked: Option<(Pos, Pos)> = view.marked_range().and_then(|r| {
+            let text = view.buffer()?.read(cx).text().clone();
+            Some((
+                super::edit::offset_to_pos(&text, r.start),
+                super::edit::offset_to_pos(&text, r.end),
+            ))
+        });
         let (search_matches, active_match) = view.search_matches();
         let search_matches: Vec<(u32, Range<usize>)> = search_matches.to_vec();
         let decorations = view.decorations().to_vec();
@@ -737,20 +761,29 @@ impl Element for CodeElement {
 
             let first_row = layout.rows.first().map(|r| r.row).unwrap_or(0);
             let last_row = layout.rows.last().map(|r| r.row).unwrap_or(0);
-            let (sel_start, sel_end) = selection.range();
-            let cursor_row = selection.head.row;
+            // Rows holding an empty caret get the current-line background.
+            let caret_rows: HashSet<u32> = selections
+                .iter()
+                .filter(|s| s.is_empty() && s.head.row >= first_row && s.head.row <= last_row)
+                .map(|s| s.head.row)
+                .collect();
+            // Selections intersecting the visible rows (sorted, non-overlapping).
+            let visible_sels: &[super::Selection] = {
+                let lo = selections.partition_point(|s| s.range().1 < Pos::new(first_row, 0));
+                let hi =
+                    selections.partition_point(|s| s.range().0 <= Pos::new(last_row, usize::MAX));
+                &selections[lo..hi.max(lo)]
+            };
 
             // Current line (across gutter and text).
-            if selection.is_empty() {
-                for rl in layout.rows.iter().filter(|r| r.row == cursor_row) {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(bounds.left(), rl.y),
-                            size(layout.text_bounds.right() - bounds.left(), lh),
-                        ),
-                        ui.active_line.hsla(),
-                    ));
-                }
+            for rl in layout.rows.iter().filter(|r| caret_rows.contains(&r.row)) {
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(bounds.left(), rl.y),
+                        size(layout.text_bounds.right() - bounds.left(), lh),
+                    ),
+                    ui.active_line.hsla(),
+                ));
             }
 
             // Row decorations from the source (diff backgrounds).
@@ -826,7 +859,7 @@ impl Element for CodeElement {
                     }
 
                     // Occurrences of the word under the cursor.
-                    if selection.is_empty() && focused {
+                    if single_caret && selection.is_empty() && focused {
                         if let Some((_, _, word)) =
                             selection::word_at(source.as_ref(), selection.head)
                         {
@@ -879,13 +912,14 @@ impl Element for CodeElement {
                         }
                     }
 
-                    // Selection.
-                    if !selection.is_empty() {
-                        let color = if focused {
-                            ui.selection.hsla()
-                        } else {
-                            ui.selection_inactive.hsla()
-                        };
+                    // Selections.
+                    let color = if focused {
+                        ui.selection.hsla()
+                    } else {
+                        ui.selection_inactive.hsla()
+                    };
+                    for sel in visible_sels.iter().filter(|s| !s.is_empty()) {
+                        let (sel_start, sel_end) = sel.range();
                         for rl in &layout.rows {
                             let pos_start = Pos::new(rl.row, rl.seg_start);
                             let pos_end = Pos::new(rl.row, rl.seg_end);
@@ -982,41 +1016,80 @@ impl Element for CodeElement {
                         }
                     }
 
-                    // Cursor.
-                    if focused {
-                        let head = selection.head;
-                        if let Some(rl) = layout.rows.iter().find(|r| {
-                            r.row == head.row
-                                && head.col >= r.seg_start
-                                && (head.col < r.seg_end
-                                    || r.last_seg
-                                    || head.col == r.seg_end && r.seg_end == r.seg_start)
-                        }) {
-                            let x = text_x + rl.x_for_col(head.col);
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(x - px(1.), rl.y + px(2.)),
-                                    size(px(2.), lh - px(4.)),
-                                ),
-                                ui.cursor.hsla(),
-                            ));
+                    // IME composition: underline the marked text.
+                    if let Some((m_start, m_end)) = marked {
+                        for rl in &layout.rows {
+                            if rl.row < m_start.row || rl.row > m_end.row {
+                                continue;
+                            }
+                            let s = if rl.row == m_start.row {
+                                m_start.col
+                            } else {
+                                rl.seg_start
+                            };
+                            let e = if rl.row == m_end.row {
+                                m_end.col
+                            } else {
+                                rl.seg_end
+                            };
+                            if e < rl.seg_start || s > rl.seg_end {
+                                continue;
+                            }
+                            let x0 = rl.x_for_col(s.max(rl.seg_start));
+                            let x1 = rl.x_for_col(e.min(rl.seg_end));
+                            if x1 > x0 {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(text_x + x0, rl.y + lh - px(3.)),
+                                        size(x1 - x0, px(1.5)),
+                                    ),
+                                    ui.text.hsla(),
+                                ));
+                            }
                         }
+                    }
+
+                    // Carets (every selection head; the primary is drawn last).
+                    if focused && cursor_visible {
+                        let caret_color = ui.cursor.hsla();
+                        let paint_caret = |window: &mut Window, head: Pos, width: Pixels| {
+                            if let Some(rl) = layout.rows.iter().find(|r| {
+                                r.row == head.row
+                                    && head.col >= r.seg_start
+                                    && (head.col < r.seg_end
+                                        || r.last_seg
+                                        || head.col == r.seg_end && r.seg_end == r.seg_start)
+                            }) {
+                                let x = text_x + rl.x_for_col(head.col);
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(x - px(1.), rl.y + px(2.)),
+                                        size(width, lh - px(4.)),
+                                    ),
+                                    caret_color,
+                                ));
+                            }
+                        };
+                        for sel in visible_sels {
+                            if sel.head != selection.head {
+                                paint_caret(window, sel.head, px(2.));
+                            }
+                        }
+                        paint_caret(window, selection.head, px(2.));
                     }
                 },
             );
 
             // Gutter (painted over horizontally scrolled text).
             window.paint_quad(fill(layout.gutter_bounds, ui.background.hsla()));
-            if selection.is_empty() {
-                for rl in layout.rows.iter().filter(|r| r.row == cursor_row) {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(bounds.left(), rl.y),
-                            size(layout.gutter_bounds.size.width, lh),
-                        ),
-                        ui.active_line.hsla(),
-                    ));
-                }
+            for rl in layout.rows.iter().filter(|r| caret_rows.contains(&r.row)) {
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(bounds.left(), rl.y),
+                        size(layout.gutter_bounds.size.width, lh),
+                    ),
+                    ui.active_line.hsla(),
+                ));
             }
             paint_gutter(
                 window,
@@ -1109,6 +1182,13 @@ impl Element for CodeElement {
             );
         });
 
+        if focused && editable {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.view.clone()),
+                cx,
+            );
+        }
         register_mouse_handlers(window, &self.view, &layout, &state.hitbox);
         tracing::trace!(target: "lector_ui::perf", elapsed_us = started.elapsed().as_micros() as u64, "code view paint");
     }
@@ -1716,7 +1796,14 @@ fn register_mouse_handlers(
                                 let folded = v.is_folded(pos.row);
                                 v.set_folded(pos.row, !folded, cx);
                             } else {
-                                v.begin_selection(Pos::new(pos.row, 0), 3, false, window, cx);
+                                v.begin_selection(
+                                    Pos::new(pos.row, 0),
+                                    3,
+                                    event.modifiers.shift,
+                                    false,
+                                    window,
+                                    cx,
+                                );
                             }
                         } else if event.modifiers.secondary() {
                             if let Some(cb) = v.cmd_click_callback() {
@@ -1729,6 +1816,7 @@ fn register_mouse_handlers(
                                 pos,
                                 event.click_count,
                                 event.modifiers.shift,
+                                event.modifiers.alt,
                                 window,
                                 cx,
                             );
@@ -1737,8 +1825,11 @@ fn register_mouse_handlers(
                     }
                     MouseButton::Right => {
                         window.focus(&v.focus_handle);
-                        let (s, e) = v.selection().range();
-                        if pos < s || pos > e {
+                        let inside = v.selections().iter().any(|sel| {
+                            let (s, e) = sel.range();
+                            pos >= s && pos <= e
+                        });
+                        if !inside {
                             v.set_cursor(pos, cx);
                         }
                         v.deploy_context_menu(p, window, cx);

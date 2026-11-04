@@ -345,6 +345,17 @@ impl SearchPanel {
         cx.notify();
     }
 
+    /// Turns off case/word/regex matching and clears the folder filters.
+    fn reset_options(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.regex = false;
+        self.case_sensitive = false;
+        self.whole_word = false;
+        self.include.update(cx, |i, cx| i.set_text("", cx));
+        self.exclude.update(cx, |i, cx| i.set_text("", cx));
+        self.schedule_search(cx);
+        cx.notify();
+    }
+
     fn activate_row(&mut self, ix: usize, preview: bool, cx: &mut Context<Self>) {
         self.selected = Some(ix);
         match self.rows.get(ix).copied() {
@@ -462,6 +473,76 @@ impl SearchPanel {
         if let Some(ix) = ix {
             self.activate_row(ix, false, cx);
         }
+    }
+
+    /// Empty states: before searching (hints) and when nothing matched.
+    fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ui = cx.theme().ui.clone();
+        let no_results = matches!(self.status, Status::Done { matches: 0, .. });
+        if !no_results && !matches!(self.status, Status::Idle) {
+            return div().into_any_element();
+        }
+        let has_filters = self.show_filters
+            && (!self.include.read(cx).text().is_empty()
+                || !self.exclude.read(cx).text().is_empty());
+        let (title, body): (&str, &str) = if no_results {
+            (
+                "No results",
+                if has_filters {
+                    "Nothing matched. Check the include and exclude filters."
+                } else if self.regex || self.whole_word || self.case_sensitive {
+                    "Nothing matched. Try turning off match case, whole word or regex."
+                } else {
+                    "Nothing in the project matches this text."
+                },
+            )
+        } else {
+            (
+                "Search the project",
+                "Type to search every file (respects .gitignore). Use the buttons for case, whole words, regex and folder filters.",
+            )
+        };
+        let this = cx.entity().downgrade();
+        v_flex()
+            .items_center()
+            .pt(px(40.))
+            .px(px(20.))
+            .gap(px(6.))
+            .child(
+                Icon::new(IconName::TextSearch)
+                    .size(IconSize::Custom(px(26.)))
+                    .color(ui.text_faint.hsla()),
+            )
+            .child(
+                div()
+                    .mt(px(4.))
+                    .text_size(metrics::TEXT)
+                    .text_color(ui.text_muted.hsla())
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(metrics::TEXT_SM)
+                    .text_color(ui.text_faint.hsla())
+                    .text_center()
+                    .child(body),
+            )
+            .when(
+                no_results && (has_filters || self.regex || self.whole_word || self.case_sensitive),
+                |el| {
+                    el.child(
+                        crate::components::Button::new(
+                            "search-reset-options",
+                            "Reset Search Options",
+                        )
+                        .style(crate::components::ButtonStyle::Outlined)
+                        .on_click(move |_, window, cx| {
+                            let _ = this.update(cx, |p, cx| p.reset_options(window, cx));
+                        }),
+                    )
+                },
+            )
+            .into_any_element()
     }
 
     fn render_status(&self, cx: &App) -> AnyElement {
@@ -586,7 +667,7 @@ impl Render for SearchPanel {
         };
         let count = self.rows.len();
         let body = if count == 0 {
-            div().into_any_element()
+            self.render_empty(cx)
         } else {
             let weak = cx.entity().downgrade();
             virtual_list(

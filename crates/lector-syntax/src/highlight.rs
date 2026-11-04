@@ -179,7 +179,7 @@ impl Syntax {
         if let Some(t) = self.shared.layers.lock().get(&key) {
             return Some(t.clone());
         }
-        let tree = Arc::new(parse_tree(&region.lang, text, Some(&region.ranges), None).ok()?);
+        let tree = Arc::new(parse_tree(&region.lang, text, Some(&region.ranges), None, None).ok()?);
         let mut layers = self.shared.layers.lock();
         if layers.len() >= MAX_CACHED_LAYERS {
             layers.clear();

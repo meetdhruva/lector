@@ -429,7 +429,7 @@ pub struct KeyBinding { pub keys: String /* "cmd-p" / "ctrl-shift-f" (gpui synta
 pub fn default_keymap(platform: Platform) -> Vec<KeyBinding>;   pub fn load_keymap() -> (Vec<KeyBinding>, Vec<String>);
 pub mod paths { pub fn portable_root() -> Option<&'static Path> /* <exe dir>/lector-data */; pub fn is_portable() -> bool; pub fn config_dir() -> PathBuf; pub fn data_dir() -> PathBuf; pub fn settings_file() -> PathBuf; pub fn keymap_file() -> PathBuf; pub fn themes_dir() -> PathBuf; pub fn log_file() -> PathBuf; }
 pub struct SessionStore; // load(root) -> Option<Session>, save(root, &Session) — JSON under data_dir/sessions/<hash>.json
-pub struct RecentProjects; // new(), list() -> Vec<PathBuf> (newest first), most_recent_existing(), record(root) — data_dir/recent.json, max 20
+pub struct RecentProjects; // new(), list() -> Vec<PathBuf> (newest first), most_recent_existing(), record(root), remove(root) — data_dir/recent.json, max 20
 pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is_viewed/set_viewed, persisted JSON
 // Additions (lector-config): `load_settings_for(Option<&Path>)`, `Settings` sub-structs (ThemeSettings, DiffSettings,
 // FileSettings, LspSettings{enabled, servers: BTreeMap<String, ServerOverride{command,args,enabled}>}, GitSettings,
@@ -502,6 +502,7 @@ pub mod project {
     pub fn git_status(&self) -> Arc<GitStatusMap>;       // snapshot
     pub fn refresh_git_status(&self) -> Result<Arc<GitStatusMap>>;
     pub fn index_symbols(&self, cancel: &CancelToken, progress: impl Fn(usize, usize));  // tags for the whole project, budgeted
+    pub fn open_detached(root: &Path, settings: Settings) -> Result<Project>;   // no git discovery, LSP off (no-folder windows)
     pub fn load_document(&self, path: &Path) -> Result<Document>;
     pub fn blame(&self, rel_path: &str) -> Result<Arc<Vec<BlameHunk>>>;   // cached by (path, HEAD, mtime)
     pub fn relative_path(&self, abs: &Path) -> Option<String>;  pub fn absolute_path(&self, rel: &str) -> PathBuf;
@@ -523,6 +524,11 @@ pub mod document {
     pub fn scopes_at_row(&self, row: u32) -> Vec<OutlineItem>;   // sticky scroll + breadcrumbs
     pub fn word_at(&self, offset: usize) -> Option<(Range<usize>, String)>;
     pub fn diff_gutter(&self, project: &Project) -> Vec<GutterMark>;   // vs HEAD; untracked → all Added
+    // v0.3 editing: snapshots of edited text and a cheaper gutter for live edits.
+    pub fn with_text(&self, text: Text, syntax: Option<Syntax>) -> Document;  // same path/language/encoding/line ending/indentation; caches empty
+    pub fn with_path(&self, path: PathBuf, rel: Option<String>, languages: &LanguageRegistry) -> Document;  // "Save As"
+    pub fn gutter_base(&self, project: &Project) -> Option<String>;   // HEAD text ("" untracked), None = no gutter (blocking)
+    pub fn gutter_against(&self, base: &str) -> Vec<GutterMark>;      // diff_gutter = gutter_against(gutter_base)
   }
 }
 pub mod navigation {
@@ -631,6 +637,39 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
 * Session: diff / review / commit tabs save as `TabKind::{Diff{changeset_key, path}, Other{"review:<key>" |
   "vs:<rev>:<path>"}, Commit{oid}}` and are reopened by `init` (the workspace restores its own session before
   extensions register, so `restore_git_tabs` re-reads the session; tabs are deduped by `item_key`).
+* **Staging & committing (v0.2)** — every write is an explicit user action run off the main thread through
+  `staging::{GitOp, run_op}` (Stage / Unstage / StageAll / UnstageAll / Discard paths, Hunk {changeset, change, action,
+  selection}); afterwards `notify_repo_changed` emits `GitStoreEvent::Changed` unconditionally (status can look the
+  same after staging one more hunk) and refreshes HEAD/status, so Changes, History, diff tabs and the branch label
+  reload at once. Failures show git's stderr inline (panel banner / diff banner / commit error box), never only logs.
+  * Changes panel: hover buttons per row (Staged: − Unstage; Unstaged: ↶ Discard…, + Stage; Untracked: 🗑 Delete…,
+    + Stage; Conflicts: ✓ Mark Resolved) replacing the stats while hovered; section headers: Unstage All / Discard
+    All… + Stage All / Delete All Untracked… + Stage All; the same items head each row's context menu. The file list
+    has key context `ChangesPanel` (`space` = `git::Stage` toggles the selected row, `up`/`down`/`enter`; clicking a
+    row opens the preview diff and keeps focus in the list). After an op the selection stays on the file if it is still
+    in its section, else on the row now at the same position (space walks down a section); the list keeps its scroll.
+  * Discards confirm via `confirm::{confirm, discard_spec}` (modal in the workspace's `ModalLayer`; Enter / Escape)
+    unless `git.confirm_discard = false`, naming every file, saying staged changes are kept and that untracked files
+    are deleted from disk.
+  * `commit_composer::CommitComposer` (top of the panel in Working Tree mode; key context `CommitEditor`, so
+    `cmd/ctrl-enter` = `git::Commit`): a `TextArea` in the buffer font with the `git.commit_message_ruler` column and
+    a subject-length counter (amber > 50, red > 72), Amend (`git::ToggleAmend`; loads `last_commit_message`, restores
+    the draft when turned off), Sign off (default `git.commit_sign_off`), "Committing as Name <email>" from
+    `Repo::identity` (missing → inline help with the exact `git config --global user.name/user.email` commands, copy
+    and re-check buttons), Commit button disabled with a tooltip saying why (committing, empty message, nothing staged
+    and not amending, no identity), hook/commit errors in a scrollable monospace box, success toast
+    "Committed abc1234 <summary>", then refresh.
+  * Diff view (`DiffView::changeset()` from the tab's changeset key): `HunkAction::available_for` decides the actions —
+    floating "+ Stage / ↶ Discard" (Unstaged) or "− Unstage" (Staged) toolbars at the right edge above each visible
+    hunk (the hunk at the cursor is outlined; repositioned on scroll), `git::StageHunk` / `UnstageHunk` / `DiscardHunk`
+    on the hunk at the cursor (`s` / `u`), `git::StageSelectedLines` / `UnstageSelectedLines` (rows of the selection in
+    the active column; both sides of changed rows), `git::Stage` / `Unstage` / `DiscardChanges` for the whole file, and
+    a right-click menu (captured before the code view's) with Stage/Unstage/Discard Selected Lines, … Hunk, Copy,
+    Open File. Discarding a hunk confirms. After an op the diff reloads and the cursor moves to the hunk now at the
+    same index (the next one). Index/worktree diffs reload on every `GitStoreEvent`.
+  * Workspace actions (`Workspace::register_action`, so menus and the palette find handlers): `git::{Stage, Unstage,
+    DiscardChanges}` (active file), `StageAll`, `UnstageAll`, `DiscardAll` (confirmed), `Refresh`, `FocusCommitMessage`
+    (shows the Changes panel), `Commit`, `ToggleAmend`. Focused list / editor / diff handlers run first.
 
 ### lector-buffer (v0.3, UI-free editing model; no GPUI, no tokio)
 ```rust
@@ -698,28 +737,143 @@ pub mod save {  // encoding back to bytes for saving
 ```
 `lector-fs` adds `write_atomic(path, bytes) -> io::Result<()>` (temp file in the same dir,
 fsync, rename, keep permissions; symlinks are written through to their target) and
-`FileStamp { len, modified }` + `stamp(path)` for "changed on disk since load" checks.
-`lector-syntax` adds `Syntax::edit_and_reparse(&self, text: &Text, deltas: &[EditDelta-like]) -> Result<Syntax>`
-(tree-sitter incremental parse, < 5 ms for typical edits in a 10k-line file).
+`FileStamp { len: u64, modified: SystemTime }` + `stamp(path) -> io::Result<FileStamp>` for "changed on disk since load" checks.
+`lector-syntax` adds `Syntax::edit_and_reparse<T: TextInput + ?Sized>(&self, text: &T, edits: &[SyntaxEdit]) -> Result<Syntax>`
+where `SyntaxEdit { start_byte, old_end_byte, new_end_byte, start: Point, old_end: Point, new_end: Point }` has the same
+field names as `EditDelta` (tree-sitter incremental parse, < 5 ms for typical edits in a 10k-line file).
 
-### lector-git write API (v0.2; `lector_git::write`, git CLI)
+**Notes (as implemented: lector-buffer, `write_atomic`, `edit_and_reparse`)**
+
+*Deltas.* `Transaction::deltas` of a mutating call are listed **back to front** (descending `start_byte`); `start`/`old_end`
+are coordinates in the text *before* the call, `new_end = start + extent(inserted text)`. Because the part of the text before
+`start` is unchanged when a delta is applied in the listed order, the list is a valid sequential `Tree::edit` /
+`SyntaxEdit` / LSP `contentChanges` sequence (convert `start`/`old_end` to UTF-16 against the pre-edit text). `undo()` returns the
+inverse of the step's deltas (reversed order, `old_end`/`new_end` swapped) and `redo()` the recorded ones; for a step made of several
+calls (typing run, explicit transaction) these are sequential, not descending-by-offset, but still valid in the listed order.
+Selection-only calls change no text and return no deltas. A call that replaces a selection by identical text is still an edit.
+
+*Extra public API* (additive): `Buffer::{newest_selection, selected_text, can_undo, can_redo, undo_depth, set_coalesce_window,
+break_undo_group}`, `Selection::caret`, `Transaction::is_empty`, `LineEnding::as_str`, `Default` for `BufferOptions` /
+`IndentStyle` (`Spaces(4)`) / `SaveOptions`. `Buffer: Send + Sync`, `Clone` shares the rope and copies the history.
+
+*Version and dirty.* `Buffer::version()` is the rope's process-unique content version: it changes on every edit and is the old
+value again after `undo` restores that snapshot, so `is_dirty()` (version != saved version) is clean after undoing to the saved
+state. Selection moves never change it.
+
+*Selections.* Offsets are clipped to grapheme boundaries on every change (`\r\n` is one unit; a caret between `\r` and `\n`
+is impossible). Normalization sorts by range and merges selections that overlap, or touch while at least one is empty; the merged
+selection keeps id/direction/goal of the newest selection if involved, else of the first. `set_selections` reassigns ids that are 0 or
+duplicated and makes the last given selection the newest. `collapse_selections`: several selections -> keep only the newest (as
+is); one non-empty -> collapse to its head.
+
+*History.* Steps keep rope snapshots (before/after) plus selections and deltas: `O(edit + log n)` memory per step, consecutive
+steps share the middle snapshot. Bounds: 10 000 steps and a cost budget of 1 000 000 units (a selection counts 1, a delta 4, i.e.
+roughly the rope chunk it dirtied), whichever hits first drops the oldest steps; a coalesced run stops growing at 20 000 cost units.
+Coalescing (default window 1 s, `set_coalesce_window`, zero disables): consecutive `insert` (single typed text without newline),
+`backspace`, or `delete` of the same kind, adjacent in time and with unchanged carets, join one step. Everything else (newline, paste,
+line ops, any `move_carets`/`set_*`/`select_*` call) breaks the run; typing over a closer (a caret move without an edit) does not.
+`begin_transaction`/`end_transaction` nest; `undo`/`redo` inside a transaction end it. A new edit clears the redo stack.
+
+*Typing.* `insert("\n")` is `newline()`. Auto-close only for a single typed char and `auto_close_brackets`: `([{` close before
+end of text, whitespace or one of `)]};:.,=>`; quotes `"'` and backtick also need a non-word, non-backslash char before them, an even
+number of that quote earlier on the line and a different char before; a closer or quote equal to the next char is typed over; with a
+non-empty selection `([{"'` and backtick surround it and keep the inner selection. `newline` copies the indent up to the caret, adds one
+unit after `{ ( [ :` (last non-blank char before the caret) and expands `{|}`, `(|)`, `[|]` to three lines; it uses the document's
+line ending (the first line break; `\n` if none). `backspace`: pairs `(|)` `"|"` vanish together; in leading whitespace with
+`Spaces(n)` it deletes back to the previous multiple of `n` columns (tabs count `tab_size`); otherwise one grapheme.
+
+*Words* (word motions, `delete_word_*`, double-click, occurrences): UAX #29 segments, with `a.b` / `can't` additionally split at
+punctuation, runs of whitespace merged, runs of punctuation merged. `WordLeft` skips blanks then one word/punctuation run;
+`WordRight` skips blanks then one run; at line edges they move to the neighbouring line. `select_next_occurrence` /
+`select_all_occurrences` only start from a real word (not whitespace/punctuation).
+
+*Lines.* Row groups: a non-empty multi-row selection ending at column 0 does not include that row. `indent` skips empty lines in
+multi-line groups and aligns `Spaces(n)` to the next multiple; `outdent` removes a tab or up to one level of spaces. `toggle_comment`
+with a line token decides over all non-blank rows (commented -> uncomment, else comment at the minimum indent, skipping blank rows);
+without one it wraps/unwraps each selection's non-blank span with the block delimiters. `duplicate_line` copies below and moves the
+selection into the copy; `move_lines` keeps line terminators in place (so the last line without `\n` works) and merges adjacent row
+groups; `delete_line` keeps the caret column and removes the preceding break when deleting the final row.
+
+*Clipboard.* `copy()` with only empty selections returns the carets' lines (one per row, each with a terminator) and remembers the
+string; `paste` of exactly that string inserts above each caret's row (N lines onto N rows are distributed). Other pastes distribute N
+lines (a single trailing newline ignored) onto N carets, else insert the whole text at every caret. Pasted line breaks are converted to
+the document's style when the document has a line break.
+
+*External edits.* `apply_edits`: clip to char boundaries, sort, drop edits overlapping an earlier one, shrink every edit to its
+minimal differing part (common prefix/suffix), drop no-ops; selections map through with inserts at a caret pushing it along.
+`replace_all`: one minimal edit; carets before the change stay, after it shift, inside keep (row, char column).
+
+*Save.* `save::encode`: UTF-16 output carries a BOM; `line_ending: Some(_)` converts `\r\n`/`\n` (a lone `\r` is content);
+`ensure_final_newline` never adds a break to empty text and uses the first line break's style when no `line_ending` is given.
+
+*`write_atomic`.* Temp file `.<name>.lector-<pid>-<n>.tmp` beside the target (file watchers may briefly report it), fsync, rename,
+parent-directory fsync (Unix); the existing file's permissions are copied; a read-only target is refused with `PermissionDenied`;
+symlinks (also dangling ones and chains, up to 40 hops) are resolved so the target is replaced; on Windows the rename is retried on
+`PermissionDenied` (sharing violations). The temp file is removed on any failure.
+
+*`edit_and_reparse`.* Clones the tree, applies each edit with `Tree::edit` in order and re-parses with the old tree; the result has
+fresh outline/injection caches (so injected layers such as Markdown fences are re-parsed). Inverted or otherwise invalid edits fall
+back to a full parse. Measured: single-char edit in an 11k-line Rust file, median ~1 ms, p90 ~2 ms (fresh parse ~32 ms).
+Property tests assert the incremental tree equals a fresh parse (s-expression) for valid programs.
+
+*Performance* (criterion, `cargo bench -p lector-buffer`, bench profile, 2-core shared box, medians): insert one char in a
+100k-line buffer 34 us (46 us when it starts its own undo step), newline 55 us; typing one char with 1000 carets 1.0 ms
+(carets on nearby lines), backspace 1.9 ms, but ~14 ms when the 1000 carets are spread over a 100k-line file (rope splicing is
+`O(carets x log n)` with a large constant; a batch `Rope::splice` in lector-text would fix it); moving 1000 carets 0.8 ms;
+undo+redo with 1000 carets 9 us; `select_all_occurrences` with 10k matches 0.9 ms, `select_next_occurrence` 63 us, typing
+with 10k carets 2.3 ms.
+
+### lector-git write API (v0.2; `lector_git::write`, git CLI) — as implemented
 ```rust
 impl Repo {
-    pub fn stage_paths(&self, paths: &[&str]) -> Result<()>;          // git add -- <paths> (also deletions: add -A -- <paths>)
-    pub fn unstage_paths(&self, paths: &[&str]) -> Result<()>;        // git restore --staged -- <paths> (unborn HEAD: rm --cached)
-    pub fn stage_all(&self) -> Result<()>; pub fn unstage_all(&self) -> Result<()>;
-    pub fn discard_paths(&self, paths: &[&str]) -> Result<()>;        // tracked: restore --worktree; untracked: delete file
-    pub fn apply_patch(&self, patch: &str, target: PatchTarget, reverse: bool) -> Result<()>;
-        // PatchTarget::Index (stage/unstage hunk or lines: git apply --cached [-R] --unidiff-zero? no: proper context)
-        // PatchTarget::Worktree (discard hunk: git apply -R)
-    pub fn commit(&self, opts: &CommitOptions) -> Result<Oid>;        // message via -F -, amend, sign_off, allow_empty=false
-    pub fn last_commit_message(&self) -> Result<Option<String>>;      // for amend
-    pub fn identity(&self) -> Result<Option<(String, String)>>;      // user.name/email, None if missing (UI explains)
+    pub fn stage_paths(&self, paths: &[&str]) -> Result<()>;     // git add -A -- <paths> (modifications, deletions, untracked)
+    pub fn unstage_paths(&self, paths: &[&str]) -> Result<()>;   // git restore --staged -- <paths>; unborn HEAD: rm --cached -r
+                                                                 // --ignore-unmatch. Staged rename: pass old and new path.
+    pub fn stage_all(&self) -> Result<()>;                       // git add -A
+    pub fn unstage_all(&self) -> Result<()>;                     // git reset -q (unborn HEAD: rm --cached -r -- .)
+    pub fn discard_paths(&self, paths: &[&str]) -> Result<()>;   // tracked (git ls-files): restore --worktree (from the index,
+                                                                 // staged changes survive); untracked: git clean -f -d (DELETES;
+                                                                 // never touches tracked or ignored files)
+    pub fn apply_patch(&self, patch: impl AsRef<[u8]>, target: PatchTarget, reverse: bool) -> Result<()>;
+                                                                 // git apply [--cached] [-R] - (patch on stdin; context is checked)
+    pub fn create_commit(&self, opts: &CommitOptions) -> Result<Oid>;   // = the contract's `commit` (that name is taken by the
+                                                                 // reader `commit(oid)`): git commit -q -F - [--amend] [--signoff]
+    pub fn last_commit_message(&self) -> Result<Option<String>>; // gix; None on an unborn branch
+    pub fn identity(&self) -> Result<Option<(String, String)>>;  // git var GIT_AUTHOR_IDENT (config, env, useConfigOnly);
+                                                                 // None = `git commit` would fail with "Author identity unknown"
 }
-pub struct CommitOptions { pub message: String, pub amend: bool, pub sign_off: bool }
-lector_diff / lector_workspace::review: build a valid unified-diff patch for one hunk or a
-line selection of a hunk (git-apply compatible, with correct headers for new/deleted/renamed files).
+pub enum PatchTarget { Index, Worktree }
+pub struct CommitOptions { pub message: String, pub amend: bool, pub sign_off: bool }   // Default
 ```
+Every write runs `git -C <workdir> --literal-pathspecs --no-pager -c core.quotepath=off <args>` (no shell; paths after `--`,
+in chunks of 500; names with `*`, `[`, `:` are literal), `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, the user's config,
+hooks, filters and signing (never `--no-verify`; `apply.whitespace` applies like `git add -p`). Paths that are absolute or
+contain `..` are refused. Failures are `Error::GitCommand { command, status, stderr }` whose `stderr` is git's output
+verbatim (stderr, plus stdout when git reports there — "nothing to commit", hook output), e.g. failing hooks, missing
+identity, `index.lock: File exists`, "patch does not apply". Read paths are unchanged (gix, `GIT_OPTIONAL_LOCKS=0`).
+
+**Patches** (`lector_diff::patch`, generic, no git): `build_patch(&PatchFile { path, mode }, old: Option<&[u8]>,
+new: Option<&[u8]>, &LineSelection { old: Vec<Range<u32>>, new: Vec<Range<u32>> }) -> Option<Vec<u8>>` (+ `build_patch_with(..,
+Algorithm)`) applies the selected changes of `old → new` to `old` with 3 lines of context taken from `old`, `git add -p`
+edit-mode semantics (unselected removed lines become context, unselected added lines are dropped). The diff runs in the
+display row model of `diff_lines` (split on `'\n'`, so hunks and rows are exactly what the view shows); output lines keep
+their bytes (CRLF), `\ No newline at end of file` is emitted where needed (the trailing empty row is the "final newline"
+change), `old == None` writes a new-file patch, `new == None` with everything selected a deleted-file patch, paths with
+`"`, `\` or control characters are C-quoted, binary input (NUL) returns `None`. `LineSelection::{hunk(&Hunk), all(),
+swapped(), is_empty()}`; `CONTEXT_LINES = 3`.
+
+**Partial staging** (`lector_workspace::review`): `HunkAction::{Stage, Unstage, Discard}`,
+`HunkAction::available_for(&Changeset)` (Unstaged → Stage + Discard, Staged → Unstage, others → none),
+`FileDiff::{hunk_selection(ix), hunk_at(old, new)}`, `hunk_patch(repo, &changeset, &change, action, &selection, algorithm)
+-> Result<Option<(Vec<u8>, PatchTarget)>>` and `apply_hunk_action(..) -> Result<bool>` (false = nothing to apply).
+Stage applies `index → worktree` to the index; Unstage builds `index → HEAD` and Discard `worktree → index` with the
+selection swapped and applies them forwards, so context always comes from the content being patched (neighbouring
+unselected changes and staged+unstaged mixes never break it). Working-tree bytes are compared in git's normalized form
+(CRLF → LF when the index has LF), which is what `git apply` reads after its clean filter (autocrlf round-trips).
+Tests: `crates/lector-git/tests/write.rs` (paths, unborn HEAD, literal pathspecs, discard incl. untracked, apply, commit,
+amend, sign-off, hooks, identity, index.lock, renames), `crates/lector-workspace/tests/staging.rs` (hunk stage/unstage/
+discard round trips checked with `git diff --cached`, line selections, file edges, staged+unstaged in one file, missing
+final newline, CRLF, autocrlf, deleted/added files), proptests in `lector_diff::patch`.
 
 ### lector-ui (extension seams)
 ```rust
@@ -746,7 +900,12 @@ pub trait PaneItem { fn title; fn icon; fn path; fn view(&self) -> AnyView; fn f
 // Option<usize> (custom gutter labels, e.g. "12  14" in unified diffs); CodeView::set_gutter_annotations(
 // Option<GutterAnnotations{width_chars, blocks: Vec<GutterAnnotation{rows, text, detail, bar, shaded, muted}>}>)
 // (a left column before the line numbers) + on_gutter_annotation_click(|block_ix, window, cx|);
-// Pane::index_for_key(key, cx); Workspace::{show_toast(msg, cx), set_branch(branch, status_label, cx)}.
+// Pane::index_for_key(key, cx); Workspace::{show_toast(msg, cx), set_branch(branch, status_label, cx), is_sidebar_visible()}.
+// components::text_area::TextArea (v0.2): multi-line input — IME (EntityInputHandler), soft wrap, grows between
+// set_line_limits(min, max) rows then scrolls, mouse/keyboard selection (double/triple click), clipboard, undo/redo
+// (typing coalesced within 1 s), placeholder, set_ruler(Option<col>), set_font_family; text()/set_text/is_empty/
+// selection/focus; emits TextAreaEvent::Changed. Key context "TextArea TextInput": text_input::* bindings apply,
+// text_area::{Newline, MoveUp/Down, SelectUp/Down, PageUp/Down, Word*, DeleteWordLeft, *ToStart/End, Undo, Redo}.
 // Keymap: keymap::bind_keymap(cx, &[KeySpec { keys, action, context }]) (same shape as lector-config).
 ```
 Extension seams for other UI crates (e.g. `lector-ui-git`), all on `views::Workspace`:
@@ -775,6 +934,9 @@ impl Workspace {
 }
 // PaneItem additions: fn file_view(&self) -> Option<Entity<FileView>> (None); fn tab_kind(&self, cx) -> Option<TabKind>
 // (session; default File{path} from path()); fn item_key(&self, cx) -> Option<SharedString> (dedup non-file tabs).
+// v0.3: fn is_dirty(&self, cx) -> bool (tab dot, close prompts); fn is_read_only(&self, cx) -> bool (tab lock).
+// FileView: model() -> Entity<DocumentModel>, document(cx) (settled), live_document(cx), meta(cx), is_dirty(cx),
+// save(window, cx) -> Task<Result<bool>>, save_as, revert; events FileViewEvent::{StateChanged, OutlineChanged, PathChanged}.
 // editor::FileView (a file tab): document(), code_view(), path(), reveal(Reveal{row, cols, center}), reload(), refresh_gutter(),
 // cursor_offset(); events FileViewEvent::{Loaded, CursorMoved}. editor::DocumentSource: CodeSource over a Document
 // (background highlight chunks, gutter vs HEAD, folds, sticky rows from scopes). CodeSource::text_snapshot() -> Option<Text>.
@@ -783,6 +945,35 @@ impl Workspace {
 // Settings: settings::{AppSettings::get(cx) -> Arc<Settings>, apply_settings, bind_effective_keymap, UiFont}.
 // Markdown: markdown::{parse(&str) -> Vec<Block> (blocking, highlights code fences), render_blocks(..)}.
 // lector-ui additions to Actions: workspace::ShowOutline (outline sidebar panel; ToggleOutline is the file-symbol picker).
+```
+Menus, window chrome and the welcome view (v0.2 "ease of access"):
+```rust
+// One menu model, two renderers. `menus::menu_model() -> Vec<MenuSpec{name, entries}>` (File, Edit, Selection, View,
+// Go, Git, Window, Help); entries are MenuEntrySpec::{Action{label, action: "ns::Name"}, Separator,
+// Submenu{label, entries}, RecentProjects}. Actions are named by string, so extension crates' actions can be listed
+// (unregistered names are skipped). macOS: `menus::app_menus(cx)` → cx.set_menus (+ app menu: About, Settings,
+// Services, Quit). Linux/Windows: `views::app_menu::AppMenuBar` in the title bar (Workspace::app_menu()): live key
+// bindings, items disabled unless `window.is_action_available` for the element focused when the menu opened,
+// submenus, arrows/enter/escape/home/end/tab, hover switching, `workspace::ShowAppMenu` (alt-f), "☰" when narrow.
+// Add a command: one `a("Label", "ns::Name")` line in menu_model(); the `every_palette_action_is_in_a_menu` test
+// fails for palette commands in no menu (exceptions: menus::MENU_EXEMPT_ACTIONS, with reasons).
+// Title bar (views/workspace/chrome.rs): logo + menu bar + project/branch, palette trigger, toolbar (sidebar,
+// split, theme, settings gear → app_menu::build_settings_menu), caption buttons (views::window_controls:
+// Linux CSD drawn when Decorations::Client or LECTOR_WINDOW_CONTROLS=1; Windows uses WindowControlArea::{Drag,
+// Min,Max,Close} so the OS handles them, Snap Layouts included; macOS keeps traffic lights). Linux: drag after
+// press+move, double-click toggles maximize, right-click = window menu.
+// No-folder windows: Workspace::new_empty / lector_ui::open_empty_window(cx, size): a placeholder Project
+// (`Project::open_detached` on data_dir/no-folder; no scan, git, LSP, watcher or session). Workspace::has_folder().
+// Workspace::open_folder_in_window(root, file, ..) replaces the window's workspace; open_file_anywhere(path) opens
+// a file in this project or a window at its repo (lector_ui::root_for_file, open_folder_window(cx, root, file)).
+// Welcome: views::welcome::WelcomeView is drawn in the center whenever the window has no tabs (and focused, so
+// key bindings work), and as a tab (`ShowWelcome`, item key "lector:welcome"). Other new panes:
+// views::keybindings::KeybindingsView (`ShowKeybindings`; filter text or recorded keystrokes via
+// cx.intercept_keystrokes), views::about::AboutDialog (modal; version_info(), issue_url()), views::recent
+// (OpenRecent picker; secondary-enter = new window), views::lsp_status (status bar popover).
+// Status bar items are buttons in Workspace::render_status_bar (Button::compact + tooltip + on_click
+// dispatching an action); add one there. Sidebar emits SidebarEvent::RefreshFiles; Sidebar::set_has_folder.
+// Logging (lector binary): stderr + paths::log_file(), rotated to lector.log.old at 4 MiB (`OpenLogFile`).
 ```
 Startup (`lector` binary): settings (`load_settings_for(root)`) and `Project::open` run on a thread while GPUI starts;
 `lector_ui::init(cx, themes, mode, settings)` applies settings/keymap, then `lector_ui_git::init(cx)`, then
@@ -810,7 +1001,71 @@ Notes (as implemented, lector-ui integration):
 * Session: saved 1 s after tab/pane changes and on quit (`SessionStore`); restore re-creates panes along the saved
   axis, files at their scroll rows, sidebar visibility/width/panel. Pane item views and the sidebar render through
   `AnyView::cached` so a scrolling view does not re-render its siblings.
-* Not yet applied from settings: `show_whitespace`, `cursor_blink`, `scroll_beyond_last_line`.
+* Not yet applied from settings: `show_whitespace`, `scroll_beyond_last_line`.
+
+### Editing (v0.3, `lector-ui`)
+
+```
+FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (Entity, wraps lector_buffer::Buffer)
+      │                                                     │ EditBufferEvent::Edited { origin, Arc<Transaction> }
+      └──► DocumentModel (one per open path, shared by all tabs of the file) ◄┘
+             owns: EditBuffer, live Document (= buffer text), settled Document, SourceState, DocumentSource
+```
+* **How a pane item becomes editable.** `CodeView::set_buffer(Some(Entity<EditBuffer>), manage_source, cx)`.
+  With `manage_source = true` the view rebuilds a `RopeSource` itself after each edit (scratch buffers,
+  `CodeView::editable(text, file_name, options, cx)`); otherwise the owner swaps the source (file tabs:
+  `DocumentModel` emits `DocumentEvent::SourceChanged`, the `FileView` calls `CodeView::set_source`).
+  `CodeView::set_read_only` / `editor::ToggleReadOnly` block editing per view (lock in the tab and status bar).
+  Views without a buffer (diff, commit, file @ revision, references, Markdown preview, binary/image/mmap files,
+  lossy or windows-1252 decodes) are read-only. Default: `settings.editor.read_only` (false).
+* **Carets.** `CodeView` keeps its own sorted, merged `Vec<Selection>` (`selections()`, `primary_index()`,
+  `set_selections`, `selection()` = primary/newest) — movement, mouse (click, alt-click adds/removes a caret,
+  shift-click extends, double/triple click word/line, drag) and rendering are multi-caret. Mutating actions
+  call `CodeView::edit(cx, |buffer| -> (R, Transaction))`: the view's carets are pushed into the shared buffer,
+  the op runs, the resulting carets are pulled back (the primary is the buffer's newest selection). Other
+  views of the same buffer map their carets, folds, search matches and soft-wrap counts through the
+  transaction (`code_view::edit::map_pos_through`). Text input goes through GPUI's `EntityInputHandler` on
+  `CodeView` (whole-document UTF-16 offsets via the rope's `OffsetUtf16` dimension): plain typing →
+  `Buffer::insert` on every caret; IME composition → `apply_edits` inside one undo transaction with the marked
+  range underlined. Caret blink follows `settings.cursor_blink` (530 ms).
+* **After each edit** (`DocumentModel`, all non-blocking): new `Document::with_text(rope, None)` + `DocumentSource`
+  synchronously; `SourceState::begin_edit` keeps fresh highlight chunks above the first edited row and turns the
+  rest into a `StaleHighlights` layer (old spans mapped through the edits; rows inside an edit render plain);
+  `Syntax::edit_and_reparse` on the background executor (edits arriving meanwhile are coalesced into the next
+  reparse; full parse on failure), then only the missing chunks are recomputed; outline / folds / breadcrumbs /
+  sticky headers from the *settled* snapshot recomputed 300 ms after typing stops (`FileView::document()` =
+  settled, `FileView::live_document()` = exact text; use the latter for offsets); diff gutter vs a cached HEAD
+  text after 300 ms (marks shift with edits meanwhile); `LspManager::open_document` with the new text after
+  150 ms. Measured on a 10k-line Rust file: `CodeView::edit` ≈ 60 µs, model sync ≈ 50 µs (p95 < 0.3 ms),
+  whole keystroke incl. a window redraw ≈ 2.5 ms p50 / 3.5 ms p95 (soft wrap on or off; wrap counts are
+  re-measured only for edited rows). Traced under `lector_ui::perf` ("code view edit", "document edit sync",
+  "incremental reparse"); `cargo test -p lector-ui typing_latency -- --ignored --nocapture`.
+* **LSP edits** (format, rename, code actions): `DocumentModel::apply_edits(Vec<lector_buffer::TextEdit>, cx)`
+  (offsets into the current text; one undo step; carets of every view mapped). Open models:
+  `editor::document_for_path(path, cx)`, `editor::open_documents(cx)`. Context-menu enablement of Format / Rename /
+  Code Actions: `code_view::LanguageFeatureProvider::set(cx, |path, cx| LanguageFeatures { format, rename, code_actions })`
+  (all disabled by default).
+* **Before-save hooks** (format on save): `editor::register_before_save(cx, |model: &Entity<DocumentModel>, cx| ->
+  Option<Task<anyhow::Result<Vec<TextEdit>>>>)` (also `Workspace::register_before_save`). Hooks run in registration
+  order; their edits apply only if the buffer did not change while the hook ran.
+* **Saving** (`DocumentModel::save(force)` → `SaveOutcome::{Saved, Unchanged, Conflict}`; `FileView::save(window)`
+  prompts on conflicts): hooks → `trim_trailing_whitespace` / `ensure_final_newline` applied *as buffer edits*
+  (buffer == disk afterwards) → `lector_buffer::save::encode` with the file's encoding (UTF-8, UTF-8 BOM — sniffed at
+  load —, UTF-16 LE/BE) and line ending (`Lf`/`CrLf` normalized, `Mixed` kept) → stamp check (`lector_fs::stamp`
+  taken *before* loading) → `lector_fs::write_atomic` off the main thread → new stamp, `mark_saved` (only if the
+  buffer did not change meanwhile). `editor::Save`, `SaveAs` (`cx.prompt_for_new_path`; the tab follows the new
+  path), `workspace::SaveAll`, `RevertFile` (confirm when dirty). Auto-save: `after_delay` (model timer, skipped
+  while a disk conflict is pending), `on_focus_change` (window deactivation, switching tabs).
+* **Dirty state**: tab dot instead of × (× on hover), edited preview tabs are pinned, `● ` window-title prefix,
+  status bar "Modified" + lock. Closing tabs / Close Others / Close All / the window / `workspace::Quit` prompts
+  Save (All) / Don't Save / Cancel when the last tab of a dirty document would close (`Pane::close*`,
+  `Workspace::confirm_close`, `views::workspace::quit_with_prompts`). Panes count tabs per document
+  (`DocumentModel::view_count`); when the last tab closes the model leaves the registry, so reopening reloads from
+  disk. No hot exit in 0.3.
+* **External changes** (`FileView::reload` from the watcher → `DocumentModel::file_changed_on_disk`): same stamp →
+  ignored (our own save); clean buffer → `Buffer::replace_all` (carets kept) adopting the freshly parsed disk
+  snapshot; dirty → `DiskConflict` banner: Reload (discard mine) / Keep Mine (next save overwrites) / Compare
+  (`editor::compare::CompareItem`, unified disk ↔ buffer diff from `lector_diff` rows).
 
 ## Threading model (UI)
 
@@ -850,13 +1105,20 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
 * `picker::` Confirm, Cancel, SelectNext, SelectPrev
 * lector-ui-git additions: `diff::` CompareWith (file vs a picked ref), ReviewWorkingTree, ReviewBranch
   (current branch vs its default base).
+* v0.2 ease of access (`workspace::`): OpenFile, OpenRecent, NewWindow, CloseFolder (window returns to the
+  welcome state), CloseAllTabs, ShowWelcome, ShowKeybindings, OpenLogFile, OpenDocumentation, ReportIssue,
+  Minimize, ToggleMaximize, ToggleFullScreen, ShowAppMenu (Linux/Windows menu bar), SaveAll (v0.3).
 * lector-ui additions (UI plumbing, also bindable): `workspace::` CloseOtherTabs, CloseTabsToRight,
   ToggleColorblindDiff, About; `editor::` MoveToLineStart, MoveToLineEnd, MoveWordLeft, MoveWordRight,
   SelectToLineStart, SelectToLineEnd, SelectWordLeft, SelectWordRight, SelectPageUp, SelectPageDown,
   SelectToTop, SelectToBottom, ClearSelection; `workspace::ShowOutline`; `tree::` ExpandSelected, CollapseSelected;
   `text_input::` Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste,
   Cut, Copy, ShowCharacterPalette. Key contexts: `Workspace`, `CodeView`, `DiffView`, `Picker`,
-  `TextInput`, `ContextMenu`, `TreeView`.
+  `TextInput`, `ContextMenu`, `TreeView`, `TextArea` (+ `TextInput`), `ChangesPanel` (file list),
+  `CommitEditor` (commit composer), `ConfirmDialog`.
+* v0.2 `text_area::` Newline, MoveUp, MoveDown, SelectUp, SelectDown, MoveToStart, MoveToEnd, SelectToStart,
+  SelectToEnd, SelectToLineStart, SelectToLineEnd, WordLeft, WordRight, SelectWordLeft, SelectWordRight,
+  DeleteWordLeft, Undo, Redo, PageUp, PageDown (bound in `TextArea`: enter, arrows, cmd-z / cmd-shift-z, ...).
 
 Default keys (macOS uses `cmd`, Linux/Windows use `ctrl` in its place):
 file finder `cmd-p`, command palette `cmd-shift-p`, project symbols `cmd-t`, outline

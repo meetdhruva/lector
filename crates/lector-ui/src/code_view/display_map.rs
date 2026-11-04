@@ -242,6 +242,20 @@ impl DisplayMap {
         self.wrap = Some(WrapIndex { cols, extra_before });
     }
 
+    /// Enables soft wrap at `cols` columns from precomputed per-row counts:
+    /// `extra_rows(row)` = wrap segments of `row` minus one.
+    pub fn set_wrap_counts(&mut self, cols: usize, extra_rows: impl Fn(u32) -> u32) {
+        let visible = self.visible_count();
+        let mut extra_before = Vec::with_capacity(visible as usize + 1);
+        let mut acc = 0u32;
+        for v in 0..visible {
+            extra_before.push(acc);
+            acc += extra_rows(self.visible_to_row(v));
+        }
+        extra_before.push(acc);
+        self.wrap = Some(WrapIndex { cols, extra_before });
+    }
+
     /// Wrap width in columns, if wrapping.
     pub fn wrap_cols(&self) -> Option<usize> {
         self.wrap.as_ref().map(|w| w.cols)

@@ -29,6 +29,8 @@ pub mod theme;
 pub mod views;
 
 #[cfg(test)]
+mod editing_tests;
+#[cfg(test)]
 mod tests;
 
 pub use theme::{ActiveTheme, ColorExt, ThemeMode, ThemeState};
@@ -36,8 +38,8 @@ pub use theme::{ActiveTheme, ColorExt, ThemeMode, ThemeState};
 use std::path::PathBuf;
 
 use gpui::{
-    point, px, size, App, AppContext, Bounds, Focusable, TitlebarOptions, WindowBounds,
-    WindowDecorations, WindowOptions,
+    point, px, size, App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowOptions,
 };
 
 /// Initializes fonts, theme, settings (`lector-config`), app-level action
@@ -58,11 +60,87 @@ pub fn init(
     cx.set_global(code_view::EditorSettings::default());
     settings::apply_settings(cx, settings.0, settings.1);
     settings::bind_effective_keymap(cx);
-    cx.on_action(|_: &actions::workspace::Quit, cx| cx.quit());
-    cx.on_action(|_: &actions::workspace::About, _| {
-        tracing::info!("Lector {}", env!("CARGO_PKG_VERSION"));
+    cx.on_action(|_: &actions::workspace::Quit, cx| views::workspace::quit_with_prompts(cx));
+    cx.on_action(|_: &actions::workspace::NewWindow, cx| {
+        if let Err(err) = open_empty_window(cx, None) {
+            tracing::error!("cannot open a window: {err:#}");
+        }
     });
-    cx.set_menus(menus::app_menus());
+    // macOS draws these natively; Linux and Windows draw the same model in
+    // the title bar (`views::app_menu`).
+    if cfg!(target_os = "macos") {
+        let menus = menus::app_menus(cx);
+        cx.set_menus(menus);
+    }
+}
+
+/// The project root for a file: the nearest ancestor with `.git`, else its folder.
+pub fn root_for_file(file: &std::path::Path) -> PathBuf {
+    let parent = file
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut dir = Some(parent.as_path());
+    while let Some(d) = dir {
+        if d.join(".git").exists() {
+            return d.to_path_buf();
+        }
+        dir = d.parent();
+    }
+    parent
+}
+
+/// Opens a new window on `root` (recording it as a recent project),
+/// optionally opening `file`.
+pub fn open_folder_window(
+    cx: &mut App,
+    root: PathBuf,
+    file: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    if let Err(err) = lector_config::RecentProjects::new().record(&root) {
+        tracing::warn!("cannot record recent project: {err}");
+    }
+    open_workspace_window(
+        cx,
+        OpenRequest {
+            root,
+            file: file.map(|f| (f, None, None)),
+            ..Default::default()
+        },
+    )
+}
+
+fn window_options(cx: &App, fixed_size: Option<(f32, f32)>) -> WindowOptions {
+    let bounds = match fixed_size {
+        Some((w, h)) => Bounds::new(point(px(0.), px(0.)), size(px(w), px(h))),
+        None => Bounds::centered(None, size(px(1440.), px(900.)), cx),
+    };
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Lector".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(12.), px(12.))),
+        }),
+        window_min_size: Some(size(px(640.), px(400.))),
+        window_decorations: Some(WindowDecorations::Client),
+        app_id: Some("io.github.meetdhruva.Lector".into()),
+        ..Default::default()
+    }
+}
+
+/// Opens a window with no folder: the welcome view, menus and palette.
+/// `fixed_size` pins the bounds (headless screenshots).
+pub fn open_empty_window(cx: &mut App, fixed_size: Option<(f32, f32)>) -> anyhow::Result<()> {
+    let project = views::workspace::no_folder_project(cx)?;
+    let options = window_options(cx, fixed_size);
+    cx.open_window(options, move |window, cx| {
+        let workspace = cx.new(|cx| views::Workspace::new_empty_with(project, window, cx));
+        workspace.update(cx, |ws, cx| ws.focus_welcome_if_empty(window, cx));
+        cx.new(|_| views::WorkspaceRoot { workspace })
+    })?;
+    cx.activate(true);
+    Ok(())
 }
 
 /// What to open in a new window.
@@ -88,22 +166,7 @@ pub fn open_workspace_window(cx: &mut App, request: OpenRequest) -> anyhow::Resu
             settings::AppSettings::get(cx).as_ref().clone(),
         )?,
     };
-    let bounds = match request.fixed_size {
-        Some((w, h)) => Bounds::new(point(px(0.), px(0.)), size(px(w), px(h))),
-        None => Bounds::centered(None, size(px(1440.), px(900.)), cx),
-    };
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some("Lector".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(12.), px(12.))),
-        }),
-        window_min_size: Some(size(px(640.), px(400.))),
-        window_decorations: Some(WindowDecorations::Client),
-        app_id: Some("io.github.meetdhruva.Lector".into()),
-        ..Default::default()
-    };
+    let options = window_options(cx, request.fixed_size);
     cx.open_window(options, move |window, cx| {
         let workspace = cx.new(|cx| views::Workspace::new(project, window, cx));
         let restored = workspace.update(cx, |ws, cx| ws.restore_session(window, cx));
@@ -112,13 +175,9 @@ pub fn open_workspace_window(cx: &mut App, request: OpenRequest) -> anyhow::Resu
                 ws.open_path_at(file, line, col, window, cx);
             });
         } else if !restored {
-            let focus = workspace
-                .read(cx)
-                .sidebar()
-                .read(cx)
-                .file_tree()
-                .focus_handle(cx);
-            window.focus(&focus);
+            // Nothing restored: the welcome view fills the center; focus it so
+            // key bindings work right away.
+            workspace.update(cx, |ws, cx| ws.focus_welcome_if_empty(window, cx));
         }
         cx.new(|_| views::WorkspaceRoot { workspace })
     })?;

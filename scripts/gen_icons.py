@@ -95,12 +95,18 @@ def main() -> None:
     shutil.copy(os.path.join(MATERIAL, "LICENSE"), os.path.join(material_dir, "LICENSE"))
 
     lucide_dir = os.path.join(CRATE, "assets", "lucide")
-    shutil.rmtree(lucide_dir, ignore_errors=True)
-    os.makedirs(lucide_dir)
+    # Lector's own icons (`lector-*.svg`, e.g. window caption glyphs) live next to
+    # the Lucide ones and are kept; everything else is regenerated.
+    os.makedirs(lucide_dir, exist_ok=True)
+    for entry in os.listdir(lucide_dir):
+        if not entry.startswith("lector-"):
+            os.remove(os.path.join(lucide_dir, entry))
     with open(os.path.join(CRATE, "src", "ui.rs"), encoding="utf-8") as f:
         ui_src = f.read()
     lucide_names = re.findall(r'=>\s*"([a-z0-9-]+)",', ui_src)
     for name in lucide_names:
+        if name.startswith("lector-"):
+            continue
         copy_minified(
             os.path.join(LUCIDE, "icons", name + ".svg"),
             os.path.join(lucide_dir, name + ".svg"),

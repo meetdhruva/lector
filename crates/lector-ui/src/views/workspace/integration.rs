@@ -196,6 +196,14 @@ impl Workspace {
                 }
             },
         ));
+        if !self.has_folder {
+            // No folder: nothing to scan, index or watch (the placeholder root
+            // is empty); only Lector's own config dir is watched.
+            if lector_config::paths::config_dir().is_dir() {
+                self.start_config_watcher_only(cx);
+            }
+            return;
+        }
         self.rescan_files(true, cx);
         self.refresh_git_status(cx);
         self.start_watchers(cx);
@@ -207,7 +215,7 @@ impl Workspace {
         .detach();
     }
 
-    fn rescan_files(&mut self, index_symbols: bool, cx: &mut gpui::Context<Self>) {
+    pub(super) fn rescan_files(&mut self, index_symbols: bool, cx: &mut gpui::Context<Self>) {
         let project = self.project.clone();
         self.integ.rescan_task = Some(cx.spawn(async move |this, cx| {
             let (files, index) = cx
@@ -441,7 +449,7 @@ impl Workspace {
         let active = self.active_file_view(cx);
         let language = active
             .as_ref()
-            .and_then(|v| v.read(cx).document().and_then(|d| d.language().cloned()));
+            .and_then(|v| v.read(cx).document(cx).and_then(|d| d.language().cloned()));
         let relevant: Vec<_> = match &language {
             Some(lang) => {
                 let servers: Vec<String> = lector_lsp::builtin_servers()
@@ -566,6 +574,35 @@ impl Workspace {
                         this.schedule_nav_record(cx);
                     }
                 }
+                FileViewEvent::OutlineChanged => {
+                    if active {
+                        let v = view.clone();
+                        this.integ
+                            .outline_panel
+                            .update(cx, |p, cx| p.set_file_view(Some(v), cx));
+                    }
+                }
+                FileViewEvent::StateChanged | FileViewEvent::PathChanged => {
+                    // Tabs show the dirty dot / lock: repaint the panes. An
+                    // edited preview tab becomes permanent (never replaced).
+                    let dirty = view.read(cx).is_dirty(cx);
+                    let path = view.read(cx).path().to_path_buf();
+                    for pane in this.center.panes() {
+                        pane.update(cx, |p, cx| {
+                            if dirty {
+                                if let Some(ix) = p.index_for_path(&path, cx) {
+                                    if p.is_preview(ix) {
+                                        p.pin(ix, cx);
+                                    }
+                                }
+                            }
+                            cx.notify()
+                        });
+                    }
+                    if *event == FileViewEvent::PathChanged {
+                        this.schedule_session_save(cx);
+                    }
+                }
             }
             cx.notify();
         });
@@ -579,7 +616,7 @@ impl Workspace {
         let Some(lsp) = self.project.lsp().cloned() else {
             return;
         };
-        let Some(doc) = view.read(cx).document().cloned() else {
+        let Some(doc) = view.read(cx).live_document(cx).cloned() else {
             return;
         };
         let (Some(lang), Some(text)) = (doc.language().cloned(), doc.text().cloned()) else {
@@ -598,6 +635,12 @@ impl Workspace {
         let view = self.active_file_view(cx);
         let path = view.as_ref().map(|v| v.read(cx).path().to_path_buf());
         if path != self.integ.last_active {
+            let previous = self.integ.last_active.as_ref().and_then(|prev| {
+                self.all_file_views(cx)
+                    .into_iter()
+                    .find(|v| v.read(cx).path() == prev.as_path())
+            });
+            self.active_file_changed(previous, cx);
             if let Some(p) = &path {
                 self.integ.recent.retain(|r| r != p);
                 self.integ.recent.insert(0, p.clone());
@@ -772,7 +815,7 @@ impl Workspace {
             return;
         };
         let v = view.read(cx);
-        let Some(doc) = v.document().cloned() else {
+        let Some(doc) = v.document(cx).cloned() else {
             return;
         };
         let Some(text) = doc.text() else { return };
@@ -878,7 +921,7 @@ impl Workspace {
     fn active_doc_offset(&self, cx: &App) -> Option<(lector_workspace::Document, usize)> {
         let view = self.active_file_view(cx)?;
         let v = view.read(cx);
-        let doc = v.document()?.clone();
+        let doc = v.live_document(cx)?.clone();
         let offset = v.cursor_offset(cx)?;
         Some((doc, offset))
     }
@@ -1038,7 +1081,7 @@ impl Workspace {
         let (path, is_md) = {
             let v = view.read(cx);
             let is_md = v
-                .document()
+                .document(cx)
                 .and_then(|d| d.language())
                 .is_some_and(|l| l.name == "Markdown")
                 || v.path().extension().is_some_and(|e| {
@@ -1230,7 +1273,7 @@ impl Workspace {
         self.open_path_with(path, false, None, true, window, cx);
     }
 
-    fn start_config_watcher_only(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(super) fn start_config_watcher_only(&mut self, cx: &mut gpui::Context<Self>) {
         let config_dir = lector_config::paths::config_dir();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<lector_fs::WatchEvent>();
         match lector_fs::watch(&config_dir, Duration::from_millis(200), move |ev| {
@@ -1392,7 +1435,7 @@ impl Workspace {
     }
 
     pub(crate) fn save_session_now(&mut self, cx: &mut gpui::Context<Self>) {
-        if !self.integ.session_ready || !AppSettings::get(cx).session.restore {
+        if !self.has_folder || !self.integ.session_ready || !AppSettings::get(cx).session.restore {
             return;
         }
         let session = self.session(cx);
@@ -1405,7 +1448,7 @@ impl Workspace {
     /// Restores tabs, splits and sidebar state from the last session.
     /// Returns whether anything was restored.
     pub fn restore_session(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> bool {
-        let restore = AppSettings::get(cx).session.restore;
+        let restore = AppSettings::get(cx).session.restore && self.has_folder;
         let session = if restore {
             SessionStore::new().load(self.project.root())
         } else {

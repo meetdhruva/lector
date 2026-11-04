@@ -35,6 +35,7 @@ pub struct Button {
     selected: bool,
     disabled: bool,
     compact: bool,
+    full_width: bool,
     color: Option<Hsla>,
     on_click: Option<ClickHandler>,
     tooltip: Option<TooltipBuilder>,
@@ -51,10 +52,17 @@ impl Button {
             selected: false,
             disabled: false,
             compact: false,
+            full_width: false,
             color: None,
             on_click: None,
             tooltip: None,
         }
+    }
+
+    /// Stretches to the parent's width, content centered.
+    pub fn full_width(mut self) -> Self {
+        self.full_width = true;
+        self
     }
 
     /// Leading icon.
@@ -139,6 +147,7 @@ impl RenderOnce for Button {
             .rounded(metrics::RADIUS)
             .text_size(text)
             .text_color(fg)
+            .when(self.full_width, |el| el.w_full().justify_center())
             .when_some(bg, |el, bg| el.bg(bg))
             .when_some(border, |el, b| el.border_1().border_color(b))
             .when(self.selected, |el| el.bg(active))

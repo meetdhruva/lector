@@ -26,6 +26,7 @@ lector-text.workspace = true
 lector-git.workspace = true
 lector-diff.workspace = true
 lector-lsp.workspace = true
+lector-buffer.workspace = true
 parking_lot.workspace = true
 futures = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
