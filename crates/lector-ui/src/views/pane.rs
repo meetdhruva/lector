@@ -67,6 +67,10 @@ pub trait PaneItem: 'static {
     fn is_read_only(&self, _cx: &App) -> bool {
         false
     }
+    /// The file behind the item was deleted on disk (struck-through title).
+    fn is_deleted(&self, _cx: &App) -> bool {
+        false
+    }
 }
 
 /// A file opened in a [`CodeView`].
@@ -285,6 +289,20 @@ impl Pane {
         );
         self.active = ix;
         self.tab_scroll.scroll_to_item(ix);
+        cx.notify();
+    }
+
+    /// Adds an item after the last tab without activating or focusing it
+    /// (files opened in the background by multi-file LSP edits).
+    pub fn add_item_inactive(&mut self, item: Box<dyn PaneItem>, cx: &mut Context<Self>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        item_opened(item.as_ref(), cx);
+        self.entries.push(PaneEntry {
+            id,
+            item,
+            preview: false,
+        });
         cx.notify();
     }
 
@@ -581,6 +599,7 @@ impl Render for Pane {
                     .icon(icon)
                     .dirty(entry.item.is_dirty(cx))
                     .read_only(entry.item.is_read_only(cx))
+                    .deleted(entry.item.is_deleted(cx))
                     .active(ix == self.active)
                     .focused_pane(self.is_active_pane)
                     .preview(entry.preview)

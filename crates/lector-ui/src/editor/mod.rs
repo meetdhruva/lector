@@ -84,6 +84,11 @@ pub enum FileViewEvent {
     OutlineChanged,
     /// The file was saved under another path.
     PathChanged,
+    /// The "file deleted on disk" banner asked to close this tab.
+    CloseRequested,
+    /// Save As replaces the file at this path: the tabs of other views
+    /// showing it must close first.
+    CloseTabsOf(PathBuf),
 }
 
 struct HoverPopover {
@@ -583,17 +588,59 @@ impl FileView {
         let name = self.file_name();
         let receiver = cx.prompt_for_new_path(&dir, Some(&name));
         let model = self.model.clone();
-        self.save_task = Some(cx.spawn_in(window, async move |_, cx| {
+        self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(path))) = receiver.await else {
                 return;
             };
-            if let Some(other) = cx
+            // The target is open in another tab: replace it only after asking,
+            // and never while that tab has unsaved changes.
+            let other = cx
                 .update(|_, cx| document_for_path(&path, cx))
                 .ok()
                 .flatten()
-            {
-                if other != model {
-                    tracing::warn!("{} is open in another tab", path.display());
+                .filter(|other| *other != model);
+            if let Some(other) = other {
+                let Ok(dirty) = cx.update(|_, cx| other.read(cx).is_dirty(cx)) else {
+                    return;
+                };
+                let target = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if dirty {
+                    let Ok(answer) = cx.update(|window, cx| {
+                        window.prompt(
+                            PromptLevel::Warning,
+                            &format!("“{target}” has unsaved changes in another tab."),
+                            Some("Save or close that tab first, then use Save As again."),
+                            &["OK"],
+                            cx,
+                        )
+                    }) else {
+                        return;
+                    };
+                    let _ = answer.await;
+                    return;
+                }
+                let Ok(answer) = cx.update(|window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &format!("“{target}” is already open. Replace it?"),
+                        Some("The tab showing it closes and the file is overwritten."),
+                        &["Replace", "Cancel"],
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                if answer.await != Ok(0) {
+                    return;
+                }
+                let closed = this.update(cx, |_, cx| {
+                    cx.emit(FileViewEvent::CloseTabsOf(path.clone()))
+                });
+                if closed.is_err() {
+                    return;
                 }
             }
             let Ok(task) = model.update(cx, |m, cx| m.save_as(path, cx)) else {
@@ -679,8 +726,12 @@ impl FileView {
             target.pos.row,
             target.pos.col as u32,
         ));
-        let Some((word, _)) = doc.word_at(offset) else {
-            return;
+        // LSP diagnostics at the pointer are shown above the hover docs.
+        let diagnostics = crate::lsp::diagnostics::hover_markdown(&self.path, offset, cx);
+        let word = match doc.word_at(offset) {
+            Some((word, _)) => word,
+            None if diagnostics.is_some() => offset..offset + 1,
+            None => return,
         };
         if self.hover.as_ref().is_some_and(|h| h.word == word) {
             return;
@@ -698,12 +749,16 @@ impl FileView {
                 .spawn(async move {
                     let md = lector_workspace::symbols::hover(&project, &doc, offset)
                         .ok()
-                        .flatten()?;
-                    let md = md.trim();
-                    if md.is_empty() {
-                        return None;
-                    }
-                    Some(Arc::new(markdown::parse(md)))
+                        .flatten()
+                        .map(|md| md.trim().to_string())
+                        .filter(|md| !md.is_empty());
+                    let md = match (diagnostics, md) {
+                        (Some(d), Some(md)) => format!("{d}\n\n---\n\n{md}"),
+                        (Some(d), None) => d,
+                        (None, Some(md)) => md,
+                        (None, None) => return None,
+                    };
+                    Some(Arc::new(markdown::parse(&md)))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -815,6 +870,82 @@ impl FileView {
     }
 
     // Rendering.
+
+    /// Whether the "deleted on disk" banner is up: unsaved changes of a file
+    /// that is gone (a clean tab of a deleted file only gets a struck-through
+    /// title).
+    pub fn shows_deleted_banner(&self, cx: &App) -> bool {
+        let model = self.model.read(cx);
+        model.is_deleted() && model.is_dirty(cx) && model.conflict().is_none()
+    }
+
+    /// The banner of a dirty buffer whose file was deleted on disk: Save
+    /// writes it again, Close closes the tab (asking about the changes).
+    fn render_deleted_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.shows_deleted_banner(cx) {
+            return None;
+        }
+        let ui = cx.theme().ui.clone();
+        let warn = cx.theme().git.modified.hsla();
+        let weak = cx.entity().downgrade();
+        Some(
+            h_flex()
+                .id("file-deleted-banner")
+                .h(px(32.))
+                .flex_none()
+                .px(px(12.))
+                .gap(px(8.))
+                .bg(warn.opacity(0.12))
+                .border_b_1()
+                .border_color(warn.opacity(0.45))
+                .text_size(metrics::TEXT_SM)
+                .text_color(ui.text.hsla())
+                .child(
+                    Icon::new(IconName::AlertTriangle)
+                        .size(IconSize::Small)
+                        .color(warn),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child("This file was deleted on disk."),
+                )
+                .child(
+                    Button::new("deleted-save", "Save")
+                        .compact()
+                        .style(ButtonStyle::Accent)
+                        .on_click({
+                            let weak = weak.clone();
+                            move |_, window, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    let task = this.save(window, cx);
+                                    this.save_task = Some(cx.spawn(async move |_, _| {
+                                        if let Err(err) = task.await {
+                                            tracing::warn!("save failed: {err:#}");
+                                        }
+                                    }));
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("deleted-close", "Close")
+                        .compact()
+                        .style(ButtonStyle::Outlined)
+                        .on_click({
+                            let weak = weak.clone();
+                            move |_, _, cx| {
+                                let _ =
+                                    weak.update(cx, |_, cx| cx.emit(FileViewEvent::CloseRequested));
+                            }
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
 
     fn render_conflict_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.model.read(cx).conflict()?;
@@ -1287,7 +1418,9 @@ impl Render for FileView {
             .into_any_element(),
         };
         let show_crumbs = self.is_text.get() && self.setup_done;
-        let conflict_banner = self.render_conflict_banner(cx);
+        let conflict_banner = self
+            .render_conflict_banner(cx)
+            .or_else(|| self.render_deleted_banner(cx));
         let weak = cx.entity().downgrade();
         v_flex()
             .size_full()
@@ -1414,6 +1547,10 @@ impl PaneItem for FileItem {
 
     fn is_dirty(&self, cx: &App) -> bool {
         self.view.read(cx).is_dirty(cx)
+    }
+
+    fn is_deleted(&self, cx: &App) -> bool {
+        self.view.read(cx).model().read(cx).is_deleted()
     }
 
     fn is_read_only(&self, cx: &App) -> bool {

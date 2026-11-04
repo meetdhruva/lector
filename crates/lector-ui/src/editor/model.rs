@@ -170,6 +170,8 @@ pub struct DocumentModel {
     stamp: Option<FileStamp>,
     encoding: Encoding,
     conflict: Option<DiskConflict>,
+    /// The file is gone from disk (deleted or moved away) while the tab is open.
+    deleted: bool,
     was_dirty: bool,
     save_count: u64,
     views: usize,
@@ -263,6 +265,13 @@ pub fn buffer_options(doc: &Document, cx: &App) -> BufferOptions {
         indent,
         auto_indent: settings.editor.auto_indent,
         auto_close_brackets: settings.editor.auto_close_brackets,
+        // `:` opens a block only in indentation-structured languages.
+        indent_after_colon: doc.language().is_some_and(|l| {
+            matches!(
+                l.lsp_id.as_str(),
+                "python" | "yaml" | "nim" | "coffeescript" | "starlark"
+            )
+        }),
         comment,
     }
 }
@@ -336,6 +345,7 @@ impl DocumentModel {
             stamp: None,
             encoding: Encoding::Utf8,
             conflict: None,
+            deleted: false,
             was_dirty: false,
             save_count: 0,
             views: 0,
@@ -406,6 +416,12 @@ impl DocumentModel {
     /// A pending "changed on disk" conflict.
     pub fn conflict(&self) -> Option<&DiskConflict> {
         self.conflict.as_ref()
+    }
+
+    /// Whether the file was deleted (or moved away) on disk while this
+    /// document is open. Saving writes it again.
+    pub fn is_deleted(&self) -> bool {
+        self.deleted
     }
 
     /// The encoding used when saving.
@@ -818,7 +834,11 @@ impl DocumentModel {
                 cx.background_executor().timer(delay).await;
             }
             cx.background_executor()
-                .spawn(async move { lsp.open_document(&path, &lang.name, &text.to_string()) })
+                .spawn(async move {
+                    // Tagged with the text version: diagnostics map back to it.
+                    let tag = text.version();
+                    lsp.open_document_tagged(&path, &lang.name, &text.to_string(), tag)
+                })
                 .await;
         }));
     }
@@ -980,8 +1000,9 @@ impl DocumentModel {
                 let bytes = lector_buffer::save::encode(b.text(), &opts);
                 (bytes, b.version(), this.stamp, path.clone())
             })?;
-            let dirty = this.update(cx, |this, cx| this.is_dirty(cx))?;
-            if same_path && !dirty && !force && expected.is_some() {
+            let (dirty, deleted) = this.update(cx, |this, cx| (this.is_dirty(cx), this.deleted))?;
+            // A clean buffer of a deleted file is still written: Save recreates it.
+            if same_path && !dirty && !force && !deleted && expected.is_some() {
                 return Ok(SaveOutcome::Unchanged);
             }
             // 3. Conflict check + atomic write, off the main thread.
@@ -1006,6 +1027,7 @@ impl DocumentModel {
             this.update(cx, |this, cx| {
                 this.stamp = new_stamp;
                 this.conflict = None;
+                this.deleted = false;
                 this.save_count += 1;
                 buffer.update(cx, |b, _| {
                     if b.buffer().version() == version {
@@ -1093,6 +1115,12 @@ impl DocumentModel {
     }
 
     fn reload_from_disk(&mut self, discard: bool, cx: &mut Context<Self>) {
+        /// What the background check found on disk.
+        enum OnDisk {
+            Unchanged,
+            Gone,
+            Loaded(Loaded),
+        }
         let project = self.project.clone();
         let path = self.path.clone();
         let known = self.stamp;
@@ -1101,21 +1129,22 @@ impl DocumentModel {
             let loaded = cx
                 .background_executor()
                 .spawn(async move {
-                    if !discard {
-                        if let (Some(known), Ok(now)) = (known, lector_fs::stamp(&path)) {
-                            if now == known {
-                                return Ok(None);
-                            }
-                        }
+                    match lector_fs::stamp(&path) {
+                        Ok(now) if !discard && known == Some(now) => Ok(OnDisk::Unchanged),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(OnDisk::Gone),
+                        _ => load_blocking(&project, &path, top).map(OnDisk::Loaded),
                     }
-                    load_blocking(&project, &path, top).map(Some)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 match loaded {
-                    Ok(Some(loaded)) => this.apply_disk_version(loaded, discard, cx),
-                    Ok(None) => {}
+                    Ok(OnDisk::Gone) => this.set_deleted(true, cx),
+                    Ok(OnDisk::Unchanged) => this.set_deleted(false, cx),
+                    Ok(OnDisk::Loaded(loaded)) => {
+                        this.set_deleted(false, cx);
+                        this.apply_disk_version(loaded, discard, cx);
+                    }
                     Err(err) => tracing::debug!("reload {}: {err:#}", this.path.display()),
                 }
                 if std::mem::take(&mut this.reload_pending) {
@@ -1123,6 +1152,15 @@ impl DocumentModel {
                 }
             });
         }));
+    }
+
+    /// Records that the file vanished from disk (or came back).
+    fn set_deleted(&mut self, deleted: bool, cx: &mut Context<Self>) {
+        if self.deleted != deleted {
+            self.deleted = deleted;
+            cx.emit(DocumentEvent::ConflictChanged);
+            cx.notify();
+        }
     }
 
     fn apply_disk_version(&mut self, loaded: Loaded, discard: bool, cx: &mut Context<Self>) {

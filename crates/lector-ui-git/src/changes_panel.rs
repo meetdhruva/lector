@@ -28,6 +28,7 @@ use lector_workspace::review::{self, ChangesetView, ReviewFile};
 use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};
 use crate::diff_view::{open_diff, settings_diff_options, DiffTarget, ViewedTarget};
+use crate::operation_banner::OperationBanner;
 use crate::ref_picker::{pick_ref, ref_choices};
 use crate::staging::{run_op, unstage_paths_for, GitOp};
 use crate::store::{GitStore, GitStoreEvent};
@@ -111,6 +112,7 @@ pub struct ChangesPanel {
     /// Visual row to select after the next reload if the selected file moved away.
     pending_select: Option<usize>,
     composer: Entity<CommitComposer>,
+    banner: Entity<OperationBanner>,
     menu: ContextMenuState,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -143,6 +145,10 @@ impl ChangesPanel {
                 cx.notify();
             }),
         );
+        let banner = {
+            let (store, composer) = (store.clone(), composer.clone());
+            cx.new(|cx| OperationBanner::new(store, composer, cx))
+        };
         let mut panel = ChangesPanel {
             store,
             mode: ChangesMode::WorkingTree,
@@ -158,6 +164,7 @@ impl ChangesPanel {
             op_task: None,
             pending_select: None,
             composer,
+            banner,
             menu: ContextMenuState::default(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subs,
@@ -324,6 +331,11 @@ impl ChangesPanel {
             .and_then(|c| c.sections.iter().find(|(s, _)| *s == section))
             .map(|(_, v)| v.files.iter().collect())
             .unwrap_or_default()
+    }
+
+    /// The merge / rebase banner (Continue / Abort).
+    pub fn banner(&self) -> &Entity<OperationBanner> {
+        &self.banner
     }
 
     /// The commit composer.
@@ -620,6 +632,17 @@ impl ChangesPanel {
         let Some((section, view, file)) = self.file(si, fi) else {
             return;
         };
+        if section == Section::Conflicts {
+            // Conflicts open in the merge editor.
+            let rel = file.path().to_string();
+            self.selected = Some((section, rel.clone()));
+            let store = self.store.clone();
+            window.defer(cx, move |window, cx| {
+                crate::merge_editor::open_merge_editor(&store, rel, window, cx)
+            });
+            cx.notify();
+            return;
+        }
         let selected = (section, file.path().to_string());
         let target = DiffTarget::Change(file.change.clone());
         let viewed = (!file.content_hash.is_empty()).then(|| ViewedTarget {
@@ -709,9 +732,24 @@ impl ChangesPanel {
                     .icon_entry("Stage", IconName::Plus, toggle)
                     .icon_entry("Delete File…", IconName::Trash, discard)
                     .separator(),
-                Section::Conflicts => menu
+                Section::Conflicts => {
+                    let (t, r) = (this.clone(), rel.clone());
+                    menu.icon_entry(
+                        "Open Merge Editor",
+                        IconName::GitMerge,
+                        move |window, cx| {
+                            let _ = t.update(cx, |p, cx| {
+                                let store = p.store.clone();
+                                let rel = r.clone();
+                                window.defer(cx, move |window, cx| {
+                                    crate::merge_editor::open_merge_editor(&store, rel, window, cx)
+                                });
+                            });
+                        },
+                    )
                     .icon_entry("Mark Resolved (Stage)", IconName::Check, toggle)
-                    .separator(),
+                    .separator()
+                }
                 Section::Files => menu,
             };
             menu = menu.icon_entry("Open Diff", IconName::Diff, move |window, cx| {
@@ -1299,6 +1337,7 @@ impl Render for ChangesPanel {
         v_flex()
             .id("changes-panel")
             .size_full()
+            .child(self.banner.clone())
             .child(
                 v_flex()
                     .flex_none()

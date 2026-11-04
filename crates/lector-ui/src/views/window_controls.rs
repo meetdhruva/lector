@@ -215,12 +215,19 @@ fn windows_controls(window: &mut Window, cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
-/// `workspace::ToggleMaximize`.
-pub fn toggle_maximize(window: &mut Window) {
-    // macOS and Linux toggle; on Windows GPUI can only maximize (the caption
-    // button and a title-bar double-click restore natively).
+/// `workspace::ToggleMaximize`. Returns `false` when the window could not be
+/// toggled.
+///
+/// macOS and Linux toggle. On Windows GPUI 0.2.2 only exposes
+/// `Window::zoom_window`, which is `ShowWindow(SW_MAXIMIZE)` and never
+/// restores; there is no safe restore call (`Window::resize` does not leave the
+/// maximized state), so an already maximized window is left alone and the
+/// caller points to the title bar's restore button and double-click, which
+/// restore natively.
+pub fn toggle_maximize(window: &mut Window) -> bool {
     if cfg!(target_os = "windows") && window.is_maximized() {
-        return;
+        return false;
     }
     window.zoom_window();
+    true
 }

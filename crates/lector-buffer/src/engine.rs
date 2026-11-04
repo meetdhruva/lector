@@ -96,47 +96,16 @@ pub(crate) struct Plan {
     pub kind: EditKind,
 }
 
-/// The new text for a sorted, non-overlapping change list.
+/// The new text for a sorted, non-overlapping change list (one batched
+/// splice, see [`Rope::apply_edits`]).
 pub(crate) fn build_rope(old: &Rope, changes: &[Change]) -> Rope {
-    if let [c] = changes {
-        let mut r = old.clone();
-        r.replace(c.start..c.end, &c.text);
-        return r;
-    }
-    // Short gaps between changes are copied into a pending buffer that is pushed
-    // in large blocks (far cheaper than a tree operation per caret); long gaps
-    // share structure with `old`.
-    const COPY_GAP: usize = 512;
-    const FLUSH_AT: usize = 16 * 1024;
-    let mut out = Rope::new();
-    let mut pending = String::new();
-    let mut pos = 0;
-    let keep = |out: &mut Rope, pending: &mut String, from: usize, to: usize| {
-        if to <= from {
-            return;
-        }
-        if to - from <= COPY_GAP {
-            for chunk in old.chunks_in_range(from..to) {
-                pending.push_str(chunk);
-            }
-            if pending.len() >= FLUSH_AT {
-                out.push(pending);
-                pending.clear();
-            }
-        } else {
-            out.push(pending);
-            pending.clear();
-            out.append(old.slice(from..to));
-        }
-    };
-    for c in changes {
-        keep(&mut out, &mut pending, pos, c.start);
-        pending.push_str(&c.text);
-        pos = c.end;
-    }
-    keep(&mut out, &mut pending, pos, old.len());
-    out.push(&pending);
-    out
+    let edits: Vec<(std::ops::Range<usize>, &str)> = changes
+        .iter()
+        .map(|c| (c.start..c.end, c.text.as_str()))
+        .collect();
+    let mut rope = old.clone();
+    rope.apply_edits(&edits);
+    rope
 }
 
 /// Exact deltas, back to front.

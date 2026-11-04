@@ -67,8 +67,11 @@ pub struct BufferOptions {
     pub indent: IndentStyle,
     /// Copy the indentation of the current line on newline.
     pub auto_indent: bool,
-    /// Insert matching closers for `([{"'` and type over them.
+    /// Insert matching closers for `([{"'` and type over the ones inserted.
     pub auto_close_brackets: bool,
+    /// Indent the line after one ending in `:` (Python, YAML, Nim and the like);
+    /// lines ending in `{`, `(` or `[` are always indented.
+    pub indent_after_colon: bool,
     /// Comment delimiters used by [`Buffer::toggle_comment`].
     pub comment: CommentTokens,
 }
@@ -80,6 +83,7 @@ impl Default for BufferOptions {
             indent: IndentStyle::Spaces(4),
             auto_indent: true,
             auto_close_brackets: true,
+            indent_after_colon: false,
             comment: CommentTokens::default(),
         }
     }

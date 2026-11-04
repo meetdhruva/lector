@@ -13,6 +13,7 @@
 pub mod display_map;
 pub mod edit;
 mod element;
+pub mod layers;
 mod line_cache;
 pub mod selection;
 pub mod source;
@@ -34,6 +35,7 @@ use lector_text::Rope;
 pub use display_map::DisplayMap;
 pub use edit::{EditBuffer, EditBufferEvent, RopeSource};
 pub use element::CodeElement;
+pub use layers::{RowBackground, RowWidget, WidgetAnchor};
 pub use selection::{Pos, Selection};
 pub use source::{
     CodeSource, DecorationColor, GutterMark, GutterMarkKind, HighlightSpan, InMemorySource,
@@ -165,6 +167,46 @@ pub struct BackgroundRange {
     pub color: DecorationColor,
 }
 
+/// An underline under a byte range of one row (diagnostics).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Underline {
+    /// Row.
+    pub row: u32,
+    /// Byte range within the row (an empty range underlines one char).
+    pub range: Range<usize>,
+    /// Color.
+    pub color: Hsla,
+    /// Squiggly instead of straight.
+    pub wavy: bool,
+}
+
+/// An icon in the gutter's left margin (diagnostic severity, lightbulb).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GutterIcon {
+    /// Row.
+    pub row: u32,
+    /// Icon.
+    pub icon: IconName,
+    /// Tint.
+    pub color: Hsla,
+    /// Clicks call [`CodeView::on_gutter_icon_click`].
+    pub clickable: bool,
+}
+
+/// Language-feature marks of a view, set together with
+/// [`CodeView::set_inline_marks`] (by the LSP integration).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineMarks {
+    /// Underlines, sorted by row.
+    pub underlines: Vec<Underline>,
+    /// Gutter icons (one per row; later entries win).
+    pub gutter_icons: Vec<GutterIcon>,
+    /// Scrollbar markers: row and color.
+    pub scrollbar: Vec<(u32, Hsla)>,
+}
+
+type GutterIconCallback = Rc<dyn Fn(u32, &mut Window, &mut App)>;
+
 /// Events emitted by [`CodeView`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum CodeViewEvent {
@@ -235,6 +277,8 @@ pub struct CodeView {
     search_matches: Vec<(u32, Range<usize>)>,
     active_match: Option<usize>,
     decorations: Vec<BackgroundRange>,
+    /// Owner-keyed row backgrounds and widgets (`layers`).
+    layers: layers::Layers,
     annotations: BTreeMap<u32, SharedString>,
     pub(crate) line_cache: LineCache,
     pub(crate) last_layout: Option<Rc<element::LayoutSnapshot>>,
@@ -262,6 +306,9 @@ pub struct CodeView {
     blink_epoch: u64,
     blink_task: Option<Task<()>>,
     _buffer_subscription: Option<Subscription>,
+    inline_marks: Rc<InlineMarks>,
+    on_gutter_icon_click: Option<GutterIconCallback>,
+    overlay: Option<(gpui::AnyView, Point<Pixels>, gpui::Corner, Subscription)>,
 }
 
 type AnnotationClickCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -343,6 +390,7 @@ impl CodeView {
             search_matches: Vec::new(),
             active_match: None,
             decorations: Vec::new(),
+            layers: layers::Layers::default(),
             annotations: BTreeMap::new(),
             line_cache: LineCache::new(4096),
             last_layout: None,
@@ -368,6 +416,9 @@ impl CodeView {
             blink_epoch: 0,
             blink_task: None,
             _buffer_subscription: None,
+            inline_marks: Rc::new(InlineMarks::default()),
+            on_gutter_icon_click: None,
+            overlay: None,
         }
     }
 
@@ -657,6 +708,88 @@ impl CodeView {
 
     pub(crate) fn decorations(&self) -> &[BackgroundRange] {
         &self.decorations
+    }
+
+    /// Replaces the language-feature marks (underlines, gutter icons,
+    /// scrollbar markers).
+    pub fn set_inline_marks(&mut self, marks: InlineMarks, cx: &mut Context<Self>) {
+        if *self.inline_marks != marks {
+            self.inline_marks = Rc::new(marks);
+            cx.notify();
+        }
+    }
+
+    /// The language-feature marks.
+    pub fn inline_marks(&self) -> &Rc<InlineMarks> {
+        &self.inline_marks
+    }
+
+    /// Called with the row when a clickable [`GutterIcon`] is clicked.
+    pub fn on_gutter_icon_click(&mut self, f: impl Fn(u32, &mut Window, &mut App) + 'static) {
+        self.on_gutter_icon_click = Some(Rc::new(f));
+    }
+
+    pub(crate) fn gutter_icon_click_callback(&self) -> Option<GutterIconCallback> {
+        self.on_gutter_icon_click.clone()
+    }
+
+    /// Shows a floating view (code actions menu, rename box) anchored at
+    /// `position` (window coordinates), focused; it closes when it emits
+    /// `DismissEvent` (focus returns to what had it) or on
+    /// [`CodeView::close_overlay`].
+    pub fn show_overlay<V: gpui::ManagedView>(
+        &mut self,
+        view: Entity<V>,
+        position: Point<Pixels>,
+        anchor: gpui::Corner,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_focus = window.focused(cx);
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, _: &gpui::DismissEvent, window, cx| {
+                this.overlay = None;
+                if let Some(focus) = previous_focus.as_ref() {
+                    window.focus(focus);
+                }
+                cx.notify();
+            },
+        );
+        window.focus(&view.focus_handle(cx));
+        self.overlay = Some((view.into(), position, anchor, sub));
+        // A pointer hover popover would cover the overlay: dismiss it.
+        self.hover_pos = None;
+        self.hover_task = None;
+        cx.emit(CodeViewEvent::HoverMoved(None));
+        cx.notify();
+    }
+
+    /// Closes the floating view, if any.
+    pub fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.overlay.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The floating view shown by [`CodeView::show_overlay`], if any.
+    pub fn overlay(&self) -> Option<&gpui::AnyView> {
+        self.overlay.as_ref().map(|(v, ..)| v)
+    }
+
+    fn render_overlay(&self) -> Option<impl IntoElement> {
+        let (view, position, anchor, _) = self.overlay.as_ref()?;
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(*position)
+                    .anchor(*anchor)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(div().occlude().child(view.clone())),
+            )
+            .with_priority(2),
+        )
     }
 
     /// Inline end-of-line annotations (e.g. blame) keyed by row.
@@ -2363,6 +2496,7 @@ impl Render for CodeView {
             })
             .child(CodeElement::new(cx.entity()))
             .children(self.context_menu.render())
+            .children(self.render_overlay())
     }
 }
 

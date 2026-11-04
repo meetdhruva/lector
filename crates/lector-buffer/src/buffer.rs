@@ -21,6 +21,26 @@ struct Caches {
     line_clip: Option<String>,
 }
 
+/// A running "add next occurrence" command that started from a caret: its
+/// query matches whole words only, for as long as the text and the newest
+/// selection stay as the session left them.
+#[derive(Clone, Debug)]
+pub(crate) struct OccurrenceSession {
+    pub version: u64,
+    pub query: String,
+}
+
+/// A closing bracket or quote that Lector inserted while typing the opener.
+/// `start..end` is the text typed between the two; the closer sits at `end`.
+/// Typing the closer with a caret at `end` skips over it; the entry is dropped
+/// as soon as no caret is inside `start..=end` or the closer changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AutoCloser {
+    pub start: usize,
+    pub end: usize,
+    pub ch: char,
+}
+
 /// An editable text buffer with multi-cursor selections and undo history.
 ///
 /// `Clone` is cheap (the rope is shared); the clone has an independent history.
@@ -33,6 +53,9 @@ pub struct Buffer {
     pub(crate) history: History,
     saved_version: u64,
     caches: Mutex<Caches>,
+    pub(crate) occurrence: Option<OccurrenceSession>,
+    /// Auto-inserted closers still eligible for type-over, sorted by `end`.
+    pub(crate) closers: Vec<AutoCloser>,
 }
 
 impl Clone for Buffer {
@@ -50,6 +73,8 @@ impl Clone for Buffer {
                 eol: c.eol,
                 line_clip: c.line_clip.clone(),
             }),
+            occurrence: self.occurrence.clone(),
+            closers: self.closers.clone(),
         }
     }
 }
@@ -77,6 +102,8 @@ impl Buffer {
             history: History::new(),
             saved_version,
             caches: Mutex::new(Caches::default()),
+            occurrence: None,
+            closers: Vec::new(),
         }
     }
 
@@ -234,6 +261,30 @@ impl Buffer {
             self.newest = n.last().map_or(self.newest, |s| s.id);
         }
         self.sels = n;
+        self.prune_closers();
+    }
+
+    /// Forgets auto-inserted closers that no caret is inside of any more.
+    fn prune_closers(&mut self) {
+        if self.closers.is_empty() {
+            return;
+        }
+        let sels = &self.sels;
+        // Heads of sorted, disjoint selections are sorted too.
+        self.closers.retain(|c| {
+            let first = sels.partition_point(|s| s.head < c.start);
+            sels.get(first).is_some_and(|s| s.head <= c.end)
+        });
+    }
+
+    /// Whether a closer `ch` that Lector inserted sits right at `offset` and
+    /// the caret is still inside the pair.
+    pub(crate) fn has_auto_closer(&self, offset: usize, ch: char) -> bool {
+        let first = self.closers.partition_point(|c| c.end < offset);
+        self.closers[first..]
+            .iter()
+            .take_while(|c| c.end == offset)
+            .any(|c| c.ch == ch)
     }
 
     /// Replaces the selections with a single caret at `offset`.
@@ -244,12 +295,24 @@ impl Buffer {
 
     /// Applies a plan: text, deltas, selections, history.
     pub(crate) fn apply_plan(&mut self, plan: Plan) -> Transaction {
+        self.apply_plan_closing(plan, Vec::new())
+    }
+
+    /// Like [`Buffer::apply_plan`]; `new_closers` are auto-inserted closing
+    /// characters, given as the position (in the new text) of the closer.
+    pub(crate) fn apply_plan_closing(
+        &mut self,
+        plan: Plan,
+        new_closers: Vec<(Pos, char)>,
+    ) -> Transaction {
         let Plan {
             changes,
             sels,
             kind,
         } = plan;
-        if changes.is_empty() {
+        // Replacing text by itself changes nothing: no new version, no undo
+        // step; the selections still move as an edit would move them.
+        if changes.iter().all(|c| is_noop_change(&self.text, c)) {
             let resolved =
                 Self::resolve_sels(&mut self.next_id, &Mapper::new(&changes, &self.text), &sels);
             if kind == EditKind::Typing {
@@ -265,7 +328,9 @@ impl Buffer {
         let old = self.text.clone();
         let new = build_rope(&old, &changes);
         let deltas = build_deltas(&old, &changes);
-        let resolved = Self::resolve_sels(&mut self.next_id, &Mapper::new(&changes, &new), &sels);
+        let mapper = Mapper::new(&changes, &new);
+        let resolved = Self::resolve_sels(&mut self.next_id, &mapper, &sels);
+        self.closers = self.mapped_closers(&mapper, &new, &new_closers);
         let before_sels = std::mem::take(&mut self.sels);
         let before_newest = self.newest;
         self.text = new;
@@ -283,6 +348,36 @@ impl Buffer {
             kind,
         );
         Transaction { deltas }
+    }
+
+    /// The tracked closers mapped through `mapper` plus `added` ones; entries
+    /// whose closing character is no longer there are dropped.
+    fn mapped_closers(
+        &self,
+        mapper: &Mapper<'_>,
+        new: &Rope,
+        added: &[(Pos, char)],
+    ) -> Vec<AutoCloser> {
+        let mut out: Vec<AutoCloser> = self
+            .closers
+            .iter()
+            .map(|c| AutoCloser {
+                start: mapper.resolve(Pos::Old(c.start, Side::Before)),
+                end: mapper.resolve(Pos::Old(c.end, Side::After)),
+                ch: c.ch,
+            })
+            .collect();
+        for &(pos, ch) in added {
+            let at = mapper.resolve(pos);
+            out.push(AutoCloser {
+                start: at,
+                end: at,
+                ch,
+            });
+        }
+        out.retain(|c| c.start <= c.end && new.chars_at(c.end).next() == Some(c.ch));
+        out.sort_by_key(|c| c.end);
+        out
     }
 
     fn resolve_sels(next_id: &mut u64, mapper: &Mapper<'_>, specs: &[NewSel]) -> Vec<Selection> {
@@ -341,6 +436,7 @@ impl Buffer {
             return Transaction::default();
         };
         let deltas = inverse_deltas(&step.deltas);
+        self.closers.clear();
         self.text = step.before_text.clone();
         self.sels = step.before_sels.clone();
         self.newest = step.before_newest;
@@ -355,6 +451,7 @@ impl Buffer {
             return Transaction::default();
         };
         let deltas = step.deltas.clone();
+        self.closers.clear();
         self.text = step.after_text.clone();
         self.sels = step.after_sels.clone();
         self.newest = step.after_newest;
@@ -470,6 +567,7 @@ impl Buffer {
         let before_sels = std::mem::take(&mut self.sels);
         let before_newest = self.newest;
         let old_text = std::mem::replace(&mut self.text, new);
+        self.closers.clear();
         self.install_selections(resolved);
         self.history.record(
             Step {
@@ -485,6 +583,18 @@ impl Buffer {
         );
         Transaction { deltas }
     }
+}
+
+/// True when applying `change` would leave the text as it is.
+fn is_noop_change(old: &Rope, change: &Change) -> bool {
+    if change.start == change.end {
+        return change.text.is_empty();
+    }
+    change.text.len() == change.end - change.start
+        && old
+            .chunks_in_range(change.start..change.end)
+            .flat_map(str::bytes)
+            .eq(change.text.bytes())
 }
 
 /// Sticky sides for the (anchor, head) of a selection: the earlier end stays

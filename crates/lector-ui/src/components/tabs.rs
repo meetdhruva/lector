@@ -27,6 +27,7 @@ pub struct Tab {
     preview: bool,
     dirty: bool,
     read_only: bool,
+    deleted: bool,
     on_click: Option<Handler>,
     on_close: Option<Handler>,
     on_secondary: Option<MouseHandler>,
@@ -45,6 +46,7 @@ impl Tab {
             preview: false,
             dirty: false,
             read_only: false,
+            deleted: false,
             on_click: None,
             on_close: None,
             on_secondary: None,
@@ -90,6 +92,12 @@ impl Tab {
     /// Editing is blocked: a small lock after the title.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// The file was deleted on disk: the title is struck through.
+    pub fn deleted(mut self, deleted: bool) -> Self {
+        self.deleted = deleted;
         self
     }
 
@@ -216,6 +224,9 @@ impl RenderOnce for Tab {
                 div()
                     .whitespace_nowrap()
                     .when(self.preview, |el| el.italic())
+                    .when(self.deleted, |el| {
+                        el.line_through().text_color(ui.text_faint.hsla())
+                    })
                     .child(self.title),
             )
             .children(lock)

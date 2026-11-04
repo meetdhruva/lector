@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use gpui::{
     div, prelude::*, px, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle,
     SharedString, Subscription, Task, Window,
@@ -13,6 +15,7 @@ use lector_workspace::Project;
 
 use crate::code_view::{CodeView, CodeViewEvent};
 use crate::components::v_flex;
+use crate::editor::{DocumentEvent, DocumentModel};
 use crate::icons::IconName;
 use crate::markdown::{self, Block, RenderOptions};
 use crate::theme::{ActiveTheme, ColorExt};
@@ -25,6 +28,9 @@ pub enum MarkdownPreviewEvent {
     OpenFile(PathBuf),
 }
 
+/// How long typing must pause before the preview re-renders.
+const LIVE_DEBOUNCE: Duration = Duration::from_millis(250);
+
 /// The preview view.
 pub struct MarkdownPreview {
     path: PathBuf,
@@ -36,6 +42,10 @@ pub struct MarkdownPreview {
     task: Option<Task<()>>,
     follow: Option<Subscription>,
     last_synced_block: Option<usize>,
+    /// The open document whose live (possibly unsaved) text is rendered.
+    model: Option<Entity<DocumentModel>>,
+    model_subscription: Option<Subscription>,
+    debounce: Option<Task<()>>,
 }
 
 impl EventEmitter<MarkdownPreviewEvent> for MarkdownPreview {}
@@ -75,9 +85,25 @@ impl MarkdownPreview {
             task: None,
             follow: None,
             last_synced_block: None,
+            model: None,
+            model_subscription: None,
+            debounce: None,
         };
         this.reload(cx);
         this
+    }
+
+    /// Plain text of the headings and paragraphs currently rendered.
+    pub fn rendered_text(&self) -> Vec<String> {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Heading { text, .. } | Block::Paragraph { text, .. } => {
+                    Some(text.text.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The Markdown file.
@@ -85,8 +111,13 @@ impl MarkdownPreview {
         &self.path
     }
 
-    /// Re-reads and re-renders the file.
+    /// Re-renders: the live buffer text when a document is attached (see
+    /// [`MarkdownPreview::follow_document`]), else the file on disk.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.live_text(cx) {
+            self.render_text(text, cx);
+            return;
+        }
         let project = self.project.clone();
         let path = self.path.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -103,6 +134,51 @@ impl MarkdownPreview {
                 this.loaded = true;
                 cx.notify();
             });
+        }));
+    }
+
+    /// The text of the attached document (its unsaved edits included).
+    fn live_text(&self, cx: &App) -> Option<lector_text::Text> {
+        let model = self.model.as_ref()?;
+        let model = model.read(cx);
+        model.live_document()?.text().cloned()
+    }
+
+    /// Parses `text` in the background and swaps the rendered blocks in.
+    fn render_text(&mut self, text: lector_text::Text, cx: &mut Context<Self>) {
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let blocks = cx
+                .background_executor()
+                .spawn(async move { markdown::parse(&text.to_string()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.blocks = Arc::new(blocks);
+                this.loaded = true;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Renders the live text of `model` and keeps up with every edit
+    /// (debounced), so the preview shows what is in the editor, not the
+    /// version on disk.
+    pub fn follow_document(&mut self, model: Entity<DocumentModel>, cx: &mut Context<Self>) {
+        self.model_subscription = Some(cx.subscribe(
+            &model,
+            |this, _, event: &DocumentEvent, cx| match event {
+                DocumentEvent::SourceChanged | DocumentEvent::Loaded => this.refresh_soon(cx),
+                _ => {}
+            },
+        ));
+        self.model = Some(model);
+        self.reload(cx);
+    }
+
+    /// Re-renders once typing has paused for [`LIVE_DEBOUNCE`].
+    fn refresh_soon(&mut self, cx: &mut Context<Self>) {
+        self.debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LIVE_DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| this.reload(cx));
         }));
     }
 

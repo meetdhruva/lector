@@ -10,6 +10,7 @@ use gpui::{
 use lector_config::{ReviewStore, Settings};
 use lector_git::{HeadInfo, Repo, StatusEntry};
 use lector_ui::views::{Workspace, WorkspaceEvent};
+use lector_workspace::conflicts::ConflictState;
 use lector_workspace::Project;
 
 /// Emitted when `HEAD`, refs or status changed.
@@ -28,6 +29,8 @@ pub struct GitStore {
     pub head: Option<HeadInfo>,
     /// `git status` entries.
     pub status: Arc<Vec<StatusEntry>>,
+    /// Merge / rebase / cherry-pick / revert in progress and conflicted paths.
+    pub conflicts: Arc<ConflictState>,
     /// Viewed marks.
     pub review: ReviewStore,
     /// Bumped on each observed change.
@@ -90,6 +93,7 @@ impl GitStore {
             project,
             head: None,
             status: Arc::new(Vec::new()),
+            conflicts: Arc::new(ConflictState::default()),
             review: ReviewStore::default(),
             generation: 0,
             views: None,
@@ -142,10 +146,11 @@ impl GitStore {
         let work = cx.background_spawn(async move {
             let head = repo.head().ok();
             let status = repo.status().ok();
-            (head, status)
+            let conflicts = lector_workspace::conflicts::conflict_state(&repo).ok();
+            (head, status, conflicts)
         });
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
-            let (head, status) = work.await;
+            let (head, status, conflicts) = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh_task = None;
                 this.last_refresh = Some(Instant::now());
@@ -158,6 +163,12 @@ impl GitStore {
                 if let Some(status) = status {
                     if *this.status != status {
                         this.status = Arc::new(status);
+                        changed = true;
+                    }
+                }
+                if let Some(conflicts) = conflicts {
+                    if *this.conflicts != conflicts {
+                        this.conflicts = Arc::new(conflicts);
                         changed = true;
                     }
                 }

@@ -210,6 +210,34 @@ pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Most characters scanned backwards when looking for a matching bracket.
+const BRACKET_SCAN_LIMIT: usize = 200_000;
+
+/// Offset of the `open` bracket that matches a `close` typed at `offset`
+/// (nesting of the same bracket pair counted; strings and comments are not
+/// understood). `None` when there is none within the scan limit.
+pub(crate) fn matching_opener(
+    rope: &Rope,
+    offset: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut pos = offset.min(rope.len());
+    for c in rope.reversed_chars_at(pos).take(BRACKET_SCAN_LIMIT) {
+        pos -= c.len_utf8();
+        if c == close {
+            depth += 1;
+        } else if c == open {
+            if depth == 0 {
+                return Some(pos);
+            }
+            depth -= 1;
+        }
+    }
+    None
+}
+
 // ---- words ---------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

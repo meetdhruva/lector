@@ -53,6 +53,8 @@ pub struct CommitComposer {
     error: Option<SharedString>,
     committing: bool,
     staged_count: usize,
+    /// A merge is in progress: committing records it even with nothing staged.
+    merging: bool,
     has_head: bool,
     identity_task: Option<Task<()>>,
     commit_task: Option<Task<()>>,
@@ -96,10 +98,9 @@ impl CommitComposer {
                     .head
                     .as_ref()
                     .is_some_and(|h| h.oid.is_some());
-                if has_head != this.has_head {
-                    this.has_head = has_head;
-                    cx.notify();
-                }
+                this.has_head = has_head;
+                // Conflicts / merge state feed the Commit button.
+                cx.notify();
             }),
         ];
         let has_head = store
@@ -117,6 +118,7 @@ impl CommitComposer {
             error: None,
             committing: false,
             staged_count: 0,
+            merging: false,
             has_head,
             identity_task: None,
             commit_task: None,
@@ -137,6 +139,26 @@ impl CommitComposer {
             self.staged_count = n;
             cx.notify();
         }
+    }
+
+    /// Marks a merge in progress (the merge commit needs no staged changes).
+    pub fn set_merging(&mut self, merging: bool, cx: &mut Context<Self>) {
+        if self.merging != merging {
+            self.merging = merging;
+            cx.notify();
+        }
+    }
+
+    /// Puts `message` into the editor if it is empty (e.g. `MERGE_MSG`).
+    /// Returns whether it did.
+    pub fn prefill(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
+        if self.amend || !self.editor.read(cx).text().trim().is_empty() {
+            return false;
+        }
+        let message = message.to_string();
+        self.editor.update(cx, |e, cx| e.set_text(message, cx));
+        cx.notify();
+        true
     }
 
     /// Re-reads the identity git will use (e.g. after the user configured it).
@@ -221,7 +243,10 @@ impl CommitComposer {
         if self.editor.read(cx).text().trim().is_empty() {
             return Some("Write a commit message first");
         }
-        if self.staged_count == 0 && !self.amend {
+        if !self.store.read(cx).conflicts.entries.is_empty() {
+            return Some("Resolve the merge conflicts first (Mark Resolved stages a file)");
+        }
+        if self.staged_count == 0 && !self.amend && !self.merging {
             return Some("Nothing staged: stage files, hunks or lines first");
         }
         if self.identity == IdentityState::Missing {
@@ -448,6 +473,7 @@ impl Render for CommitComposer {
             None if self.amend => {
                 "Replace the last commit with the staged changes and this message".into()
             }
+            None if self.merging => "Record the merge commit (conclude the merge)".into(),
             None => format!(
                 "Commit {staged} staged file{}",
                 if staged == 1 { "" } else { "s" }

@@ -5,7 +5,7 @@ use gpui::{
     div, prelude::*, px, App, DismissEvent, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
     SharedString, Window,
 };
-use lector_lsp::{ServerState, ServerStatus};
+use lector_lsp::{ServerCapabilities, ServerState, ServerStatus};
 
 use crate::actions::workspace::{OpenLogFile, OpenSettings};
 use crate::components::popover::surface;
@@ -18,6 +18,7 @@ pub struct LspStatusPopover {
     servers: Vec<ServerStatus>,
     enabled: bool,
     focus_handle: FocusHandle,
+    capabilities: Vec<(String, ServerCapabilities)>,
 }
 
 impl EventEmitter<DismissEvent> for LspStatusPopover {}
@@ -36,8 +37,32 @@ impl LspStatusPopover {
             servers,
             enabled,
             focus_handle: cx.focus_handle(),
+            capabilities: Vec::new(),
         }
     }
+
+    /// Capabilities of running servers (by name), listed under each.
+    pub fn set_capabilities(&mut self, capabilities: Vec<(String, ServerCapabilities)>) {
+        self.capabilities = capabilities;
+    }
+}
+
+/// "Hover · Definition · Format · Rename · Code actions" for a server.
+pub fn capability_summary(c: &ServerCapabilities) -> String {
+    [
+        (c.hover, "Hover"),
+        (c.definition, "Definition"),
+        (c.references, "References"),
+        (c.formatting, "Format"),
+        (c.range_formatting && !c.formatting, "Range format"),
+        (c.rename, "Rename"),
+        (c.code_actions, "Code actions"),
+    ]
+    .iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, l)| *l)
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 fn state_label(state: &ServerState, cx: &App) -> (SharedString, Hsla) {
@@ -61,7 +86,13 @@ impl Render for LspStatusPopover {
             .iter()
             .map(|s| {
                 let (label, color) = state_label(&s.state, cx);
-                h_flex()
+                let caps = self
+                    .capabilities
+                    .iter()
+                    .find(|(name, _)| *name == s.name)
+                    .map(|(_, c)| capability_summary(c))
+                    .filter(|c| !c.is_empty());
+                let row = h_flex()
                     .gap(px(8.))
                     .py(px(4.))
                     .child(div().size(px(8.)).rounded_full().bg(color).flex_none())
@@ -82,7 +113,16 @@ impl Render for LspStatusPopover {
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(label),
+                    );
+                v_flex().child(row).when_some(caps, |el, caps| {
+                    el.child(
+                        div()
+                            .pl(px(16.))
+                            .text_size(metrics::TEXT_XS)
+                            .text_color(ui.text_faint.hsla())
+                            .child(caps),
                     )
+                })
             })
             .collect();
         let message: Option<&str> = if !self.enabled {

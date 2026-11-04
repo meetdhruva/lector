@@ -98,6 +98,35 @@ proptest! {
     }
 
     #[test]
+    fn rope_apply_edits_matches_sequential_replace(
+        text in text_strategy(),
+        cuts in proptest::collection::vec(0usize..20_000, 0..40),
+        inserts in proptest::collection::vec(text_strategy(), 20),
+    ) {
+        let mut cuts = cuts;
+        cuts.sort_unstable();
+        let edits: Vec<(std::ops::Range<usize>, &str)> = cuts
+            .chunks_exact(2)
+            .zip(&inserts)
+            .map(|(c, t)| (c[0]..c[1], t.as_str()))
+            .collect();
+        let mut batched = Rope::from(text.as_str());
+        batched.apply_edits(&edits);
+        // Reference: the same edits one by one, back to front.
+        let mut single = Rope::from(text.as_str());
+        let mut model = text.clone();
+        for (r, t) in edits.iter().rev() {
+            let (s, e) = (floor(&text, r.start), floor(&text, r.end));
+            single.replace(s..e, t);
+            model.replace_range(s..e, t);
+        }
+        prop_assert_eq!(batched.to_string(), model.clone());
+        prop_assert_eq!(&batched, &single);
+        prop_assert_eq!(batched.summary(), TextSummary::from_text(&model));
+        prop_assert_eq!(batched.line_count() as usize, model.matches('\n').count() + 1);
+    }
+
+    #[test]
     fn mapped_matches_rope(text in text_strategy(), repeat in 1usize..40) {
         let text = text.repeat(repeat);
         let mut file = tempfile::NamedTempFile::new().map_err(|e| TestCaseError::fail(e.to_string()))?;

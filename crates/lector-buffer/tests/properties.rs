@@ -488,6 +488,7 @@ fn options(style: u8) -> BufferOptions {
         },
         auto_indent: style != 3,
         auto_close_brackets: style != 4,
+        indent_after_colon: style == 2,
         comment: CommentTokens {
             line: if style == 5 { None } else { Some("//".into()) },
             block: if style == 5 {

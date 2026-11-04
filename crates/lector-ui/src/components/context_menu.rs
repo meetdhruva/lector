@@ -170,6 +170,28 @@ impl ContextMenu {
         self
     }
 
+    /// Adds a greyed-out, non-selectable entry (e.g. an unavailable code
+    /// action with its reason).
+    pub fn disabled_entry(
+        mut self,
+        label: impl Into<SharedString>,
+        icon: Option<IconName>,
+    ) -> Self {
+        self.entries.push(MenuEntry::Handler {
+            label: label.into(),
+            handler: Rc::new(|_, _| {}),
+            icon,
+            disabled: true,
+        });
+        self
+    }
+
+    /// Selects the first selectable entry (Enter runs it).
+    pub fn select_first(mut self) -> Self {
+        self.selected = self.entries.iter().position(MenuEntry::is_selectable);
+        self
+    }
+
     /// Adds a separator.
     pub fn separator(mut self) -> Self {
         self.entries.push(MenuEntry::Separator);

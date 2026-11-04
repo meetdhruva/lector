@@ -63,6 +63,7 @@ pub mod workspace {
             ShowAppMenu,
             // v0.3: editing.
             SaveAll,
+            ShowProblems,
         ]
     );
 }
@@ -77,6 +78,9 @@ pub mod editor {
             Find,
             FindNext,
             FindPrev,
+            FindReplace,
+            ReplaceNext,
+            ReplaceAll,
             GoToDefinition,
             FindReferences,
             Hover,
@@ -156,6 +160,8 @@ pub mod editor {
             Format,
             CodeActions,
             Rename,
+            NextDiagnostic,
+            PrevDiagnostic,
         ]
     );
 }
@@ -188,6 +194,10 @@ pub mod git {
             NextConflict,
             PrevConflict,
             MarkResolved,
+            AcceptAllOurs,
+            AcceptAllTheirs,
+            ContinueOperation,
+            AbortOperation,
         ]
     );
 }

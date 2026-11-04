@@ -20,6 +20,7 @@ pub mod editor;
 pub mod fuzzy;
 pub mod icons;
 pub mod keymap;
+pub mod lsp;
 pub mod markdown;
 pub mod menus;
 pub mod os;
@@ -30,6 +31,8 @@ pub mod views;
 
 #[cfg(test)]
 mod editing_tests;
+#[cfg(test)]
+mod polish_tests;
 #[cfg(test)]
 mod tests;
 
@@ -60,6 +63,7 @@ pub fn init(
     cx.set_global(code_view::EditorSettings::default());
     settings::apply_settings(cx, settings.0, settings.1);
     settings::bind_effective_keymap(cx);
+    lsp::init(cx);
     cx.on_action(|_: &actions::workspace::Quit, cx| views::workspace::quit_with_prompts(cx));
     cx.on_action(|_: &actions::workspace::NewWindow, cx| {
         if let Err(err) = open_empty_window(cx, None) {

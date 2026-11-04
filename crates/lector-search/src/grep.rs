@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use grep_matcher::Matcher;
+use grep_matcher::{Captures, Matcher};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkFinish, SinkMatch};
 use ignore::WalkState;
@@ -140,6 +140,53 @@ pub fn find_in_text(text: &str, query: &SearchQuery) -> Result<Vec<Range<usize>>
         ranges.truncate(query.max_results);
     }
     Ok(ranges)
+}
+
+/// Finds all non-empty matches of `query` in `text` together with their
+/// replacement. With `query.regex`, `replacement` may refer to capture groups
+/// (`$1`, `${name}`; `$$` is a literal dollar); otherwise it is used as is.
+/// Ranges are byte ranges in `text`, in order and non-overlapping.
+pub fn replacements_in_text(
+    text: &str,
+    query: &SearchQuery,
+    replacement: &str,
+) -> Result<Vec<(Range<usize>, String)>> {
+    if query.pattern.is_empty() {
+        return Ok(Vec::new());
+    }
+    let matcher = build_matcher(query)?;
+    let mut captures = matcher
+        .new_captures()
+        .map_err(|e| SearchError::Pattern(e.to_string()))?;
+    let mut out = Vec::new();
+    let haystack = text.as_bytes();
+    let found = matcher.captures_iter(haystack, &mut captures, |caps| {
+        let Some(whole) = caps.get(0) else {
+            return true;
+        };
+        if whole.start() >= whole.end() {
+            return true;
+        }
+        let replaced = if query.regex {
+            let mut dst = Vec::new();
+            caps.interpolate(
+                |name| matcher.capture_index(name),
+                haystack,
+                replacement.as_bytes(),
+                &mut dst,
+            );
+            String::from_utf8_lossy(&dst).into_owned()
+        } else {
+            replacement.to_string()
+        };
+        out.push((whole.start()..whole.end(), replaced));
+        true
+    });
+    found.map_err(|e| SearchError::Pattern(e.to_string()))?;
+    if query.max_results > 0 {
+        out.truncate(query.max_results);
+    }
+    Ok(out)
 }
 
 fn floor_boundary(s: &str, mut i: usize) -> usize {

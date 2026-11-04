@@ -647,6 +647,8 @@ pub struct PrepaintState {
     hitbox: Hitbox,
     text_hitbox: Hitbox,
     gutter_hitbox: Hitbox,
+    /// Row widgets (`layers`), laid out and prepainted above the code's hitboxes.
+    widgets: Vec<gpui::AnyElement>,
 }
 
 impl IntoElement for CodeElement {
@@ -698,11 +700,13 @@ impl Element for CodeElement {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let text_hitbox = window.insert_hitbox(layout.text_bounds, HitboxBehavior::Normal);
         let gutter_hitbox = window.insert_hitbox(layout.gutter_bounds, HitboxBehavior::Normal);
+        let widgets = prepaint_row_widgets(&self.view, &layout, window, cx);
         PrepaintState {
             layout,
             hitbox,
             text_hitbox,
             gutter_hitbox,
+            widgets,
         }
     }
 
@@ -738,8 +742,10 @@ impl Element for CodeElement {
         let (search_matches, active_match) = view.search_matches();
         let search_matches: Vec<(u32, Range<usize>)> = search_matches.to_vec();
         let decorations = view.decorations().to_vec();
+        let layer_backgrounds = view.layers.backgrounds();
         let annotations = view.annotations().clone();
         let gutter_annotations = view.gutter_annotations().cloned();
+        let inline_marks = view.inline_marks().clone();
         let source = view.source().clone();
         let gutter_hovered = view.gutter_hovered;
         let folded: HashSet<u32> = layout
@@ -839,6 +845,28 @@ impl Element for CodeElement {
                                             .corner_radii(px(2.)),
                                     );
                                 }
+                            }
+                        }
+                    }
+
+                    // Owner row backgrounds (`layers`).
+                    for bg in layer_backgrounds.iter().flat_map(|l| l.iter()) {
+                        for rl in layout.rows.iter().filter(|r| bg.rows.contains(&r.row)) {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(layout.text_bounds.left(), rl.y),
+                                    size(layout.text_bounds.size.width, lh),
+                                ),
+                                bg.color,
+                            ));
+                            if let Some(edge) = bg.edge {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(layout.text_bounds.left(), rl.y),
+                                        size(px(2.), lh),
+                                    ),
+                                    edge,
+                                ));
                             }
                         }
                     }
@@ -1016,6 +1044,9 @@ impl Element for CodeElement {
                         }
                     }
 
+                    // Language-feature underlines (diagnostics).
+                    paint_underlines(window, &layout, &inline_marks.underlines, text_x);
+
                     // IME composition: underline the marked text.
                     if let Some((m_start, m_end)) = marked {
                         for rl in &layout.rows {
@@ -1105,6 +1136,7 @@ impl Element for CodeElement {
             if let Some(ann) = &gutter_annotations {
                 paint_gutter_annotations(window, cx, &layout, ann, &settings, &theme);
             }
+            paint_gutter_icons(window, cx, &layout, &inline_marks.gutter_icons);
 
             // Sticky header.
             if !layout.sticky.is_empty() {
@@ -1180,6 +1212,7 @@ impl Element for CodeElement {
                 &theme,
                 scrollbar_dragging,
             );
+            paint_scrollbar_marks(window, &layout, &inline_marks.scrollbar);
         });
 
         if focused && editable {
@@ -1190,8 +1223,73 @@ impl Element for CodeElement {
             );
         }
         register_mouse_handlers(window, &self.view, &layout, &state.hitbox);
+        if !state.widgets.is_empty() {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: layout.text_bounds,
+                }),
+                |window| {
+                    for widget in &mut state.widgets {
+                        widget.paint(window, cx);
+                    }
+                },
+            );
+        }
         tracing::trace!(target: "lector_ui::perf", elapsed_us = started.elapsed().as_micros() as u64, "code view paint");
     }
+}
+
+/// Lays out the view's row widgets (`layers`) on their visible rows, after the
+/// code's hitboxes so they receive clicks first. Rows under the sticky header
+/// or folded away get none.
+fn prepaint_row_widgets(
+    view: &Entity<CodeView>,
+    layout: &LayoutSnapshot,
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<gpui::AnyElement> {
+    let widgets = view.read(cx).layers.widgets();
+    if widgets.is_empty() {
+        return Vec::new();
+    }
+    let lh = layout.line_height;
+    let top = layout.text_bounds.top() + layout.sticky_height();
+    let right = layout.text_bounds.right() - px(SCROLLBAR + 6.);
+    let mut out = Vec::new();
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: layout.text_bounds,
+        }),
+        |window| {
+            for widget in widgets {
+                let Some(rl) = layout
+                    .rows
+                    .iter()
+                    .find(|r| r.row == widget.row && r.first_seg)
+                else {
+                    continue;
+                };
+                if rl.y < top - px(0.5) {
+                    continue;
+                }
+                let mut element = (widget.render)(window, cx);
+                let size = element.layout_as_root(gpui::AvailableSpace::min_size(), window, cx);
+                let x = match widget.anchor {
+                    super::WidgetAnchor::AfterText => {
+                        let end = rl.x_offset + rl.line.width;
+                        (layout.text_origin_x + end + layout.char_width * 2.)
+                            .min(right - size.width)
+                    }
+                    super::WidgetAnchor::Right => right - size.width,
+                };
+                let x = x.max(layout.text_bounds.left());
+                let y = rl.y + ((lh - size.height) / 2.).max(px(0.));
+                element.prepaint_at(point(x, y), window, cx);
+                out.push(element);
+            }
+        },
+    );
+    out
 }
 
 fn shape_plain(
@@ -1611,6 +1709,100 @@ fn paint_minimap(
     }
 }
 
+/// Underlines (diagnostics) under byte ranges of visible rows.
+fn paint_underlines(
+    window: &mut Window,
+    layout: &LayoutSnapshot,
+    underlines: &[super::Underline],
+    text_x: Pixels,
+) {
+    if underlines.is_empty() {
+        return;
+    }
+    let (Some(first), Some(last)) = (layout.rows.first(), layout.rows.last()) else {
+        return;
+    };
+    let lo = underlines.partition_point(|u| u.row < first.row);
+    for u in underlines[lo..].iter().take_while(|u| u.row <= last.row) {
+        for rl in layout.rows.iter().filter(|r| r.row == u.row) {
+            let start = u.range.start.max(rl.seg_start);
+            let mut end = u.range.end.min(rl.seg_end);
+            if start > rl.seg_end || u.range.end < rl.seg_start {
+                continue;
+            }
+            let x0 = rl.x_for_col(start);
+            let mut x1 = rl.x_for_col(end);
+            if x1 <= x0 {
+                // Empty range or at the end of the line: one char wide.
+                end = start;
+                x1 = rl.x_for_col(end) + layout.char_width;
+            }
+            let thickness = px(1.);
+            window.paint_underline(
+                point(text_x + x0, rl.y + layout.line_height - px(3.5)),
+                x1 - x0,
+                &gpui::UnderlineStyle {
+                    thickness,
+                    color: Some(u.color),
+                    wavy: u.wavy,
+                },
+            );
+        }
+    }
+}
+
+/// Icons in the gutter's left margin (diagnostic severity, lightbulb).
+fn paint_gutter_icons(
+    window: &mut Window,
+    cx: &mut App,
+    layout: &LayoutSnapshot,
+    icons: &[super::GutterIcon],
+) {
+    if icons.is_empty() {
+        return;
+    }
+    let lh = layout.line_height;
+    let s = px(12.);
+    for rl in layout.rows.iter().filter(|r| r.first_seg) {
+        let Some(icon) = icons.iter().rev().find(|i| i.row == rl.row) else {
+            continue;
+        };
+        let b = Bounds::new(
+            point(layout.annotation_right + px(2.), rl.y + (lh - s) / 2.),
+            size(s, s),
+        );
+        let _ = window.paint_svg(
+            b,
+            ui_icon_path(icon.icon),
+            TransformationMatrix::unit(),
+            icon.color,
+            cx,
+        );
+    }
+}
+
+/// Scrollbar markers (diagnostics), in the middle of the track.
+fn paint_scrollbar_marks(window: &mut Window, layout: &LayoutSnapshot, marks: &[(u32, Hsla)]) {
+    if marks.is_empty() || layout.max_scroll.y <= px(0.) {
+        return;
+    }
+    let track = layout.vscroll_track();
+    let total = layout.display_row_count.max(1) as f32;
+    let mut last: Option<(Pixels, Hsla)> = None;
+    for (row, color) in marks.iter().take(4000) {
+        let d = layout.display_row_count.min(*row) as f32;
+        let y = track.top() + track.size.height * (d / total);
+        if last.is_some_and(|(ly, lc)| y - ly < px(2.) && lc == *color) {
+            continue;
+        }
+        last = Some((y, *color));
+        window.paint_quad(fill(
+            Bounds::new(point(track.left() + px(3.), y), size(px(6.), px(2.))),
+            *color,
+        ));
+    }
+}
+
 fn paint_scrollbars(
     window: &mut Window,
     layout: &LayoutSnapshot,
@@ -1790,8 +1982,21 @@ fn register_mouse_handlers(
                                     let ix = v.gutter_annotations()?.block_at(pos.row)?;
                                     Some((cb, ix))
                                 });
+                            let icon_cb = (p.x >= l.annotation_right
+                                && p.x < l.annotation_right + px(GUTTER_LEFT_PAD + 2.))
+                            .then(|| v.gutter_icon_click_callback())
+                            .flatten()
+                            .filter(|_| {
+                                v.inline_marks()
+                                    .gutter_icons
+                                    .iter()
+                                    .any(|i| i.row == pos.row && i.clickable)
+                            });
                             if let Some((cb, ix)) = annotation_cb {
                                 cx.defer_in(window, move |_, window, cx| cb(ix, window, cx));
+                            } else if let Some(cb) = icon_cb {
+                                let row = pos.row;
+                                cx.defer_in(window, move |_, window, cx| cb(row, window, cx));
                             } else if p.x >= l.fold_x && l.fold_starts.contains(&pos.row) {
                                 let folded = v.is_folded(pos.row);
                                 v.set_folded(pos.row, !folded, cx);

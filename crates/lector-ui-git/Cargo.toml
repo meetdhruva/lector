@@ -16,6 +16,7 @@ lector-workspace.workspace = true
 lector-git.workspace = true
 lector-diff.workspace = true
 lector-text.workspace = true
+lector-buffer.workspace = true
 lector-syntax.workspace = true
 lector-theme.workspace = true
 lector-icons.workspace = true
@@ -27,3 +28,4 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+gpui = { version = "0.2.2", features = ["test-support"] }

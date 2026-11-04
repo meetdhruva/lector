@@ -103,6 +103,11 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     let c = "CodeView";
     add(c, "ctrl-g".into(), "editor::GoToLine");
     add(c, format!("{m}-f"), "editor::Find");
+    add(c, format!("{m}-h"), "editor::FindReplace");
+    add("Picker", format!("{m}-shift-1"), "editor::ReplaceNext");
+    add("Picker", format!("{m}-alt-enter"), "editor::ReplaceAll");
+    add(w, format!("{m}-f"), "editor::Find");
+    add(w, format!("{m}-h"), "editor::FindReplace");
     if mac {
         add(c, "cmd-g".into(), "editor::FindNext");
         add(c, "cmd-shift-g".into(), "editor::FindPrev");
@@ -198,6 +203,9 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(c, "shift-alt-i".into(), "editor::SplitSelectionIntoLines");
     add(c, format!("{m}-."), "editor::CodeActions");
     add(c, "f2".into(), "editor::Rename");
+    add(c, "f8".into(), "editor::NextDiagnostic");
+    add(c, "shift-f8".into(), "editor::PrevDiagnostic");
+    add(w, format!("{m}-shift-m"), "workspace::ShowProblems");
     add(c, "escape".into(), "editor::ClearSelection");
 
     let d = "DiffView";
@@ -303,6 +311,13 @@ mod tests {
         assert_eq!(find(&lin, "workspace::GoBack"), ["alt-left"]);
         assert_eq!(find(&mac, "editor::Hover"), ["cmd-k cmd-i"]);
         assert_eq!(find(&lin, "editor::FindNext"), ["f3"]);
+        assert_eq!(
+            find(&mac, "editor::FindReplace"),
+            ["cmd-h", "cmd-h"],
+            "code view and workspace"
+        );
+        assert_eq!(find(&lin, "editor::ReplaceNext"), ["ctrl-shift-1"]);
+        assert_eq!(find(&lin, "editor::ReplaceAll"), ["ctrl-alt-enter"]);
         assert_eq!(find(&lin, "editor::GoToDefinition"), ["f12"]);
     }
 

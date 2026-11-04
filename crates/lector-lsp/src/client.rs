@@ -22,6 +22,69 @@ struct Pending {
     deadline: Instant,
 }
 
+/// Receives server → client traffic the transport does not answer itself.
+pub(crate) trait ServerHandler: Send + Sync + 'static {
+    /// A notification (after the built-in logging).
+    fn notification(&self, method: &str, params: Option<&Value>);
+    /// A request. Take the responder to answer (possibly later, from any
+    /// thread) and return `None`; return it back for the built-in answer.
+    fn request(
+        &self,
+        method: &str,
+        params: Option<&Value>,
+        responder: Responder,
+    ) -> Option<Responder>;
+}
+
+/// Answers one server → client request. Dropping it unanswered replies with
+/// the result given to [`Responder::with_default`] (or an error).
+pub(crate) struct Responder {
+    shared: Weak<Shared>,
+    id: Value,
+    default: Option<Value>,
+    done: bool,
+}
+
+impl Responder {
+    /// Result sent if the responder is dropped without an answer.
+    pub(crate) fn with_default(mut self, result: Value) -> Self {
+        self.default = Some(result);
+        self
+    }
+
+    /// Marks the request as answered elsewhere (no reply on drop).
+    fn disarm(&mut self) {
+        self.done = true;
+    }
+
+    /// Sends `result`.
+    pub(crate) fn respond(mut self, result: Value) {
+        self.send(Some(result));
+    }
+
+    fn send(&mut self, result: Option<Value>) {
+        if std::mem::replace(&mut self.done, true) {
+            return;
+        }
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let msg = match result {
+            Some(r) => json!({"jsonrpc": "2.0", "id": self.id, "result": r}),
+            None => json!({"jsonrpc": "2.0", "id": self.id,
+                "error": {"code": -32603, "message": "request dropped by the client"}}),
+        };
+        shared.send(&msg);
+    }
+}
+
+impl Drop for Responder {
+    fn drop(&mut self) {
+        let default = self.default.take();
+        self.send(default);
+    }
+}
+
 struct Shared {
     tx: Sender<Vec<u8>>,
     pending: Mutex<HashMap<i64, Pending>>,
@@ -29,6 +92,7 @@ struct Shared {
     root_uri: String,
     /// `workspace/configuration` section name and value (read-only settings).
     settings: Option<(String, Value)>,
+    handler: Option<Arc<dyn ServerHandler>>,
 }
 
 impl Shared {
@@ -68,6 +132,7 @@ impl Drop for Client {
 impl Client {
     /// Spawn the process and start the I/O threads. `on_exit` runs on the
     /// reader thread once the server's stdout closes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         command: &Path,
         args: &[String],
@@ -75,6 +140,7 @@ impl Client {
         root_uri: String,
         timeout: Duration,
         label: &str,
+        handler: Option<Arc<dyn ServerHandler>>,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Client> {
         let mut cmd = Command::new(command);
@@ -108,6 +174,7 @@ impl Client {
             closed: AtomicBool::new(false),
             root_uri,
             settings: crate::config::read_only_settings(label).map(|v| (label.to_string(), v)),
+            handler,
         });
 
         let name = label.to_string();
@@ -305,12 +372,25 @@ fn read_message<R: BufRead>(r: &mut R) -> Option<Value> {
     }
 }
 
-fn read_loop<R: BufRead>(mut r: R, shared: &Shared, name: &str) {
+fn read_loop<R: BufRead>(mut r: R, shared: &Arc<Shared>, name: &str) {
     while let Some(msg) = read_message(&mut r) {
         let method = msg.get("method").and_then(Value::as_str);
         let id = msg.get("id");
         match (method, id) {
             (Some(method), Some(id)) => {
+                let mut responder = Responder {
+                    shared: Arc::downgrade(shared),
+                    id: id.clone(),
+                    default: None,
+                    done: false,
+                };
+                if let Some(handler) = &shared.handler {
+                    match handler.request(method, msg.get("params"), responder) {
+                        Some(back) => responder = back,
+                        None => continue,
+                    }
+                }
+                responder.disarm();
                 let result = handle_server_request(
                     method,
                     msg.get("params"),
@@ -324,7 +404,12 @@ fn read_loop<R: BufRead>(mut r: R, shared: &Shared, name: &str) {
                 };
                 shared.send(&reply);
             }
-            (Some(method), None) => handle_notification(method, msg.get("params"), name),
+            (Some(method), None) => {
+                handle_notification(method, msg.get("params"), name);
+                if let Some(handler) = &shared.handler {
+                    handler.notification(method, msg.get("params"));
+                }
+            }
             (None, Some(id)) => {
                 let Some(id) = id.as_i64() else { continue };
                 let p = shared.pending.lock().remove(&id);

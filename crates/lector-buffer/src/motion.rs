@@ -2,11 +2,12 @@
 
 use lector_text::Bias;
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, OccurrenceSession};
 use crate::selection::Selection;
 use crate::text_util::{
-    col_chars, identifier_range_at, leading_ws_len, next_grapheme, offset_at_col, prev_grapheme,
-    row_end_with_eol, row_of, row_start, word_left, word_range_at, word_right,
+    clip_grapheme, col_chars, identifier_range_at, is_word_char, leading_ws_len, next_grapheme,
+    offset_at_col, prev_grapheme, row_end_with_eol, row_of, row_start, word_left, word_range_at,
+    word_right,
 };
 use crate::Motion;
 
@@ -162,10 +163,21 @@ impl Buffer {
         }]);
     }
 
-    /// Ctrl+D. If a selection is empty, selects the word under each caret.
-    /// Otherwise adds the next occurrence (case-sensitive, wrapping, skipping
-    /// ones that are already selected) of the newest selection's text.
-    /// Returns whether the selections changed.
+    /// How the next occurrence of the newest selection is matched: a session
+    /// started from a caret (word under the caret) keeps matching whole words,
+    /// a selection that was made by hand matches as a plain substring.
+    fn whole_word_session(&self, query: &str) -> bool {
+        self.occurrence
+            .as_ref()
+            .is_some_and(|o| o.version == self.text.version() && o.query == query)
+    }
+
+    /// Ctrl+D. If a selection is empty, selects the word under each such
+    /// caret. Otherwise adds the next occurrence (case-sensitive, wrapping,
+    /// skipping ones that are already selected) of the newest selection's
+    /// text: whole words only when the session started from a caret, any
+    /// substring when it started from a selection. Returns whether the
+    /// selections changed.
     pub fn select_next_occurrence(&mut self) -> bool {
         self.history.break_coalescing();
         if self.sels.iter().any(|s| s.is_empty()) {
@@ -193,6 +205,11 @@ impl Buffer {
                 .collect();
             if changed {
                 self.install_selections(out);
+                let newest = self.newest_selection();
+                self.occurrence = Some(OccurrenceSession {
+                    version: self.text.version(),
+                    query: self.text.text_for_range(newest.range()),
+                });
             }
             return changed;
         }
@@ -201,6 +218,7 @@ impl Buffer {
         if query.is_empty() {
             return false;
         }
+        let whole_word = self.whole_word_session(&query);
         let hay = self.text.to_string();
         let from = newest.range().end;
         let taken = |a: usize, b: usize| {
@@ -209,25 +227,15 @@ impl Buffer {
                 a < r.end && r.start < b
             })
         };
-        let mut found = None;
-        for (i, _) in hay[from..].match_indices(&query) {
-            let at = from + i;
-            if !taken(at, at + query.len()) {
-                found = Some(at);
-                break;
-            }
-        }
-        if found.is_none() {
-            for (at, _) in hay.match_indices(&query) {
-                if at >= from {
-                    break;
-                }
-                if !taken(at, at + query.len()) {
-                    found = Some(at);
-                    break;
-                }
-            }
-        }
+        // After the newest selection first, then wrapping around to the start.
+        let found = {
+            let matches = matches_of(&hay, &query, whole_word);
+            matches
+                .clone()
+                .filter(|&at| at >= from)
+                .chain(matches.filter(|&at| at < from))
+                .find(|&at| !taken(at, at + query.len()))
+        };
         let Some(at) = found else {
             return false;
         };
@@ -241,18 +249,29 @@ impl Buffer {
         });
         self.newest = id;
         self.install_selections(sels);
+        if whole_word {
+            // The session continues with the same query.
+            self.occurrence = Some(OccurrenceSession {
+                version: self.text.version(),
+                query,
+            });
+        }
         true
     }
 
-    /// Selects every occurrence of the newest selection's text (or of the word
-    /// under the caret when it is empty).
+    /// Selects every occurrence of the newest selection's text, or of the word
+    /// under the caret when it is empty (whole words only in that case and
+    /// when continuing a [`select_next_occurrence`](Buffer::select_next_occurrence)
+    /// session that started from a caret; otherwise any substring).
     pub fn select_all_occurrences(&mut self) {
         self.history.break_coalescing();
         let newest = self.newest_selection();
-        let range = if newest.is_empty() {
-            identifier_range_at(&self.text, newest.head)
+        let (range, whole_word) = if newest.is_empty() {
+            (identifier_range_at(&self.text, newest.head), true)
         } else {
-            newest.range()
+            let query = self.text.text_for_range(newest.range());
+            let whole_word = self.whole_word_session(&query);
+            (newest.range(), whole_word)
         };
         if range.is_empty() {
             return;
@@ -261,7 +280,7 @@ impl Buffer {
         let hay = self.text.to_string();
         let mut sels = Vec::new();
         let mut primary = None;
-        for (at, _) in hay.match_indices(&query) {
+        for at in matches_of(&hay, &query, whole_word) {
             let id = if at == range.start {
                 primary = Some(self.newest);
                 self.newest
@@ -282,6 +301,12 @@ impl Buffer {
             self.newest = sels.last().map_or(self.newest, |s| s.id);
         }
         self.install_selections(sels);
+        if whole_word {
+            self.occurrence = Some(OccurrenceSession {
+                version: self.text.version(),
+                query,
+            });
+        }
     }
 
     fn add_caret_vertical(&mut self, up: bool) {
@@ -332,9 +357,24 @@ impl Buffer {
         self.add_caret_vertical(false);
     }
 
-    /// Adds a caret at `offset` (alt-click); it becomes the newest.
+    /// Adds a caret at `offset` (alt-click); it becomes the newest. When a
+    /// caret already sits there it is removed instead (toggle), unless it is
+    /// the only selection.
     pub fn add_caret(&mut self, offset: usize) {
         self.history.break_coalescing();
+        let offset = clip_grapheme(&self.text, offset, Bias::Left);
+        if self.sels.len() > 1 {
+            if let Some(ix) = self
+                .sels
+                .iter()
+                .position(|s| s.is_empty() && s.head == offset)
+            {
+                let mut sels = self.sels.clone();
+                sels.remove(ix);
+                self.install_selections(sels);
+                return;
+            }
+        }
         let id = self.new_id();
         let mut sels = self.sels.clone();
         sels.push(Selection::caret(id, offset));
@@ -397,4 +437,23 @@ impl Buffer {
             }
         }
     }
+}
+
+/// Byte offsets of the non-overlapping matches of `query` in `hay`, in order;
+/// with `whole_word` only those not touching a word character on either side.
+fn matches_of<'a>(
+    hay: &'a str,
+    query: &'a str,
+    whole_word: bool,
+) -> impl Iterator<Item = usize> + Clone + 'a {
+    hay.match_indices(query)
+        .map(|(at, _)| at)
+        .filter(move |&at| {
+            !whole_word
+                || (!hay[..at].chars().next_back().is_some_and(is_word_char)
+                    && !hay[at + query.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(is_word_char))
+        })
 }

@@ -16,7 +16,7 @@ its own settings, session and review state under the platform data directory.
      └─ lector-ui ─────────────── GPUI shell, views, widgets
           └─ lector-workspace ─── UI-free app model (project, documents, review state, navigation)
                ├─ lector-git      gix read paths + git CLI (blame, line history)
-               ├─ lector-lsp      read-only LSP client
+               ├─ lector-lsp      LSP client (navigation, diagnostics, edits as data)
                ├─ lector-search   walker, fuzzy picker (nucleo), project grep
                ├─ lector-syntax   tree-sitter registry, highlights, outline, folds, tags
                ├─ lector-diff     line diff (imara-diff), word refine, split/unified rows
@@ -111,6 +111,7 @@ impl Rope {
     pub fn slice(&self, range: Range<usize>) -> Rope; pub fn text_for_range(&self, range) -> String;
     pub fn chars_at(&self, offset) -> impl Iterator<Item = char>; pub fn reversed_chars_at(&self, offset) -> ...;
     pub fn replace(&mut self, range: Range<usize>, text: &str);   // for future editing
+    pub fn apply_edits<S: AsRef<str>>(&mut self, edits: &[(Range<usize>, S)]);  // many edits at once, see below
     pub fn to_string(&self) -> String;   // via Display
     pub fn version(&self) -> u64;        // see Text::version
     // + push, append, byte_at, clip_point, max_point_utf16, text_summary_for_range,
@@ -135,6 +136,15 @@ impl Text {
     pub fn replace(&mut self, range: Range<usize>, text: &str);  // Mapped -> converted to Rope first
 }
 ```
+*`Rope::apply_edits`* (additive, v0.3 polish): `edits` are sorted, non-overlapping `(range, text)` pairs against the current text
+(offsets clamped and clipped to char boundaries; an overlapping edit starts at the previous edit's end; an empty list leaves
+`version` unchanged). Equivalent to applying them back to front with `replace`, but `O(edits + touched chunks)` instead of
+`O(edits x log n)` with a large constant. Two strategies, both producing a balanced tree and sharing untouched chunks with the
+old rope: a forward cursor that slices the gaps between edits (`apply_edits_by_splicing`, sparse edits), and, when there are
+at least 8 edits and at most one per 256 KiB of text, a rebuild of only the chunks the edits touch with their known summaries,
+reusing every other leaf (`apply_edits_by_leaves`). Proptests (`rope::tests::apply_edits_matches_model`,
+`tests/model.rs::rope_apply_edits_matches_sequential_replace`) compare both strategies with sequential `replace`.
+
 Line semantics (Rope and MappedText): rows split on `'\n'`; `line_range`/`line_len`/`line`
 exclude a `'\r'` directly before the `'\n'`; `Point` columns are raw bytes (the `'\r'` is
 addressable); out-of-range columns clip to the row's `'\n'`, rows past the end clip to
@@ -273,6 +283,8 @@ pub enum SearchEvent { File(FileMatches), Done { files_searched: usize, matches:
 pub fn search_project(root: &Path, query: &SearchQuery, walk: &WalkOptions, cancel: &CancelToken,
                       sink: impl Fn(SearchEvent) + Send + Sync) -> Result<()>;
 pub fn find_in_text(text: &str, query: &SearchQuery) -> Result<Vec<Range<usize>>>;   // in-file find
+pub fn replacements_in_text(text: &str, query: &SearchQuery, replacement: &str)
+    -> Result<Vec<(Range<usize>, String)>>;   // same matches + replacement; regex: `$1`/`${name}` expand, `$$` = `$`
 ```
 Notes (as implemented): `Result<T>` = `Result<T, SearchError>` (`SearchError::Pattern(String)`).
 `WalkOptions::hidden = true` means *include* hidden files (`.git` is always skipped); `git_ignore` also works
@@ -395,6 +407,53 @@ pub enum SymbolKind { File, Module, Namespace, Package, Class, Method, Property,
 // `writes_to_project(name)` (jdtls, kotlin-language-server, sourcekit-lsp, csharp-ls) are only started by
 // lector-workspace when `lsp.servers.<name>.enabled = true`. `workspace/applyEdit` is never honored.
 ```
+**Editing features (v0.3, as implemented).** The crate stays runtime-agnostic and never writes files: edits are
+returned as plain data and applied to buffers by the UI (write policy). Client capabilities: positionEncoding utf-16,
+`workspace.applyEdit`, `workspaceEdit { documentChanges: true, resourceOperations: [] }`, publishDiagnostics
+(relatedInformation, tags, versionSupport), formatting / rangeFormatting, rename with `prepareSupport`, codeAction
+literals with kinds + `isPreferred` / `disabled` / `resolveSupport { properties: ["edit"] }`, executeCommand.
+```rust
+pub struct TextEdit { pub range: Range<PointUtf16>, pub new_text: String }
+pub struct WorkspaceEdit { pub changes: Vec<(PathBuf, Vec<TextEdit>)>,   // file order as sent; a file appears once
+                           pub versions: Vec<(PathBuf, i32)> }            // documentChanges versions (non-null)
+  // version_for(path), file_count(), is_empty(); file operations (create/rename/delete) are a Protocol error
+pub enum DiagnosticSeverity { Error, Warning, Information, Hint }   pub enum DiagnosticTag { Unnecessary, Deprecated }
+pub struct Diagnostic { pub range, pub severity, pub message: String, pub source: Option<String>, pub code: Option<String>,
+                        pub tags: Vec<DiagnosticTag>, pub related: Vec<(Location, String)> }
+pub struct DocumentDiagnostics { pub path, pub server: String, pub version: Option<i32>, pub tag: Option<u64>, pub diagnostics }
+pub struct Command { pub title, pub command: String, pub arguments: Vec<serde_json::Value> }
+pub struct CodeAction { pub title, pub kind: Option<String>, pub is_preferred: bool, pub disabled_reason: Option<String>,
+                        pub edit: Option<WorkspaceEdit>, pub command: Option<Command>, pub diagnostics: Vec<Diagnostic>,
+                        pub raw: serde_json::Value /* sent back for resolve */ }   // is_quick_fix()
+pub struct PrepareRename { pub range: Option<Range<PointUtf16>> /* None: caller picks the word */, pub placeholder: Option<String> }
+pub struct FormattingOptions { pub tab_size: u32, pub insert_spaces: bool }
+pub struct ServerCapabilities { hover, definition, references, formatting, range_formatting, rename, prepare_rename,
+                                code_actions, code_action_resolve: bool, commands: Vec<String> }
+pub struct DocumentState { pub version: i32, pub tag: Option<u64> }
+impl LspManager {
+    pub fn open_document_tagged(&self, path, language, text, tag: u64);   // tag = caller's text version (UI: rope version)
+    pub fn document_state(&self, path) -> Option<DocumentState>;          // version + tag of the last synced text
+    pub fn capabilities(&self, path) -> Option<ServerCapabilities>;       // running server of `path`; None while starting
+    pub fn server_capabilities(&self, name) -> Option<ServerCapabilities>;
+    pub fn diagnostics(&self, path) -> Option<DocumentDiagnostics>;  pub fn all_diagnostics(&self) -> Vec<DocumentDiagnostics>;
+    pub fn on_diagnostics(&self, f: impl Fn(&Path) + Send + Sync);        // reader thread; also on close / server exit (cleared)
+    pub fn set_apply_edit_handler(&self, f: impl Fn(ApplyEditRequest) + Send + Sync);
+    // futures (Send + 'static); Ok(empty / None) without a server:
+    pub fn formatting(&self, path, FormattingOptions) -> Result<Vec<TextEdit>>;
+    pub fn range_formatting(&self, path, Range<PointUtf16>, FormattingOptions) -> Result<Vec<TextEdit>>;
+    pub fn code_actions(&self, path, Range<PointUtf16>, automatic: bool) -> Result<Vec<CodeAction>>; // overlapping diagnostics as context
+    pub fn resolve_code_action(&self, path, CodeAction) -> Result<CodeAction>;   // codeAction/resolve if supported and no edit
+    pub fn execute_command(&self, path, &Command) -> Result<()>;                 // edits arrive as workspace/applyEdit
+    pub fn prepare_rename(&self, path, PointUtf16) -> Result<Option<PrepareRename>>;
+    pub fn rename(&self, path, PointUtf16, new_name: &str) -> Result<Option<WorkspaceEdit>>;
+}
+pub struct ApplyEditRequest { pub server: String, pub label: Option<String>, pub edit: WorkspaceEdit, .. }
+impl ApplyEditRequest { pub fn respond(self, applied: bool, failure_reason: Option<String>); }  // drop = applied:false
+```
+Diagnostics are stored per document with the LSP `version` they were published for and the caller's `tag` of the text
+with that version (`None` when they refer to an older text); without a handler `workspace/applyEdit` is answered
+`applied: false`. Tests: `tests/editing.rs` against `tests/fixtures/fake_lsp.py --editing` (diagnostics, formatting,
+code actions + resolve + commands → applyEdit, prepare/rename across files) and an ignored real-`pylsp` test.
 
 ### lector-fs
 ```rust
@@ -670,6 +729,38 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
   * Workspace actions (`Workspace::register_action`, so menus and the palette find handlers): `git::{Stage, Unstage,
     DiscardChanges}` (active file), `StageAll`, `UnstageAll`, `DiscardAll` (confirmed), `Refresh`, `FocusCommitMessage`
     (shows the Changes panel), `Commit`, `ToggleAmend`. Focused list / editor / diff handlers run first.
+* **Merge conflicts (v0.3)** — `GitStore::conflicts: Arc<ConflictState>` refreshes with HEAD/status.
+  * `inline_conflicts`: `InlineConflicts` (in `GitViews::conflicts`) attaches a `FileConflicts` tracker to every file
+    view (scanned on `ActiveItemChanged` / `FilesChanged`). It re-parses the buffer 80 ms after edits (background) and
+    sets layer `"git-conflicts"`: tinted Current (success color) / base (grey) / Incoming (info color) rows, stronger on
+    marker lines, and an action bar after each `<<<<<<<` line — Accept Current | Accept Incoming | Accept Both |
+    Compare (`CompareItem` of the two sides) | Open Merge Editor. Resolutions are `DocumentModel::apply_edits` (one
+    undo step, every tab of the file follows; nothing is written until the user saves). Read-only documents get tints only.
+  * `merge_editor::MergeEditor` (pane item `MergeItem`, key `merge:<rel>`, session `TabKind::Other{"merge:<rel>"}`,
+    key context `MergeEditor`): header (file, conflict kind, operation, "2 of 5 unresolved", prev/next, Base toggle,
+    All Current… / All Incoming… with confirmation, **Mark Resolved**), Current | [Base] | Incoming panes on top
+    (read-only `RevisionSource`s built from `side_view` of the first parse, highlighted, conflicts tinted — focused one
+    stronger, resolved ones grey with a "Resolved" pill — and Accept buttons placed after the first short row of each
+    conflict), Result below = a `FileView` of the working file (shared `DocumentModel`; its tracker is registered so the
+    inline bar shows without "Open Merge Editor"). `MergeItem::file_view()` is the Result, so Save, dirty dots and close
+    prompts work. Conflicts are followed across edits with `match_regions`; accepting advances to the next unresolved
+    one. Scrolling is synchronized piecewise through the conflicts' row spans (the scrolled pane drives for 250 ms).
+    The Base pane shows diff3 sections when every conflict has one, else the `:1` stage (whole file, untinted).
+    Mark Resolved: markers or marker problems left → confirm "Resolve Anyway"; then `FileView::save` (normal save path,
+    disk-conflict prompt included) → `GitOp::Stage` → opens the next conflicted path (sorted, wrapping) and closes
+    the tab, or toasts and shows the Changes panel when none is left. Modify/delete conflicts show Keep File (stage)
+    / Delete File… (confirmed; deletes and stages).
+  * `operation_banner::OperationBanner` at the top of the Changes panel: "Merging feature → main" / "Rebasing feature
+    onto main (3/7)" / "Cherry-picking abc1234 …", "2 conflicts · resolve, then Continue", **Continue** (disabled
+    while conflicts remain; merge → commit composer with `MERGE_MSG` prefilled once per merge — the composer is in
+    merge mode, so a merge commit needs nothing staged; rebase / cherry-pick / revert / am → `GitOp::Continue`) and
+    **Abort…** (confirmation naming the branch, what is discarded and the conflicted files → `GitOp::Abort`). The
+    composer refuses to commit while conflicts remain. Conflicts section rows open the merge editor (context menu:
+    Open Merge Editor, Mark Resolved (Stage), ...).
+  * Workspace actions (`conflict_actions`): `git::{OpenMergeEditor (active file if conflicted / has markers, else the
+    first conflicted path), NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth (conflict at the cursor),
+    AcceptAllOurs, AcceptAllTheirs (confirmed), MarkResolved (save + stage the active file), ContinueOperation,
+    AbortOperation}`; the merge editor handles the same actions itself when focused.
 
 ### lector-buffer (v0.3, UI-free editing model; no GPUI, no tokio)
 ```rust
@@ -679,7 +770,8 @@ impl Selection { pub fn range(&self) -> Range<usize>; pub fn is_empty(&self) -> 
 pub enum IndentStyle { Tabs, Spaces(u32) }
 pub struct CommentTokens { pub line: Option<String>, pub block: Option<(String, String)> }
 pub struct BufferOptions { pub tab_size: u32, pub indent: IndentStyle, pub auto_indent: bool,
-                           pub auto_close_brackets: bool, pub comment: CommentTokens }
+                           pub auto_close_brackets: bool, pub indent_after_colon: bool /* default false */,
+                           pub comment: CommentTokens }
 pub struct TextEdit { pub range: Range<usize>, pub new_text: String }   // offsets in the text *before* the edit batch
 pub struct EditDelta { pub start_byte: usize, pub old_end_byte: usize, pub new_end_byte: usize,
                        pub start: Point, pub old_end: Point, pub new_end: Point }  // tree-sitter InputEdit / LSP change shape
@@ -699,7 +791,7 @@ impl Buffer {
     // same kind, adjacent) — see `begin_transaction`/`end_transaction` for explicit grouping
     pub fn insert(&mut self, text: &str) -> Transaction;          // typed text: auto-close brackets/quotes, type-over closers
     pub fn paste(&mut self, text: &str) -> Transaction;           // distributes lines across carets when counts match
-    pub fn newline(&mut self) -> Transaction;                     // auto-indent (+1 level after `{ ( [ :` and between pairs)
+    pub fn newline(&mut self) -> Transaction;                     // auto-indent (+1 level after `{ ( [`, after `:` only with `indent_after_colon`, and between pairs)
     pub fn newline_below(&mut self) -> Transaction; pub fn newline_above(&mut self) -> Transaction;
     pub fn backspace(&mut self) -> Transaction;                   // deletes a whole indent unit in leading whitespace, pairs `(|)`
     pub fn delete(&mut self) -> Transaction;
@@ -720,10 +812,10 @@ impl Buffer {
     pub fn move_carets(&mut self, motion: Motion, extend: bool);  // collapses non-empty selections on plain Left/Right
     pub fn select_all(&mut self); pub fn select_line(&mut self);  // repeated: extends
     pub fn select_word_at(&mut self, offset: usize);
-    pub fn select_next_occurrence(&mut self) -> bool;             // first call selects word under caret; wraps
+    pub fn select_next_occurrence(&mut self) -> bool;             // from a caret: whole words, case-sensitive; from a selection: substring; wraps
     pub fn select_all_occurrences(&mut self);
     pub fn add_caret_above(&mut self); pub fn add_caret_below(&mut self);
-    pub fn add_caret(&mut self, offset: usize);                    // alt-click
+    pub fn add_caret(&mut self, offset: usize);                    // alt-click; on an existing caret removes it (never the last one)
     pub fn split_selection_into_lines(&mut self);
     pub fn collapse_selections(&mut self);                        // Escape: keep the newest caret only
 }
@@ -750,7 +842,9 @@ are coordinates in the text *before* the call, `new_end = start + extent(inserte
 `SyntaxEdit` / LSP `contentChanges` sequence (convert `start`/`old_end` to UTF-16 against the pre-edit text). `undo()` returns the
 inverse of the step's deltas (reversed order, `old_end`/`new_end` swapped) and `redo()` the recorded ones; for a step made of several
 calls (typing run, explicit transaction) these are sequential, not descending-by-offset, but still valid in the listed order.
-Selection-only calls change no text and return no deltas. A call that replaces a selection by identical text is still an edit.
+Selection-only calls change no text and return no deltas. A call that replaces every selection by identical text (paste or
+`insert` of the selected text) is not an edit: no deltas, no undo step, the dirty flag is untouched; selections still move as if it
+had been applied.
 
 *Extra public API* (additive): `Buffer::{newest_selection, selected_text, can_undo, can_redo, undo_depth, set_coalesce_window,
 break_undo_group}`, `Selection::caret`, `Transaction::is_empty`, `LineEnding::as_str`, `Default` for `BufferOptions` /
@@ -776,16 +870,26 @@ line ops, any `move_carets`/`set_*`/`select_*` call) breaks the run; typing over
 
 *Typing.* `insert("\n")` is `newline()`. Auto-close only for a single typed char and `auto_close_brackets`: `([{` close before
 end of text, whitespace or one of `)]};:.,=>`; quotes `"'` and backtick also need a non-word, non-backslash char before them, an even
-number of that quote earlier on the line and a different char before; a closer or quote equal to the next char is typed over; with a
+number of that quote earlier on the line and a different char before; a closer or quote is typed over only when Lector inserted it
+and the caret has not left the `start..=end` region of that insertion since (regions are mapped through edits, dropped on undo,
+redo and `replace_all`, and pruned as soon as no caret is inside), so `(|)` typed by the user and then `)` gives `()|)`; with a
 non-empty selection `([{"'` and backtick surround it and keep the inner selection. `newline` copies the indent up to the caret, adds one
-unit after `{ ( [ :` (last non-blank char before the caret) and expands `{|}`, `(|)`, `[|]` to three lines; it uses the document's
+unit after `{ ( [` (last non-blank char before the caret; `:` too when `BufferOptions::indent_after_colon`, which the UI sets
+for Python, YAML, Nim, CoffeeScript and Starlark from the language id in `editor/model.rs::buffer_options`) and expands `{|}`, `(|)`, `[|]` to three lines; it uses the document's
 line ending (the first line break; `\n` if none). `backspace`: pairs `(|)` `"|"` vanish together; in leading whitespace with
 `Spaces(n)` it deletes back to the previous multiple of `n` columns (tabs count `tab_size`); otherwise one grapheme.
 
 *Words* (word motions, `delete_word_*`, double-click, occurrences): UAX #29 segments, with `a.b` / `can't` additionally split at
 punctuation, runs of whitespace merged, runs of punctuation merged. `WordLeft` skips blanks then one word/punctuation run;
 `WordRight` skips blanks then one run; at line edges they move to the neighbouring line. `select_next_occurrence` /
-`select_all_occurrences` only start from a real word (not whitespace/punctuation).
+`select_all_occurrences` only start from a real word (not whitespace/punctuation). From an empty selection they match whole
+words case-sensitively (`foo` does not select inside `foobar` or `Foo`); once the selection is non-empty (double-click, or
+after `select_next_occurrence`) matches are plain substrings. The whole-word mode lasts while the text version and the newest
+selection's text are unchanged. Skipping selected matches and wrap-around are unchanged.
+
+*Electric outdent.* Typing `}` `]` or `)` on a line that is only whitespace (caret at its end, `auto_indent` on, no selection)
+re-indents the line to the indent of the line holding the matching opener (backward scan over the same bracket kind, at most
+200 000 bytes); with no opener it drops one indent unit.
 
 *Lines.* Row groups: a non-empty multi-row selection ending at column 0 does not include that row. `indent` skips empty lines in
 multi-line groups and aligns `Spaces(n)` to the next multiple; `outdent` removes a tab or up to one level of spaces. `toggle_comment`
@@ -817,9 +921,10 @@ back to a full parse. Measured: single-char edit in an 11k-line Rust file, media
 Property tests assert the incremental tree equals a fresh parse (s-expression) for valid programs.
 
 *Performance* (criterion, `cargo bench -p lector-buffer`, bench profile, 2-core shared box, medians): insert one char in a
-100k-line buffer 34 us (46 us when it starts its own undo step), newline 55 us; typing one char with 1000 carets 1.0 ms
-(carets on nearby lines), backspace 1.9 ms, but ~14 ms when the 1000 carets are spread over a 100k-line file (rope splicing is
-`O(carets x log n)` with a large constant; a batch `Rope::splice` in lector-text would fix it); moving 1000 carets 0.8 ms;
+100k-line buffer 34 us (46 us when it starts its own undo step), newline 55 us; typing one char with 1000 carets 0.76 ms
+(carets on nearby lines; was 1.0), backspace 1.9 ms (not re-measured), and 2.6 ms when the 1000 carets are spread over a 100k-line
+file (was 10.4 ms before, ~14 ms in an earlier measurement, with per-edit `Rope::replace`; `Buffer` now builds the new text with one `Rope::apply_edits`, and `slice` keeps the chunk summaries
+it already knows); moving 1000 carets 0.8 ms;
 undo+redo with 1000 carets 9 us; `select_all_occurrences` with 10k matches 0.9 ms, `select_next_occurrence` 63 us, typing
 with 10k carets 2.3 ms.
 
@@ -875,6 +980,61 @@ amend, sign-off, hooks, identity, index.lock, renames), `crates/lector-workspace
 discard round trips checked with `git diff --cached`, line selections, file edges, staged+unstaged in one file, missing
 final newline, CRLF, autocrlf, deleted/added files), proptests in `lector_diff::patch`.
 
+### Merge conflicts (v0.3) — lector-git, lector-workspace — as implemented
+```rust
+// lector-git (read-only: .git state files + index stages through gix)
+impl Repo {
+    pub fn operation(&self) -> Result<Option<RepoOperation>>;     // rebase-merge/, rebase-apply/ (+applying = am),
+                                                                  // MERGE_HEAD, CHERRY_PICK_HEAD, REVERT_HEAD (in that order)
+    pub fn conflicts(&self) -> Result<Vec<ConflictEntry>>;        // index entries with stages 1..3, sorted by path
+    pub fn conflict_stage(&self, path: &str, stage: ConflictStage) -> Result<Option<Vec<u8>>>;  // `git show :n:path`
+    pub fn merge_message(&self) -> Result<Option<String>>;        // .git/MERGE_MSG without `#` lines
+}
+pub enum OperationKind { Merge, Rebase, CherryPick, Revert, Am }  // command() "merge"…, verb() "Merging"…
+pub struct RepoOperation { pub kind, pub interactive: bool, pub head_name: Option<String> /*branch changed / rebased*/,
+    pub incoming: Option<String> /*"feature", "abc1234 Subject", rebase onto name or short sha*/, pub incoming_oid: Option<Oid>,
+    pub step: Option<(u32, u32)> /*rebase/am progress*/, pub message: Option<String> /*MERGE_MSG*/ }  // describe():
+    // "Merging feature into main", "Rebasing feature onto main (3/7)", "Cherry-picking abc1234 Fix parser"
+pub enum ConflictStage { Base = 1, Ours = 2, Theirs = 3 }
+pub struct ConflictEntry { pub path: String, pub base/ours/theirs: Option<Oid>, pub kind: ConflictKind }
+pub enum ConflictKind { BothModified, BothAdded, DeletedByUs, DeletedByThem, AddedByUs, AddedByThem, BothDeleted } // label(), has_markers()
+// lector-git write module (git CLI, explicit user actions only; `GIT_EDITOR=true`, never blocks on an editor)
+impl Repo {
+    pub fn continue_operation(&self, kind: OperationKind) -> Result<()>;   // git <op> --continue (fails while unmerged)
+    pub fn abort_operation(&self, kind: OperationKind) -> Result<()>;      // git <op> --abort (DISCARDS resolutions; confirm first)
+    pub fn skip_operation_step(&self, kind: OperationKind) -> Result<()>;  // git <op> --skip (not for merges)
+}
+// lector-workspace::conflicts (UI-free; re-exports the types above)
+pub struct ConflictState { pub operation: Option<RepoOperation>, pub entries: Vec<ConflictEntry> }  // is_clean(), entry(path)
+pub fn conflict_state(repo: &Repo) -> Result<ConflictState>;
+pub fn stage_text(repo: &Repo, path: &str, stage: ConflictStage) -> Result<Option<String>>;  // None: absent or binary
+pub fn has_conflict_markers(text: &str) -> bool;
+pub fn parse_conflicts(text: &str) -> ConflictParse;   // { regions: Vec<ConflictRegion>, problems: Vec<MarkerProblem> }
+pub struct ConflictRegion { pub range, pub ours, pub base: Option<_>, pub theirs: Range<usize> /*bytes*/,
+    pub ours_label, pub base_label: Option<String>, pub theirs_label: String,
+    pub start_row, pub base_row: Option<u32>, pub separator_row, pub end_row: u32 }  // ours/base/theirs_rows(), rows(), side(text, Side), contents(text)
+pub enum Side { Ours, Theirs, Base }
+pub enum Resolution { Ours, Theirs, OursThenTheirs, TheirsThenOurs, Base }
+pub fn resolve(text: &str, region: &ConflictRegion, r: Resolution) -> lector_buffer::TextEdit;
+pub fn resolve_all(text: &str, regions: &[ConflictRegion], r: Resolution) -> Vec<TextEdit>;
+pub fn side_view(text: &str, parse: &ConflictParse, side: Side) -> SideView;  // { text, rows: Vec<Range<u32>> per conflict, complete }
+pub fn match_regions(original: &[ConflictContents], current: &[ConflictContents]) -> Vec<Option<usize>>;  // None = resolved
+```
+Markers: exactly 7 marker chars then end of line or a space + label (`=======` takes none); `\r\n` is handled and kept
+(ranges include terminators). The diff3 / zdiff3 `|||||||` base section is optional per conflict. Nothing panics:
+nested `<<<<<<<` abandons the open conflict (`Unterminated` + `Nested`), `>>>>>>>` before `=======` is
+`MissingSeparator`, stray `>>>>>>>` / `|||||||` are `Stray`; a lone `=======` outside a conflict is content
+(Markdown/RST underlines). `resolved_text` drops the final line break when the `>>>>>>>` line had none (EOF).
+`match_regions` aligns identical contents by LCS, then pairs edited-but-still-conflicted regions by position.
+`ConflictParse::{region_at_row, next_after(row, wrap), prev_before(row, wrap)}`. Modern git marks plain rebases
+`interactive` too (merge backend), exactly as `git status` reports them.
+Tests: `crates/lector-git/tests/conflict.rs` (merge with both-modified / add-add / modify-delete stages, MERGE_MSG,
+continue refused while conflicted then a 2-parent merge commit, abort, rebase progress 2/3 + continue + abort,
+interactive flag, cherry-pick continue, revert abort), `crates/lector-workspace/tests/conflicts.rs` (merge / diff3 /
+zdiff3 working files resolve to exactly stage :2 / :3 / :1, add/add, modify/delete, CRLF, and reading conflict
+state leaves the repository byte-for-byte unchanged), unit + proptests in `conflicts.rs` (generated conflicts with
+LF/CRLF round-trip through parse → resolve_all / side_view; arbitrary marker soup never panics).
+
 ### lector-ui (extension seams)
 ```rust
 // Data in through traits; integration plugs the core crates in here.
@@ -908,6 +1068,22 @@ pub trait PaneItem { fn title; fn icon; fn path; fn view(&self) -> AnyView; fn f
 // text_area::{Newline, MoveUp/Down, SelectUp/Down, PageUp/Down, Word*, DeleteWordLeft, *ToStart/End, Undo, Redo}.
 // Keymap: keymap::bind_keymap(cx, &[KeySpec { keys, action, context }]) (same shape as lector-config).
 ```
+Owner-keyed overlay layers on `CodeView` (v0.3, `code_view::layers`; used by git conflicts, open to LSP & co.):
+```rust
+pub struct RowBackground { pub rows: Range<u32>, pub color: Hsla, pub edge: Option<Hsla> /*2 px left marker*/ }
+pub enum WidgetAnchor { AfterText /*2 cols after the row's text, clamped to the right edge*/, Right }
+pub struct RowWidget { pub row: u32, pub anchor: WidgetAnchor, pub render: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement> }
+impl CodeView {
+    pub fn set_row_backgrounds(&mut self, owner: &'static str, v: Vec<RowBackground>, cx);  // empty = remove the layer
+    pub fn set_row_widgets(&mut self, owner: &'static str, v: Vec<RowWidget>, cx);
+    pub fn has_layer(&self, owner: &'static str) -> bool;
+    pub fn row_top(&self, row: u32) -> Option<Pixels>;   // y of a row in the last frame, relative to the view
+}
+```
+Backgrounds paint under the text (above the source's own row decorations), full text width. Widgets are real GPUI
+elements, laid out in the code element's prepaint *after* its hitboxes and painted last, clipped to the text area, so
+they get clicks first (make them `.occlude()`); widgets on rows under the sticky header or folded away are skipped.
+
 Extension seams for other UI crates (e.g. `lector-ui-git`), all on `views::Workspace`:
 ```rust
 // Hook in from your crate's init(cx), called by the binary before windows open:
@@ -1045,6 +1221,72 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   `editor::document_for_path(path, cx)`, `editor::open_documents(cx)`. Context-menu enablement of Format / Rename /
   Code Actions: `code_view::LanguageFeatureProvider::set(cx, |path, cx| LanguageFeatures { format, rename, code_actions })`
   (all disabled by default).
+* **Editing polish (v0.3).**
+  * *Markdown preview* renders the live buffer: `MarkdownPreview::follow_document(model, cx)` re-parses on
+    `DocumentEvent::SourceChanged` 250 ms after typing stops (unsaved text included, nothing written).
+  * *File deleted on disk*: `DocumentModel::is_deleted()` (set by `reload_from_disk`, announced with
+    `ConflictChanged`). A clean tab stays open with a struck-through, faint title (`PaneItem::is_deleted`,
+    `Tab::deleted`); a dirty tab also gets a "This file was deleted on disk" banner with Save (recreates the file, no
+    conflict prompt) and Close (`FileViewEvent::CloseRequested`, asks about unsaved changes). Save on a deleted
+    document writes it again, clean or dirty; the file coming back reloads a clean buffer and clears the mark.
+  * *Save As onto a path open in another tab*: asks "Replace it?" (Replace / Cancel); on Replace the other tab(s) close
+    (`FileViewEvent::CloseTabsOf(path)`, handled in `workspace/integration.rs`) and the file is overwritten. If that
+    document has unsaved changes, the user is told so and nothing happens.
+  * *Blame on a dirty buffer* (`lector_ui_git::blame`): a `BlameSession` per blamed view keeps blame of the file on disk and
+    the text it was computed for; on every edit (120 ms debounce) it line-diffs (`lector_diff`) that text against the buffer
+    and `remap_hunks` shifts unchanged lines with their commit and marks added or edited lines "Not committed yet". A save
+    (or reload) re-runs blame. Toggling blame off drops the session.
+  * *`workspace::ToggleMaximize` on Windows*: GPUI 0.2.2 only offers `Window::zoom_window` (`ShowWindow(SW_MAXIMIZE)`,
+    never restores) and `Window::resize` does not leave the maximized state, so an already maximized window is not
+    toggled; a toast points at the title bar's restore button / double-click (native). macOS and Linux toggle.
+  * *Find and replace* (`views/find_bar.rs`): the find modal has a chevron that shows a replace row (also
+    `editor::Find` again while the bar is open, `editor::FindReplace` = `cmd/ctrl-h`, which also opens the bar). Replace
+    (`editor::ReplaceNext`, `cmd/ctrl-shift-1`, Enter in the replace field) swaps the selected match, else the next one
+    after the caret, and selects the following match; Replace All (`editor::ReplaceAll`, `cmd/ctrl-alt-enter`) swaps every
+    match as one undo step. Both compute `lector_search::replacements_in_text` over the buffer text on a background
+    thread, then call `DocumentModel::apply_edits` if the buffer version is unchanged (else recompute). Regex mode expands
+    `$1` / `${name}`; otherwise the replacement is literal. Match highlighting searches the live buffer, not the possibly
+    lagging view source. Read-only tabs (no buffer, `set_read_only`, binary...) only search: no replace row, the actions do
+    nothing. Menu: Edit > Replace…, Replace Next, Replace All. `Workspace::find_bar(cx)` exposes the open bar.
+* **LSP editing features** (`lector_ui::lsp`, installed by `lector_ui::init` → `lsp::init`; see lector-lsp above):
+  * *Sync*: `DocumentModel` sends text with `open_document_tagged(.., rope.version())`; `lsp::sync_now(model, cx)` syncs
+    immediately before a request so the server sees the buffer text. Coordinates: `lsp::{offset_for_point, point_for_offset,
+    range_for_lsp, buffer_edits}` (UTF-16 ↔ bytes, clamped).
+  * *Diagnostics*: `lsp::DiagnosticsStore` (global entity; `global(cx)`, `entries(path)`, `all()`, `counts()`,
+    `published(path, Option<DocumentDiagnostics>, cx)`) keeps `DiagnosticEntry { range: bytes in the current text, severity,
+    message, source, code, tags }` for open documents. A publish is converted against the text whose version equals its tag
+    (history of the last 256 `(version, rope, transaction)` per document) and mapped forward through every later
+    `Transaction` (`diagnostics::map_range`: starts move with text inserted at them, ends don't grow); entries keep moving with
+    edits until the server republishes. Rendered through `CodeView::set_inline_marks(InlineMarks { underlines: Vec<Underline
+    { row, range, color, wavy }>, gutter_icons: Vec<GutterIcon { row, icon, color, clickable }>, scrollbar: Vec<(row, Hsla)> })`
+    (wavy error/warning, faint straight hints; theme `ui.error/warning/info/hint`; severity icons in the gutter's left margin;
+    `CodeView::on_gutter_icon_click(row)`), shown above the hover docs (`diagnostics::hover_markdown`), counted in the status
+    bar ("⊗ n ⚠ m", click → `workspace::ShowProblems`: the Problems tab, `lsp::problems::ProblemsItem`, item key
+    `lector:problems`, grouped by file, click jumps), navigated with `editor::NextDiagnostic` / `PrevDiagnostic` (F8 /
+    shift-F8, wrap, then shows the hover).
+  * *Format*: `editor::Format` → `formatting` (or `range_formatting` when there is a selection and the server supports it),
+    applied with `DocumentModel::apply_edits` (one undo step) only if the buffer did not change meanwhile.
+    `editor.format_on_save`: a before-save hook with `lsp::format::FORMAT_ON_SAVE_TIMEOUT` (2 s); on timeout/error the file is
+    saved unformatted and a toast says so.
+  * *Code actions*: `editor::CodeActions` → menu at the caret (`CodeView::show_overlay(view, position, Corner, ..)`, a generic
+    focused floating view closed on `DismissEvent`; it also dismisses the pointer hover): quick fixes first (preferred first and
+    selected — `ContextMenu::select_first`), other actions, then disabled ones with their reason (`ContextMenu::disabled_entry`).
+    Running one resolves it (`codeAction/resolve`), applies its edit, then `execute_command`. Lightbulb: 400 ms after the caret
+    rests (`FileViewEvent::CursorMoved`), an `automatic` request for the caret selection; shown on the caret row when an enabled
+    action exists and neither the row nor the text changed; clicking it opens the menu.
+  * *Rename*: `editor::Rename` (F2) → `prepare_rename` → `lsp::rename::RenameBox` over the symbol (placeholder selected; key
+    context `Picker`: Enter confirms, Escape cancels) → `rename` → workspace edit → toast "Renamed in N files".
+  * *Workspace edits* (`lsp::apply_workspace_edit(ws, WorkspaceEdit, window, cx) -> Task<Result<usize, String>>`, also for
+    server `workspace/applyEdit`): validated first, all or nothing — an open document whose synced tag is not its buffer
+    version, or whose versioned edit does not match the synced LSP version, rejects the whole edit. Open documents:
+    `DocumentModel::apply_edits` (one undo step each); other files: `Workspace::open_path_in_background(path)` (new tab via
+    `Pane::add_item_inactive`, not activated) and edited once loaded — dirty and unsaved for review (Save All saves them).
+  * *Enablement*: `LanguageFeatureProvider` reports format / rename / code actions from `LspManager::capabilities`; the LSP
+    status popover lists each running server's capabilities (`LspStatusPopover::set_capabilities`).
+  * Tests: `lsp::ui_tests` (edits to open + unopened files with one undo step each, atomic version rejection, diagnostics
+    mapped through edits + squiggles + hover + F8, and against the fake server: format undo, quick fix from server
+    diagnostics, rename across files). Known caveat: third-party pylsp plugins such as `pylsp-rope` create `.ropeproject/` in
+    the project when code actions are requested (outside Lector's control).
 * **Before-save hooks** (format on save): `editor::register_before_save(cx, |model: &Entity<DocumentModel>, cx| ->
   Option<Task<anyhow::Result<Vec<TextEdit>>>>)` (also `Workspace::register_before_save`). Hooks run in registration
   order; their edits apply only if the buffer did not change while the hook ran.
@@ -1095,7 +1337,7 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
   ShowChanges, ShowHistory, ShowBranches, SplitRight, SplitDown, CloseTab, ReopenClosedTab,
   NextTab, PrevTab, GoBack, GoForward, RevealActiveFile, OpenSettings, OpenKeymap,
   ReloadSettings, ZoomIn, ZoomOut, ZoomReset, ToggleAppearance, SelectTheme
-* `editor::` GoToLine, Find, FindNext, FindPrev, GoToDefinition, FindReferences, Hover,
+* `editor::` GoToLine, Find, FindNext, FindPrev, FindReplace, ReplaceNext, ReplaceAll, GoToDefinition, FindReferences, Hover,
   ToggleFold, FoldAll, UnfoldAll, Copy, SelectAll, CopyPath, CopyRelativePath, CopyPermalink,
   ToggleBlame, ToggleSoftWrap, ToggleMinimap, ToggleMarkdownPreview, ShowFileHistory,
   ShowLineHistory, NextChange, PrevChange, MoveUp, MoveDown, MoveLeft, MoveRight, PageUp,
@@ -1107,7 +1349,9 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
   (current branch vs its default base).
 * v0.2 ease of access (`workspace::`): OpenFile, OpenRecent, NewWindow, CloseFolder (window returns to the
   welcome state), CloseAllTabs, ShowWelcome, ShowKeybindings, OpenLogFile, OpenDocumentation, ReportIssue,
-  Minimize, ToggleMaximize, ToggleFullScreen, ShowAppMenu (Linux/Windows menu bar), SaveAll (v0.3).
+  Minimize, ToggleMaximize, ToggleFullScreen, ShowAppMenu (Linux/Windows menu bar), SaveAll (v0.3),
+  ShowProblems (v0.3, `cmd-shift-m`). v0.3 LSP `editor::`: Format, CodeActions, Rename, NextDiagnostic (`f8`),
+  PrevDiagnostic (`shift-f8`).
 * lector-ui additions (UI plumbing, also bindable): `workspace::` CloseOtherTabs, CloseTabsToRight,
   ToggleColorblindDiff, About; `editor::` MoveToLineStart, MoveToLineEnd, MoveWordLeft, MoveWordRight,
   SelectToLineStart, SelectToLineEnd, SelectWordLeft, SelectWordRight, SelectPageUp, SelectPageDown,
@@ -1116,6 +1360,9 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
   Cut, Copy, ShowCharacterPalette. Key contexts: `Workspace`, `CodeView`, `DiffView`, `Picker`,
   `TextInput`, `ContextMenu`, `TreeView`, `TextArea` (+ `TextInput`), `ChangesPanel` (file list),
   `CommitEditor` (commit composer), `ConfirmDialog`.
+* v0.3 merge conflicts `git::` OpenMergeEditor, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth,
+  AcceptAllOurs, AcceptAllTheirs, MarkResolved, ContinueOperation, AbortOperation (Git → Merge Conflicts menu).
+  Key context `MergeEditor`: `alt-1/2/3` accept current / incoming / both, `alt-n` / `alt-p` next / previous conflict.
 * v0.2 `text_area::` Newline, MoveUp, MoveDown, SelectUp, SelectDown, MoveToStart, MoveToEnd, SelectToStart,
   SelectToEnd, SelectToLineStart, SelectToLineEnd, WordLeft, WordRight, SelectWordLeft, SelectWordRight,
   DeleteWordLeft, Undo, Redo, PageUp, PageDown (bound in `TextArea`: enter, arrows, cmd-z / cmd-shift-z, ...).
@@ -1125,7 +1372,7 @@ file finder `cmd-p`, command palette `cmd-shift-p`, project symbols `cmd-t`, out
 `cmd-shift-o`, project search `cmd-shift-f`, sidebar `cmd-b`, files `cmd-shift-e`,
 changes `ctrl-shift-g`, history `ctrl-shift-h`, close tab `cmd-w`, reopen `cmd-shift-t`,
 next/prev tab `ctrl-tab`/`ctrl-shift-tab`, back/forward `ctrl--`/`ctrl-shift--`
-(Linux/Windows: `alt-left`/`alt-right`), go to line `ctrl-g`, find `cmd-f`, next/prev
+(Linux/Windows: `alt-left`/`alt-right`), go to line `ctrl-g`, find `cmd-f`, replace `cmd-h`, next/prev
 `cmd-g`/`cmd-shift-g` (Linux/Windows: `f3`/`shift-f3`), definition `f12`, references
 `shift-f12`, hover `cmd-k cmd-i`, fold/unfold `cmd-alt-[`/`cmd-alt-]`, soft wrap `alt-z`,
 blame `cmd-alt-b`, markdown preview `cmd-shift-v`, zoom `cmd-=`/`cmd--`/`cmd-0`,

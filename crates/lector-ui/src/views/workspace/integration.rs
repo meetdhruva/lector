@@ -514,6 +514,33 @@ impl Workspace {
         Some(view)
     }
 
+    /// The file view of `path` in any pane, or a new tab for it added to the
+    /// active pane without activating it (LSP edits to files that were not
+    /// open: they show up as dirty tabs for review).
+    pub fn open_path_in_background(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Entity<FileView> {
+        if let Some(view) = self
+            .all_file_views(cx)
+            .into_iter()
+            .find(|v| v.read(cx).path() == path.as_path())
+        {
+            return view;
+        }
+        let project = self.project.clone();
+        let view = cx.new(|cx| FileView::new(path, project, cx));
+        self.subscribe_file_view(&view, window, cx);
+        let item = Box::new(FileItem::new(view.clone(), cx));
+        self.active_pane
+            .update(cx, |pane, cx| pane.add_item_inactive(item, cx));
+        self.schedule_session_save(cx);
+        cx.notify();
+        view
+    }
+
     fn open_file_view(
         &mut self,
         path: PathBuf,
@@ -554,58 +581,88 @@ impl Workspace {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        let sub = cx.subscribe_in(view, window, |this, view, event: &FileViewEvent, _, cx| {
-            let active = this.active_file_view(cx).as_ref() == Some(view);
-            match event {
-                FileViewEvent::Loaded => {
-                    if active {
-                        let v = view.clone();
-                        this.integ
-                            .outline_panel
-                            .update(cx, |p, cx| p.set_file_view(Some(v), cx));
+        let sub = cx.subscribe_in(
+            view,
+            window,
+            |this, view, event: &FileViewEvent, win, cx| {
+                let active = this.active_file_view(cx).as_ref() == Some(view);
+                match event {
+                    FileViewEvent::CloseTabsOf(path) => {
+                        // Save As replaces `path`: its other (clean) tabs go away.
+                        for pane in this.center.panes() {
+                            for _ in 0..16 {
+                                let ix = pane.read(cx).items().position(|i| {
+                                    i.file_view().as_ref() != Some(view)
+                                        && i.path(cx).as_deref() == Some(path.as_path())
+                                });
+                                let Some(ix) = ix else { break };
+                                pane.update(cx, |p, cx| p.close(ix, win, cx));
+                            }
+                        }
                     }
-                    this.warm_up_lsp(view, cx);
-                }
-                FileViewEvent::CursorMoved => {
-                    if active {
-                        this.integ
-                            .outline_panel
-                            .update(cx, |p, cx| p.follow_cursor(cx));
-                        this.schedule_nav_record(cx);
+                    FileViewEvent::CloseRequested => {
+                        // Close the tab(s) of this view (asks about unsaved changes).
+                        for pane in this.center.panes() {
+                            let ix = pane
+                                .read(cx)
+                                .items()
+                                .position(|i| i.file_view().as_ref() == Some(view));
+                            if let Some(ix) = ix {
+                                pane.update(cx, |p, cx| p.close(ix, win, cx));
+                                break;
+                            }
+                        }
                     }
-                }
-                FileViewEvent::OutlineChanged => {
-                    if active {
-                        let v = view.clone();
-                        this.integ
-                            .outline_panel
-                            .update(cx, |p, cx| p.set_file_view(Some(v), cx));
+                    FileViewEvent::Loaded => {
+                        if active {
+                            let v = view.clone();
+                            this.integ
+                                .outline_panel
+                                .update(cx, |p, cx| p.set_file_view(Some(v), cx));
+                        }
+                        this.warm_up_lsp(view, cx);
                     }
-                }
-                FileViewEvent::StateChanged | FileViewEvent::PathChanged => {
-                    // Tabs show the dirty dot / lock: repaint the panes. An
-                    // edited preview tab becomes permanent (never replaced).
-                    let dirty = view.read(cx).is_dirty(cx);
-                    let path = view.read(cx).path().to_path_buf();
-                    for pane in this.center.panes() {
-                        pane.update(cx, |p, cx| {
-                            if dirty {
-                                if let Some(ix) = p.index_for_path(&path, cx) {
-                                    if p.is_preview(ix) {
-                                        p.pin(ix, cx);
+                    FileViewEvent::CursorMoved => {
+                        if active {
+                            this.integ
+                                .outline_panel
+                                .update(cx, |p, cx| p.follow_cursor(cx));
+                            this.schedule_nav_record(cx);
+                        }
+                    }
+                    FileViewEvent::OutlineChanged => {
+                        if active {
+                            let v = view.clone();
+                            this.integ
+                                .outline_panel
+                                .update(cx, |p, cx| p.set_file_view(Some(v), cx));
+                        }
+                    }
+                    FileViewEvent::StateChanged | FileViewEvent::PathChanged => {
+                        // Tabs show the dirty dot / lock: repaint the panes. An
+                        // edited preview tab becomes permanent (never replaced).
+                        let dirty = view.read(cx).is_dirty(cx);
+                        let path = view.read(cx).path().to_path_buf();
+                        for pane in this.center.panes() {
+                            pane.update(cx, |p, cx| {
+                                if dirty {
+                                    if let Some(ix) = p.index_for_path(&path, cx) {
+                                        if p.is_preview(ix) {
+                                            p.pin(ix, cx);
+                                        }
                                     }
                                 }
-                            }
-                            cx.notify()
-                        });
-                    }
-                    if *event == FileViewEvent::PathChanged {
-                        this.schedule_session_save(cx);
+                                cx.notify()
+                            });
+                        }
+                        if *event == FileViewEvent::PathChanged {
+                            this.schedule_session_save(cx);
+                        }
                     }
                 }
-            }
-            cx.notify();
-        });
+                cx.notify();
+            },
+        );
         self.integ.subscriptions.push(sub);
     }
 
@@ -627,7 +684,10 @@ impl Workspace {
         }
         let path = doc.path().to_path_buf();
         cx.background_executor()
-            .spawn(async move { lsp.open_document(&path, &lang.name, &text.to_string()) })
+            .spawn(async move {
+                let tag = text.version();
+                lsp.open_document_tagged(&path, &lang.name, &text.to_string(), tag)
+            })
             .detach();
     }
 
@@ -1104,7 +1164,11 @@ impl Workspace {
         let project = self.project.clone();
         let preview = cx.new(|cx| MarkdownPreview::new(path.clone(), project, cx));
         let code_view = view.read(cx).code_view().clone();
-        preview.update(cx, |p, cx| p.follow(code_view, cx));
+        let model = view.read(cx).model().clone();
+        preview.update(cx, |p, cx| {
+            p.follow(code_view, cx);
+            p.follow_document(model, cx);
+        });
         let sub = cx.subscribe_in(
             &preview,
             window,

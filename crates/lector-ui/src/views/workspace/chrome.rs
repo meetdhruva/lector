@@ -391,8 +391,10 @@ impl Workspace {
             )
             .on_action(cx.listener(|_, _: &ReportIssue, _, cx| cx.open_url(&issue_url())))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
-            .on_action(cx.listener(|_, _: &ToggleMaximize, window, _| {
-                window_controls::toggle_maximize(window)
+            .on_action(cx.listener(|this, _: &ToggleMaximize, window, cx| {
+                if !window_controls::toggle_maximize(window) {
+                    this.show_toast("Use the restore button in the title bar to restore", cx);
+                }
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| window.toggle_fullscreen()))
     }
@@ -427,7 +429,24 @@ impl Workspace {
         }
         let enabled = crate::settings::AppSettings::get(cx).lsp.enabled;
         let servers = self.project.lsp().map(|l| l.status()).unwrap_or_default();
-        let view = cx.new(|cx| LspStatusPopover::new(servers, enabled, cx));
+        let capabilities: Vec<_> = self
+            .project
+            .lsp()
+            .map(|lsp| {
+                servers
+                    .iter()
+                    .filter_map(|s| {
+                        lsp.server_capabilities(&s.name)
+                            .map(|c| (s.name.clone(), c))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let view = cx.new(|cx| {
+            let mut popover = LspStatusPopover::new(servers, enabled, cx);
+            popover.set_capabilities(capabilities);
+            popover
+        });
         self.lsp_popover.show(
             view,
             position,

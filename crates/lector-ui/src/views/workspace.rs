@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use super::command_palette::CommandPaletteDelegate;
+use super::find_bar::FindBar;
 use super::go_to_line::GoToLine;
 use super::pane::{new_pane, CodeItem, Pane, PaneEvent, PaneItem, PaneNode};
 use crate::editor::{FileView, Reveal};
@@ -408,6 +409,11 @@ impl Workspace {
         &self.active_pane
     }
 
+    /// Every pane of the editor area, in layout order.
+    pub fn panes(&self) -> Vec<Entity<Pane>> {
+        self.center.panes()
+    }
+
     /// Sets the branch shown in the title bar and, optionally, a richer
     /// status-bar label (e.g. "main ↑2 ↓1"); used by lector-ui-git.
     pub fn set_branch(
@@ -539,12 +545,67 @@ impl Workspace {
         });
     }
 
+    /// The open in-file find bar, if any.
+    pub fn find_bar(&self, cx: &App) -> Option<Entity<FindBar>> {
+        self.modal_layer.read(cx).active_modal::<FindBar>()
+    }
+
     fn find(&mut self, _: &editor::Find, window: &mut Window, cx: &mut Context<Self>) {
+        // Find again, with the bar open: show / hide its replace row.
+        if let Some(bar) = self.modal_layer.read(cx).active_modal::<FindBar>() {
+            bar.update(cx, |bar, cx| bar.toggle_replace(window, cx));
+            return;
+        }
+        self.open_find(false, window, cx);
+    }
+
+    fn find_replace(
+        &mut self,
+        _: &editor::FindReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(bar) = self.modal_layer.read(cx).active_modal::<FindBar>() {
+            bar.update(cx, |bar, cx| bar.open_replace(window, cx));
+            return;
+        }
+        self.open_find(true, window, cx);
+    }
+
+    /// `Replace Next` / `Replace All` from the menu or a key while the bar is
+    /// closed: open it on the replace row (it needs a query first).
+    fn replace_next(
+        &mut self,
+        _: &editor::ReplaceNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.modal_layer.read(cx).active_modal::<FindBar>() {
+            Some(bar) => bar.update(cx, |bar, cx| bar.replace_next(window, cx)),
+            None => self.open_find(true, window, cx),
+        }
+    }
+
+    fn replace_all(&mut self, _: &editor::ReplaceAll, window: &mut Window, cx: &mut Context<Self>) {
+        match self.modal_layer.read(cx).active_modal::<FindBar>() {
+            Some(bar) => bar.update(cx, |bar, cx| bar.replace_all(window, cx)),
+            None => self.open_find(true, window, cx),
+        }
+    }
+
+    fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.active_code_view(cx) else {
             return;
         };
+        let model = self
+            .active_file_view(cx)
+            .map(|file| file.read(cx).model().clone());
         self.toggle_modal(window, cx, move |window, cx| {
-            super::find_bar::FindBar::new(view, window, cx)
+            let mut bar = FindBar::new(view, model, replace, window, cx);
+            if replace {
+                bar.open_replace(window, cx);
+            }
+            bar
         });
     }
 
@@ -807,6 +868,7 @@ impl Workspace {
                     .flex_none()
                     .gap(px(2.))
                     .children(self.render_edit_status(cx))
+                    .children(crate::lsp::problems::status_item(self, cx))
                     .when_some(selection, |el, text| {
                         el.child(item("status-sel", text.into()))
                     })
@@ -1079,6 +1141,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::find_replace))
+            .on_action(cx.listener(Self::replace_next))
+            .on_action(cx.listener(Self::replace_all))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(
                 cx.listener(|this, _: &ShowFiles, w, cx| {

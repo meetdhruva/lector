@@ -182,6 +182,120 @@ pub(crate) fn floor_char_boundary(text: &str, index: usize) -> usize {
     index
 }
 
+/// Stretches of old text up to this many bytes are copied while batching edits
+/// (one big push is far cheaper than a tree operation each); longer ones are
+/// shared with the old rope.
+const COPY_GAP: usize = 512;
+/// The copy buffer of a batch is pushed into the new rope once this large.
+const FLUSH_AT: usize = 16 * 1024;
+/// A batch of edits rebuilds the touched leaves of the chunk tree (instead of
+/// splicing edit by edit) when `edits * LEAF_REBUILD_BYTES >= text length`:
+/// per edit, splicing costs about as much as walking this many bytes' worth of
+/// leaves.
+const LEAF_REBUILD_BYTES: usize = 256 * 1024;
+
+/// Moves `cursor` forward to the chunk containing `offset` and returns
+/// `offset` clipped down to a char boundary (`len` when past the last chunk).
+fn skip_to(cursor: &mut Cursor<'_, Chunk, usize>, offset: usize, len: usize) -> usize {
+    cursor.seek_forward(&offset, Bias::Right);
+    match cursor.item() {
+        Some(chunk) => {
+            let chunk_start = *cursor.start();
+            chunk_start + floor_char_boundary(chunk.as_str(), offset - chunk_start)
+        }
+        None => len,
+    }
+}
+
+/// Pushes the gathered text into the rope being built.
+fn flush_pending(out: &mut Rope, pending: &mut String) {
+    if !pending.is_empty() {
+        out.append(Rope::from_str(pending));
+        pending.clear();
+    }
+}
+
+/// Appends the old text `from..to` (`from` already on a char boundary, both
+/// at least the cursor's position) to the rope being built: short stretches
+/// are copied into `pending`, long ones are shared subtrees of the old rope
+/// (after flushing `pending` so order is kept). Leaves `cursor` on the chunk
+/// containing `to` and returns `to` clipped down to a char boundary.
+fn copy_gap(
+    cursor: &mut Cursor<'_, Chunk, usize>,
+    out: &mut Rope,
+    pending: &mut String,
+    from: usize,
+    to: usize,
+    len: usize,
+) -> usize {
+    cursor.seek_forward(&from, Bias::Right);
+    if to - from > COPY_GAP {
+        // Longer than any chunk: head piece, shared middle, tail piece.
+        let Some(chunk) = cursor.item() else {
+            return len;
+        };
+        pending.push_str(&chunk.as_str()[from - *cursor.start()..]);
+        flush_pending(out, pending);
+        cursor.next();
+        out.append(Rope::from_tree(cursor.slice(&to, Bias::Right)));
+        return match cursor.item() {
+            Some(chunk) => {
+                let chunk_start = *cursor.start();
+                let local_end = floor_char_boundary(chunk.as_str(), to - chunk_start);
+                pending.push_str(&chunk.as_str()[..local_end]);
+                chunk_start + local_end
+            }
+            None => len,
+        };
+    }
+    let mut from = from;
+    loop {
+        let Some(chunk) = cursor.item() else {
+            return len;
+        };
+        let chunk_start = *cursor.start();
+        let text = chunk.as_str();
+        let local_start = from - chunk_start;
+        if to <= chunk_start + text.len() {
+            let local_end = floor_char_boundary(text, to - chunk_start).max(local_start);
+            pending.push_str(&text[local_start..local_end]);
+            return chunk_start + local_end;
+        }
+        pending.push_str(&text[local_start..]);
+        from = chunk_start + text.len();
+        cursor.next();
+        if pending.len() >= FLUSH_AT {
+            flush_pending(out, pending);
+        }
+    }
+}
+
+/// Splits `text` into chunks like [`split_chunks`], but a short tail is
+/// rebalanced with the chunk before it so no tiny chunk is left behind.
+fn dense_chunks(text: &str) -> Vec<&str> {
+    let mut pieces: Vec<&str> = split_chunks(text).collect();
+    if pieces.len() >= 2 && pieces[pieces.len() - 1].len() < MIN_CHUNK {
+        let last = pieces.pop().map_or(0, str::len);
+        let prev = pieces.pop().map_or(0, str::len);
+        let tail = &text[text.len() - prev - last..];
+        if tail.len() <= MAX_CHUNK {
+            pieces.push(tail);
+        } else {
+            let mut cut = floor_char_boundary(tail, tail.len() / 2);
+            if cut == 0 {
+                cut = ceil_char_boundary(tail, tail.len() / 2);
+            }
+            let bytes = tail.as_bytes();
+            if cut > 1 && bytes[cut - 1] == b'\r' && bytes[cut] == b'\n' {
+                cut -= 1;
+            }
+            pieces.push(&tail[..cut]);
+            pieces.push(&tail[cut..]);
+        }
+    }
+    pieces
+}
+
 /// Smallest char boundary `>= index` (clamped to `text.len()`).
 pub(crate) fn ceil_char_boundary(text: &str, index: usize) -> usize {
     if index >= text.len() {
@@ -741,6 +855,162 @@ impl Rope {
         self.version = crate::next_version();
     }
 
+    /// Applies a batch of replacements in one pass.
+    ///
+    /// `edits` are `(range, replacement)` pairs in the coordinates of the text
+    /// *before* the call, sorted by position and non-overlapping (this is what
+    /// multi-cursor editing, replace-all and LSP edit lists produce). The new
+    /// rope is assembled left to right from slices of the old one with a
+    /// single forward cursor, so the cost is `O(k log n + inserted bytes)`
+    /// with a small constant instead of `k` independent [`replace`](Self::replace)
+    /// calls; long untouched stretches are shared with the old rope and short
+    /// ones are copied. Range ends are clamped and clipped down to char
+    /// boundaries like in `replace`; an edit that starts before the end of the
+    /// previous one is moved to start there, so malformed input cannot panic
+    /// (but is not meaningful). An empty list leaves the rope (and its
+    /// version) unchanged.
+    pub fn apply_edits<S: AsRef<str>>(&mut self, edits: &[(Range<usize>, S)]) {
+        if edits.is_empty() {
+            return;
+        }
+        let len = self.len();
+        // Many edits spread over a big text: rebuilding the touched leaves of
+        // the tree and sharing all others beats splicing edit by edit.
+        let chunks = if len > 0 && edits.len() >= 8 && edits.len() * LEAF_REBUILD_BYTES >= len {
+            self.apply_edits_by_leaves(edits)
+        } else {
+            self.apply_edits_by_splicing(edits)
+        };
+        self.chunks = chunks;
+        self.version = crate::next_version();
+    }
+
+    /// Edit by edit with one forward cursor: shares long untouched stretches
+    /// and copies short ones. `O(k log n)`.
+    fn apply_edits_by_splicing<S: AsRef<str>>(
+        &self,
+        edits: &[(Range<usize>, S)],
+    ) -> SumTree<Chunk> {
+        let len = self.len();
+        let mut out = Rope::new();
+        let mut pending = String::new();
+        let mut cursor = self.chunks.cursor::<usize>();
+        let mut pos = 0usize;
+        for (range, text) in edits {
+            let start = range.start.clamp(pos, len);
+            let end = range.end.clamp(start, len);
+            let start = copy_gap(&mut cursor, &mut out, &mut pending, pos, start, len);
+            pending.push_str(text.as_ref());
+            if pending.len() >= FLUSH_AT {
+                flush_pending(&mut out, &mut pending);
+            }
+            // Clip the end of the replaced range to a char boundary.
+            pos = if end > start {
+                skip_to(&mut cursor, end, len)
+            } else {
+                start
+            };
+        }
+        copy_gap(&mut cursor, &mut out, &mut pending, pos, len, len);
+        flush_pending(&mut out, &mut pending);
+        out.chunks
+    }
+
+    /// Rebuilds only the part of the chunk tree that edits touch: chunks an
+    /// edit reaches (a run of adjacent ones is re-chunked as one text) are
+    /// replaced, every other chunk keeps its stored summary, leaves without
+    /// edits are shared as they are, and the upper levels are assembled in one
+    /// bottom-up pass. `O(leaves + edited bytes)` with a tiny per-leaf constant.
+    fn apply_edits_by_leaves<S: AsRef<str>>(&self, edits: &[(Range<usize>, S)]) -> SumTree<Chunk> {
+        let len = self.len();
+        let normalized = |i: usize, pos: usize| {
+            let (range, text) = &edits[i];
+            let start = range.start.clamp(pos, len);
+            (start, range.end.clamp(start, len), text.as_ref())
+        };
+        let mut nodes: Vec<SumTree<Chunk>> = Vec::new();
+        // Chunks of the open group of touched leaves (as they will be stored).
+        let mut group: Vec<(Chunk, TextSummary)> = Vec::new();
+        let mut in_group = false;
+        // The open run of chunks an edit reaches: their old text and the edits.
+        let mut run = String::new();
+        let mut run_edits: Vec<(usize, usize, &str)> = Vec::new();
+        let mut run_start = 0usize;
+        let mut run_open = false;
+        let mut reach = 0usize;
+        let mut pos = 0usize;
+        let mut next = 0usize;
+        let mut offset = 0usize;
+        let mut leaves = self.chunks.leaves().peekable();
+        while let Some(leaf) = leaves.next() {
+            let (chunks, summaries) = leaf.leaf_parts().unwrap_or_default();
+            let leaf_end = offset + leaf.summary().len;
+            let is_last_leaf = leaves.peek().is_none();
+            let starts_here =
+                next < edits.len() && (is_last_leaf || normalized(next, pos).0 < leaf_end);
+            if !in_group && !starts_here {
+                nodes.push(leaf.clone());
+                offset = leaf_end;
+                continue;
+            }
+            in_group = true;
+            for (k, (chunk, summary)) in chunks.iter().zip(summaries).enumerate() {
+                let chunk_end = offset + summary.len;
+                let is_last = is_last_leaf && k + 1 == chunks.len();
+                let starts = next < edits.len() && (is_last || normalized(next, pos).0 < chunk_end);
+                if !run_open && !starts {
+                    group.push((chunk.clone(), *summary));
+                    offset = chunk_end;
+                    continue;
+                }
+                if !run_open {
+                    run_open = true;
+                    run_start = offset;
+                    run.clear();
+                    run_edits.clear();
+                    reach = 0;
+                }
+                run.push_str(chunk.as_str());
+                while next < edits.len() {
+                    let (start, end, text) = normalized(next, pos);
+                    if start >= chunk_end && !is_last {
+                        break;
+                    }
+                    run_edits.push((start, end, text));
+                    reach = reach.max(end);
+                    pos = end;
+                    next += 1;
+                }
+                offset = chunk_end;
+                if reach > chunk_end && !is_last {
+                    continue; // an edit reaches into the next chunk
+                }
+                run_open = false;
+                let mut new_text = String::with_capacity(run.len() + 16);
+                let mut done = 0usize;
+                for &(start, end, text) in &run_edits {
+                    let start =
+                        floor_char_boundary(&run, start.saturating_sub(run_start)).max(done);
+                    let end = floor_char_boundary(&run, end.saturating_sub(run_start)).max(start);
+                    new_text.push_str(&run[done..start]);
+                    new_text.push_str(text);
+                    done = end;
+                }
+                new_text.push_str(&run[done..]);
+                group.extend(
+                    dense_chunks(&new_text)
+                        .into_iter()
+                        .map(|piece| (Chunk::new(piece), TextSummary::from_text(piece))),
+                );
+            }
+            if !run_open {
+                in_group = false;
+                nodes.extend(SumTree::balanced_leaf_nodes(std::mem::take(&mut group)));
+            }
+        }
+        SumTree::from_leaf_nodes(nodes)
+    }
+
     /// Iterates over the lines in `rows` (without terminators).
     pub fn lines(&self, rows: Range<u32>) -> impl Iterator<Item = String> + '_ {
         rows.map(move |row| self.text_for_range(self.line_range(row)))
@@ -956,6 +1226,23 @@ mod tests {
         }
     }
 
+    /// Cheap consistency checks for big texts: content, summary, line index.
+    fn check_light(rope: &Rope, text: &str) {
+        assert_eq!(rope.to_string(), text);
+        assert_eq!(rope.summary(), TextSummary::from_text(text));
+        assert_eq!(rope.line_count() as usize, text.matches('\n').count() + 1);
+        let model = Model(text);
+        for offset in (0..=text.len()).step_by(97) {
+            assert_eq!(rope.offset_to_point(offset), model.offset_to_point(offset));
+        }
+        for row in (0..rope.line_count()).step_by(31) {
+            assert_eq!(
+                rope.point_to_offset(Point::new(row, 0)),
+                model.line_starts()[row as usize]
+            );
+        }
+    }
+
     fn check_rope(rope: &Rope, text: &str) {
         let model = Model(text);
         assert_eq!(rope.to_string(), text);
@@ -1155,5 +1442,100 @@ mod tests {
             }
             check_rope(&rope, &model);
         }
+
+        /// Batched edits equal the same edits applied to a `String` (both the
+        /// copy path for short gaps and the shared-subtree path for long ones).
+        #[test]
+        fn apply_edits_matches_model(
+            text in text_strategy(),
+            repeat in 1usize..14,
+            cuts in proptest::collection::vec(0usize..8000, 0..24),
+            inserts in proptest::collection::vec(text_strategy(), 12),
+        ) {
+            let text = text.repeat(repeat);
+            let mut cuts = cuts;
+            cuts.sort_unstable();
+            let edits: Vec<(Range<usize>, &str)> = cuts
+                .chunks_exact(2)
+                .zip(&inserts)
+                .map(|(c, t)| (c[0]..c[1], t.as_str()))
+                .collect();
+            let mut rope = Rope::from(text.as_str());
+            let before = rope.clone();
+            // The public entry point and both strategies on their own.
+            let by_splicing = Rope { chunks: rope.apply_edits_by_splicing(&edits), version: 0 };
+            let by_leaves = if text.is_empty() {
+                None
+            } else {
+                Some(Rope { chunks: rope.apply_edits_by_leaves(&edits), version: 0 })
+            };
+            rope.apply_edits(&edits);
+            let mut model = text.clone();
+            // offsets always refer to the original text
+            for (r, t) in edits.iter().rev() {
+                let s = floor_char_boundary(&text, r.start.min(text.len()));
+                let e = floor_char_boundary(&text, r.end.min(text.len()));
+                model.replace_range(s..e, t);
+            }
+            for candidate in [Some(&rope), Some(&by_splicing), by_leaves.as_ref()].into_iter().flatten() {
+                prop_assert_eq!(candidate.to_string(), model.as_str());
+                prop_assert_eq!(candidate.summary(), TextSummary::from_text(&model));
+                check_light(candidate, &model);
+                // no tiny chunk is left behind by a rebuilt tail
+                let sizes: Vec<usize> = candidate.chunk_tree().iter().map(|c| c.as_str().len()).collect();
+                prop_assert!(sizes.iter().all(|&n| n > 0), "empty chunk in {sizes:?}");
+            }
+            // the old snapshot is untouched
+            prop_assert_eq!(before.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn apply_edits_basics() {
+        let mut r = Rope::from("hello world");
+        let v = r.version();
+        r.apply_edits::<&str>(&[]);
+        assert_eq!(r.version(), v, "no edits, no new version");
+        r.apply_edits(&[(0..5, "HELLO"), (6..11, "there"), (11..11, "!")]);
+        assert_eq!(r.to_string(), "HELLO there!");
+        assert_ne!(r.version(), v);
+        // inserts at the same offset keep their order; pure deletion; clamping
+        let mut r = Rope::from("abc");
+        r.apply_edits(&[(1..1, "x"), (1..1, "y"), (2..99, "")]);
+        assert_eq!(r.to_string(), "axyb");
+        let mut r = Rope::from("");
+        r.apply_edits(&[(0..0, "new")]);
+        assert_eq!(r.to_string(), "new");
+        // malformed (overlapping / unsorted) input never panics and keeps text sane
+        let mut r = Rope::from("0123456789");
+        r.apply_edits(&[(4..8, "A"), (2..6, "B")]);
+        assert_eq!(r.to_string(), "0123AB89");
+        // char boundaries: an edit inside a multi-byte char is clipped down
+        let mut r = Rope::from("a\u{e9}b");
+        r.apply_edits(&[(2..3, "X")]);
+        assert_eq!(r.to_string(), "aXb");
+    }
+
+    #[test]
+    fn apply_edits_shares_long_gaps_and_stays_balanced() {
+        let text: String = (0..20_000).map(|i| format!("line {i}\n")).collect();
+        let mut r = Rope::from(text.as_str());
+        let edits: Vec<(Range<usize>, &str)> = (0..500)
+            .map(|i| {
+                let at = i * 700;
+                (at..at, "x")
+            })
+            .collect();
+        r.apply_edits(&edits);
+        let mut model = text.clone();
+        for (rg, t) in edits.iter().rev() {
+            let e = floor_char_boundary(&model, rg.start);
+            model.insert_str(e, t);
+        }
+        check_light(&r, &model);
+        assert_eq!(r.to_string(), model);
+        // later edits still work on the result
+        r.apply_edits(&[(0..1, "L"), (r.len()..r.len(), "end")]);
+        assert!(r.to_string().starts_with("Lline 0") && r.to_string().ends_with("end"));
     }
 }

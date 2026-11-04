@@ -8,9 +8,13 @@ pub mod branches_panel;
 pub mod changes_panel;
 pub mod commit_composer;
 pub mod confirm;
+pub mod conflict_actions;
 pub mod diff_source;
 pub mod diff_view;
 pub mod history_panel;
+pub mod inline_conflicts;
+pub mod merge_editor;
+pub mod operation_banner;
 pub mod ref_picker;
 pub mod review_tab;
 pub mod staging;
@@ -25,13 +29,14 @@ use lector_ui::actions::{editor, git as git_actions, workspace as ws_actions};
 use lector_ui::code_view::{CodeSource, CodeView};
 use lector_ui::views::pane::CodeItem;
 use lector_ui::views::sidebar::SidebarPanel;
-use lector_ui::views::Workspace;
+use lector_ui::views::{Workspace, WorkspaceEvent};
 
 use crate::branches_panel::BranchesPanel;
 use crate::changes_panel::{ChangesPanel, PathOp};
 use crate::diff_source::RevisionSource;
 use crate::diff_view::{open_diff, DiffTarget};
 use crate::history_panel::{HistoryPanel, HistoryScope};
+use crate::inline_conflicts::InlineConflicts;
 use crate::store::{GitStore, GitStoreEvent};
 
 actions!(
@@ -55,6 +60,8 @@ pub struct GitViews {
     pub history: Entity<HistoryPanel>,
     /// Branches panel.
     pub branches: Entity<BranchesPanel>,
+    /// Inline conflict actions of the window's file views.
+    pub conflicts: Entity<InlineConflicts>,
 }
 
 /// Registers the git views with every new workspace window.
@@ -72,13 +79,27 @@ pub fn init(cx: &mut App) {
         let changes = cx.new(|cx| ChangesPanel::new(store.clone(), cx));
         let history = cx.new(|cx| HistoryPanel::new(store.clone(), window, cx));
         let branches = cx.new(|cx| BranchesPanel::new(store.clone(), cx));
+        let inline = cx.new(|_| InlineConflicts::new(store.clone()));
         store.update(cx, |s, _| {
             s.views = Some(GitViews {
                 changes: changes.clone(),
                 history: history.clone(),
                 branches: branches.clone(),
+                conflicts: inline.clone(),
             })
         });
+        // Inline conflict actions on every file tab (attached as tabs appear).
+        let i = inline.clone();
+        cx.subscribe(&workspace, move |ws, _, event: &WorkspaceEvent, cx| {
+            if matches!(
+                event,
+                WorkspaceEvent::ActiveItemChanged | WorkspaceEvent::FilesChanged(_)
+            ) {
+                i.update(cx, |i, cx| i.scan(ws, cx));
+            }
+        })
+        .detach();
+        inline.update(cx, |i, cx| i.scan(ws, cx));
         ws.sidebar().update(cx, |sb, cx| {
             sb.set_panel_view(SidebarPanel::Changes, changes.clone().into(), cx);
             sb.set_panel_view(SidebarPanel::History, history.into(), cx);
@@ -139,6 +160,7 @@ pub fn init(cx: &mut App) {
             });
         });
         register_git_actions(ws, &store, &changes);
+        conflict_actions::register(ws, &store, &changes);
         let s = store.clone();
         ws.register_action(move |ws, _: &editor::CopyPermalink, window, cx| {
             copy_permalink(ws, &s, window, cx);
@@ -281,7 +303,9 @@ fn restore_tab(
     kind: &lector_config::TabKind,
     cx: &mut App,
 ) -> Option<Box<dyn lector_ui::views::pane::PaneItem>> {
-    review_tab::restore_item(store, kind, cx).or_else(|| diff_view::restore_item(store, kind, cx))
+    review_tab::restore_item(store, kind, cx)
+        .or_else(|| diff_view::restore_item(store, kind, cx))
+        .or_else(|| merge_editor::restore_item(store, kind, cx))
 }
 
 fn restore_git_tabs(

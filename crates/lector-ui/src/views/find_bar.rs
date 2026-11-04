@@ -3,6 +3,12 @@
 //! modal closes so `editor::FindNext` / `FindPrev` keep working.
 //! Matching uses `lector_search::find_in_text` on a background thread over
 //! the document snapshot (case / whole word / regex toggles).
+//!
+//! A second row replaces text (`editor::FindReplace`, `editor::Find` again or
+//! the chevron). *Replace* swaps the match at or after the caret, *Replace
+//! All* swaps every match as one undo step, both through
+//! `DocumentModel::apply_edits`; with the regex toggle on, `$1` / `${name}`
+//! in the replacement expand capture groups. Read-only tabs only search.
 
 use std::ops::Range;
 
@@ -10,13 +16,17 @@ use gpui::{
     div, prelude::*, px, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     SharedString, Subscription, Task, Window,
 };
-use lector_search::{CaseMode, SearchQuery};
+use lector_buffer::TextEdit;
+use lector_search::{replacements_in_text, CaseMode, SearchQuery};
 
+use crate::actions::editor::{ReplaceAll, ReplaceNext};
 use crate::actions::picker::{Cancel, Confirm, SelectNext, SelectPrev};
+use crate::code_view::edit::{offset_to_pos, pos_to_offset};
 use crate::code_view::{CodeView, Pos, Selection};
 use crate::components::popover::surface;
 use crate::components::text_input::{TextInput, TextInputEvent};
-use crate::components::{h_flex, metrics, IconButton, Tooltip};
+use crate::components::{h_flex, metrics, Button, ButtonStyle, IconButton, Tooltip};
+use crate::editor::DocumentModel;
 use crate::icons::{Icon, IconName, IconSize};
 use crate::keymap::contexts;
 use crate::theme::{ActiveTheme, ColorExt};
@@ -66,13 +76,26 @@ pub fn find_matches(view: &CodeView, query: &str, limit: usize) -> Vec<(u32, Ran
     out
 }
 
+/// What to do with the matches and their replacements once computed.
+type FinishReplace =
+    fn(&mut FindBar, Vec<(Range<usize>, String)>, &mut Window, &mut Context<FindBar>);
+
 /// Maximum highlighted matches.
 const MAX_MATCHES: usize = 100_000;
 
 /// The find modal.
 pub struct FindBar {
     input: Entity<TextInput>,
+    replace_input: Entity<TextInput>,
     target: Entity<CodeView>,
+    /// The document behind `target`; `None` for views that cannot be edited.
+    model: Option<Entity<DocumentModel>>,
+    replace_open: bool,
+    /// Select the active match once the next search finishes (after Replace).
+    select_after_search: bool,
+    /// Outcome of the last replace ("3 replaced"), shown instead of the count.
+    note: Option<SharedString>,
+    replace_task: Option<Task<()>>,
     count: usize,
     active: Option<usize>,
     case_sensitive: bool,
@@ -93,17 +116,33 @@ impl Focusable for FindBar {
 
 impl FindBar {
     /// Find in `target`, prefilled with its selection (if single-line).
-    pub fn new(target: Entity<CodeView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `model` is the document behind it (enables replace); `replace_open`
+    /// shows the replace row at once.
+    pub fn new(
+        target: Entity<CodeView>,
+        model: Option<Entity<DocumentModel>>,
+        replace_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| TextInput::new("Find in file", cx));
+        let replace_input = cx.new(|cx| TextInput::new("Replace", cx));
         let selected = target.read(cx).selected_text();
         let subscription = cx.subscribe_in(&input, window, |this, _, event, _, cx| {
             let TextInputEvent::Changed(query) = event;
             let query = query.to_string();
+            this.note = None;
             this.update_matches(&query, cx);
         });
         let mut bar = FindBar {
             input,
+            replace_input,
             target,
+            model,
+            replace_open: false,
+            select_after_search: false,
+            note: None,
+            replace_task: None,
             count: 0,
             active: None,
             case_sensitive: false,
@@ -120,7 +159,204 @@ impl FindBar {
             });
             bar.update_matches(&selected, cx);
         }
+        bar.replace_open = replace_open && bar.can_replace(cx);
         bar
+    }
+
+    /// Whether the replace row is shown.
+    pub fn replace_open(&self) -> bool {
+        self.replace_open
+    }
+
+    /// Replacing needs an editable document: read-only tabs only search.
+    pub fn can_replace(&self, cx: &App) -> bool {
+        self.model
+            .as_ref()
+            .is_some_and(|m| m.read(cx).is_editable())
+            && self.target.read(cx).is_editable()
+    }
+
+    /// Shows the replace row and puts the caret in its field.
+    pub fn open_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_replace(cx) {
+            return;
+        }
+        self.replace_open = true;
+        let focus = self.replace_input.focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    /// Shows or hides the replace row (`editor::Find` again, the chevron).
+    pub fn toggle_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.replace_open {
+            self.replace_open = false;
+            let focus = self.input.focus_handle(cx);
+            window.focus(&focus);
+            cx.notify();
+        } else {
+            self.open_replace(window, cx);
+        }
+    }
+
+    fn search(&self, cx: &App) -> SearchQuery {
+        SearchQuery {
+            pattern: self.input.read(cx).text().to_string(),
+            regex: self.regex,
+            case: if self.case_sensitive {
+                CaseMode::Sensitive
+            } else {
+                CaseMode::Smart
+            },
+            whole_word: self.whole_word,
+            ..Default::default()
+        }
+    }
+
+    /// Computes every match of the query with its replacement over the
+    /// buffer text, then hands them to `finish` (on the main thread) if the
+    /// text did not change meanwhile; if it did, starts over.
+    fn with_replacements(
+        &mut self,
+        finish: FinishReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_replace(cx) {
+            return;
+        }
+        let search = self.search(cx);
+        if search.pattern.is_empty() {
+            return;
+        }
+        let replacement = self.replace_input.read(cx).text().to_string();
+        let Some(buffer) = self
+            .model
+            .as_ref()
+            .and_then(|m| m.read(cx).buffer().cloned())
+        else {
+            return;
+        };
+        let (text, version) = {
+            let b = buffer.read(cx);
+            (b.text().clone(), b.buffer().version())
+        };
+        self.replace_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(
+                    async move { replacements_in_text(&text.to_string(), &search, &replacement) },
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.error = None;
+                match found {
+                    Err(err) => {
+                        this.error = Some(err.to_string().into());
+                        cx.notify();
+                    }
+                    Ok(found) => {
+                        let unchanged = buffer.read(cx).buffer().version() == version;
+                        if unchanged {
+                            finish(this, found, window, cx);
+                        } else {
+                            this.with_replacements(finish, window, cx);
+                        }
+                    }
+                }
+            });
+        }));
+    }
+
+    /// Replaces the selected match, or the first match after the caret, and
+    /// moves on to the next one.
+    pub fn replace_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_replacements(Self::finish_replace_next, window, cx);
+    }
+
+    fn finish_replace_next(
+        &mut self,
+        found: Vec<(Range<usize>, String)>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.model.clone() else {
+            return;
+        };
+        let Some(buffer) = model.read(cx).buffer().cloned() else {
+            return;
+        };
+        let selection = self.target.read(cx).selection();
+        let (start, end) = {
+            let rope = buffer.read(cx).text();
+            let a = pos_to_offset(rope, selection.anchor);
+            let b = pos_to_offset(rope, selection.head);
+            (a.min(b), a.max(b))
+        };
+        let chosen = found
+            .iter()
+            .position(|(range, _)| range.start == start && range.end == end)
+            .or_else(|| found.iter().position(|(range, _)| range.start >= start))
+            .or(if found.is_empty() { None } else { Some(0) });
+        let Some((range, new_text)) = chosen.and_then(|ix| found.into_iter().nth(ix)) else {
+            self.note = Some("No results".into());
+            cx.notify();
+            return;
+        };
+        let caret = range.start + new_text.len();
+        model.update(cx, |m, cx| {
+            m.apply_edits(vec![TextEdit { range, new_text }], cx)
+        });
+        let pos = offset_to_pos(buffer.read(cx).text(), caret);
+        self.target.update(cx, |v, cx| v.set_cursor(pos, cx));
+        self.note = None;
+        self.select_after_search = true;
+        let query = self.input.read(cx).text().to_string();
+        self.update_matches(&query, cx);
+    }
+
+    /// Replaces every match, as one undo step.
+    pub fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_replacements(Self::finish_replace_all, window, cx);
+    }
+
+    fn finish_replace_all(
+        &mut self,
+        found: Vec<(Range<usize>, String)>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.model.clone() else {
+            return;
+        };
+        let count = found.len();
+        let edits = found
+            .into_iter()
+            .map(|(range, new_text)| TextEdit { range, new_text })
+            .collect();
+        if count > 0 {
+            model.update(cx, |m, cx| m.apply_edits(edits, cx));
+        }
+        self.note = Some(match count {
+            0 => "No results".into(),
+            1 => "1 replaced".into(),
+            n => format!("{n} replaced").into(),
+        });
+        let query = self.input.read(cx).text().to_string();
+        self.update_matches(&query, cx);
+    }
+
+    fn replace_next_action(
+        &mut self,
+        _: &ReplaceNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_next(window, cx);
+    }
+
+    fn replace_all_action(&mut self, _: &ReplaceAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_all(window, cx);
     }
 
     fn update_matches(&mut self, query: &str, cx: &mut Context<Self>) {
@@ -132,16 +368,15 @@ impl FindBar {
         }
         let search = SearchQuery {
             pattern: query.to_string(),
-            regex: self.regex,
-            case: if self.case_sensitive {
-                CaseMode::Sensitive
-            } else {
-                CaseMode::Smart
-            },
-            whole_word: self.whole_word,
-            ..Default::default()
+            ..self.search(cx)
         };
-        let text = self.target.read(cx).source().text_snapshot();
+        // The buffer is always current; a view's source may lag an edit.
+        let live = self
+            .model
+            .as_ref()
+            .and_then(|m| m.read(cx).buffer().cloned())
+            .map(|b| lector_text::Text::from(b.read(cx).text().clone()));
+        let text = live.or_else(|| self.target.read(cx).source().text_snapshot());
         let Some(text) = text else {
             // Sources without a snapshot (small in-memory text): match here.
             let matches = find_matches(self.target.read(cx), query, MAX_MATCHES);
@@ -194,10 +429,17 @@ impl FindBar {
         self.active = active;
         self.target
             .update(cx, |v, cx| v.set_search_matches(matches, active, cx));
+        if std::mem::take(&mut self.select_after_search) && active.is_some() {
+            self.target.update(cx, |v, cx| {
+                v.step_search_match(0, true, cx);
+            });
+        }
         cx.notify();
     }
 
-    fn toggle(&mut self, which: u8, cx: &mut Context<Self>) {
+    /// Flips the case (0), whole word (1) or regex (any other) option.
+    pub fn toggle(&mut self, which: u8, cx: &mut Context<Self>) {
+        self.note = None;
         match which {
             0 => self.case_sensitive = !self.case_sensitive,
             1 => self.whole_word = !self.whole_word,
@@ -213,8 +455,17 @@ impl FindBar {
         cx.notify();
     }
 
-    fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        self.step(1, cx);
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.replace_open
+            && self
+                .replace_input
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        {
+            self.replace_next(window, cx);
+        } else {
+            self.step(1, cx);
+        }
     }
 
     fn next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -241,6 +492,7 @@ impl Render for FindBar {
         let ui = cx.theme().ui.clone();
         let status = match (self.count, self.active) {
             _ if self.error.is_some() => "Invalid pattern".to_string(),
+            _ if self.note.is_some() => self.note.clone().unwrap_or_default().to_string(),
             (0, _) if self.input.read(cx).text().is_empty() => String::new(),
             (0, _) => "No results".to_string(),
             (n, Some(a)) => format!("{} of {n}", a + 1),
@@ -252,17 +504,15 @@ impl Render for FindBar {
             .on_action(cx.listener(Self::next))
             .on_action(cx.listener(Self::prev))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::replace_next_action))
+            .on_action(cx.listener(Self::replace_all_action))
             .w(px(560.))
             .child(
                 h_flex()
                     .h(px(40.))
                     .px(px(12.))
                     .gap(px(8.))
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size(IconSize::Small)
-                            .color(ui.text_faint.hsla()),
-                    )
+                    .child(self.render_chevron(cx))
                     .child(
                         div()
                             .flex_1()
@@ -284,10 +534,86 @@ impl Render for FindBar {
                     )
                     .child(self.render_toggles(cx)),
             )
+            .when(self.replace_open && self.can_replace(cx), |el| {
+                el.child(self.render_replace_row(cx))
+            })
     }
 }
 
 impl FindBar {
+    /// Chevron (or search icon when replacing is unavailable) at the row start.
+    fn render_chevron(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = cx.theme().ui.clone();
+        if !self.can_replace(cx) {
+            return div()
+                .flex_none()
+                .child(
+                    Icon::new(IconName::Search)
+                        .size(IconSize::Small)
+                        .color(ui.text_faint.hsla()),
+                )
+                .into_any_element();
+        }
+        let weak = cx.entity().downgrade();
+        IconButton::new(
+            "find-replace-toggle",
+            if self.replace_open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+        )
+        .icon_size(IconSize::Small)
+        .tooltip(Tooltip::text("Toggle Replace"))
+        .on_click(move |_, window, cx| {
+            let _ = weak.update(cx, |bar, cx| bar.toggle_replace(window, cx));
+        })
+        .into_any_element()
+    }
+
+    fn render_replace_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = cx.theme().ui.clone();
+        let weak = cx.entity().downgrade();
+        let next = weak.clone();
+        h_flex()
+            .h(px(36.))
+            .px(px(12.))
+            .gap(px(8.))
+            .border_t_1()
+            .border_color(ui.border.hsla())
+            .child(
+                Icon::new(IconName::Replace)
+                    .size(IconSize::Small)
+                    .color(ui.text_faint.hsla()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(14.))
+                    .line_height(px(20.))
+                    .text_color(ui.text.hsla())
+                    .child(self.replace_input.clone()),
+            )
+            .child(
+                Button::new("replace-next", "Replace")
+                    .style(ButtonStyle::Subtle)
+                    .compact()
+                    .tooltip(Tooltip::text("Replace Next"))
+                    .on_click(move |_, window, cx| {
+                        let _ = next.update(cx, |bar, cx| bar.replace_next(window, cx));
+                    }),
+            )
+            .child(
+                Button::new("replace-all", "All")
+                    .style(ButtonStyle::Subtle)
+                    .compact()
+                    .tooltip(Tooltip::text("Replace All"))
+                    .on_click(move |_, window, cx| {
+                        let _ = weak.update(cx, |bar, cx| bar.replace_all(window, cx));
+                    }),
+            )
+    }
+
     fn render_toggles(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
         let toggle = |id: &'static str, icon: IconName, on: bool, which: u8, tip: &'static str| {

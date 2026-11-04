@@ -20,6 +20,7 @@
 
 mod changes;
 mod cli;
+mod conflict;
 mod error;
 mod graph;
 mod log;
@@ -30,6 +31,10 @@ mod status;
 mod types;
 pub mod write;
 
+pub use conflict::{
+    merged_name_from_message, strip_message_comments, ConflictEntry, ConflictKind, ConflictStage,
+    OperationKind, RepoOperation,
+};
 pub use error::{Error, Result};
 pub use graph::{graph, EdgeKind, GraphEdge, GraphRow};
 pub use oid::Oid;

@@ -6,7 +6,7 @@
 
 use gpui::{App, AppContext, Entity, Task};
 use lector_diff::Algorithm;
-use lector_git::{Changeset, FileChange, Repo};
+use lector_git::{Changeset, FileChange, OperationKind, Repo};
 use lector_workspace::review::{self, HunkAction, LineSelection};
 
 use crate::store::{GitStore, GitStoreEvent};
@@ -36,6 +36,11 @@ pub enum GitOp {
         /// Rows of the file's diff.
         selection: LineSelection,
     },
+    /// `git <op> --continue` (rebase, cherry-pick, revert, am; merge commits
+    /// go through the commit composer).
+    Continue(OperationKind),
+    /// `git <op> --abort` (confirmed by the caller).
+    Abort(OperationKind),
 }
 
 impl GitOp {
@@ -45,6 +50,8 @@ impl GitOp {
             GitOp::Stage(_) | GitOp::StageAll => "Staging",
             GitOp::Unstage(_) | GitOp::UnstageAll => "Unstaging",
             GitOp::Discard(_) => "Discarding",
+            GitOp::Continue(_) => "Continuing",
+            GitOp::Abort(_) => "Aborting",
             GitOp::Hunk { action, .. } => match action {
                 HunkAction::Stage => "Staging",
                 HunkAction::Unstage => "Unstaging",
@@ -64,6 +71,8 @@ impl GitOp {
             GitOp::StageAll => repo.stage_all().map(|_| true),
             GitOp::UnstageAll => repo.unstage_all().map(|_| true),
             GitOp::Discard(p) => repo.discard_paths(&paths(p)).map(|_| true),
+            GitOp::Continue(kind) => repo.continue_operation(*kind).map(|_| true),
+            GitOp::Abort(kind) => repo.abort_operation(*kind).map(|_| true),
             GitOp::Hunk {
                 changeset,
                 change,

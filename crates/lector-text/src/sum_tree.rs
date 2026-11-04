@@ -353,14 +353,47 @@ impl<T: Item> SumTree<T> {
                 items.push(item);
                 item_summaries.push(summary);
             }
-            let summary = sum(item_summaries.iter());
-            nodes.push(SumTree(Arc::new(Node::Leaf {
-                summary,
-                items,
-                item_summaries,
-            })));
+            nodes.push(Self::leaf_node(items, item_summaries));
         }
+        Self::from_leaf_nodes(nodes)
+    }
 
+    fn leaf_node(
+        items: ArrayVec<T, MAX_CHILDREN>,
+        item_summaries: ArrayVec<T::Summary, MAX_CHILDREN>,
+    ) -> SumTree<T> {
+        let summary = sum(item_summaries.iter());
+        SumTree(Arc::new(Node::Leaf {
+            summary,
+            items,
+            item_summaries,
+        }))
+    }
+
+    /// Splits `items` (with their summaries) into leaf nodes of near-equal
+    /// size (never a tiny trailing leaf), for [`from_leaf_nodes`](Self::from_leaf_nodes).
+    pub(crate) fn balanced_leaf_nodes(items: Vec<(T, T::Summary)>) -> Vec<SumTree<T>> {
+        let total = items.len();
+        let leaves = total.div_ceil(MAX_CHILDREN);
+        let mut nodes = Vec::with_capacity(leaves);
+        let mut iter = items.into_iter();
+        for k in 0..leaves {
+            // Spread the remainder over the first leaves.
+            let take = total / leaves + usize::from(k < total % leaves);
+            let mut leaf_items = ArrayVec::new();
+            let mut leaf_summaries = ArrayVec::new();
+            for (item, summary) in iter.by_ref().take(take) {
+                leaf_items.push(item);
+                leaf_summaries.push(summary);
+            }
+            nodes.push(Self::leaf_node(leaf_items, leaf_summaries));
+        }
+        nodes
+    }
+
+    /// Builds a balanced tree over `nodes`, which must all be leaf nodes (as
+    /// yielded by [`leaves`](Self::leaves) or [`balanced_leaf_nodes`](Self::balanced_leaf_nodes)).
+    pub(crate) fn from_leaf_nodes(mut nodes: Vec<SumTree<T>>) -> SumTree<T> {
         let mut height = 0u8;
         while nodes.len() > 1 {
             height += 1;
@@ -384,6 +417,25 @@ impl<T: Item> SumTree<T> {
             nodes = parents;
         }
         nodes.pop().unwrap_or_default()
+    }
+
+    /// The leaf nodes (subtrees of height 0) in order.
+    pub(crate) fn leaves(&self) -> Leaves<'_, T> {
+        Leaves {
+            stack: vec![(self, 0)],
+        }
+    }
+
+    /// The items and their summaries of a leaf node (`None` for an internal node).
+    pub(crate) fn leaf_parts(&self) -> Option<(&[T], &[T::Summary])> {
+        match &*self.0 {
+            Node::Leaf {
+                items,
+                item_summaries,
+                ..
+            } => Some((items, item_summaries)),
+            Node::Internal { .. } => None,
+        }
     }
 
     /// The summary of all items in the tree.
@@ -687,6 +739,37 @@ impl<'a, T: Item> Iterator for Iter<'a, T> {
     }
 }
 
+/// Iterator over the leaf nodes of a tree, created by [`SumTree::leaves`].
+pub(crate) struct Leaves<'a, T: Item> {
+    stack: Vec<(&'a SumTree<T>, usize)>,
+}
+
+impl<'a, T: Item> Iterator for Leaves<'a, T> {
+    type Item = &'a SumTree<T>;
+
+    fn next(&mut self) -> Option<&'a SumTree<T>> {
+        loop {
+            let (tree, index) = self.stack.last_mut()?;
+            let tree: &'a SumTree<T> = tree;
+            match &*tree.0 {
+                Node::Leaf { .. } => {
+                    self.stack.pop();
+                    return Some(tree);
+                }
+                Node::Internal { child_trees, .. } => match child_trees.get(*index) {
+                    Some(child) => {
+                        *index += 1;
+                        self.stack.push((child, 0));
+                    }
+                    None => {
+                        self.stack.pop();
+                    }
+                },
+            }
+        }
+    }
+}
+
 struct StackEntry<'a, T: Item, D> {
     tree: &'a SumTree<T>,
     /// Index of the child (internal node) or item (leaf) the cursor is in.
@@ -697,18 +780,19 @@ struct StackEntry<'a, T: Item, D> {
 
 /// Collects items skipped by a seek (used to build slices).
 trait SeekAggregate<'a, T: Item> {
-    fn push_item(&mut self, item: &'a T);
+    fn push_item(&mut self, item: &'a T, summary: &'a T::Summary);
     fn push_tree(&mut self, tree: &'a SumTree<T>);
 }
 
 impl<'a, T: Item> SeekAggregate<'a, T> for () {
-    fn push_item(&mut self, _: &'a T) {}
+    fn push_item(&mut self, _: &'a T, _: &'a T::Summary) {}
     fn push_tree(&mut self, _: &'a SumTree<T>) {}
 }
 
 struct SliceAggregate<T: Item> {
     tree: SumTree<T>,
-    pending: Vec<T>,
+    /// Items with their already known summaries (never recomputed).
+    pending: Vec<(T, T::Summary)>,
 }
 
 impl<T: Item> SliceAggregate<T> {
@@ -722,7 +806,7 @@ impl<T: Item> SliceAggregate<T> {
     fn flush(&mut self) {
         if !self.pending.is_empty() {
             let items = std::mem::take(&mut self.pending);
-            self.tree.append(SumTree::from_iter(items));
+            self.tree.append(SumTree::from_items_and_summaries(items));
         }
     }
 
@@ -733,8 +817,8 @@ impl<T: Item> SliceAggregate<T> {
 }
 
 impl<'a, T: Item> SeekAggregate<'a, T> for SliceAggregate<T> {
-    fn push_item(&mut self, item: &'a T) {
-        self.pending.push(item.clone());
+    fn push_item(&mut self, item: &'a T, summary: &'a T::Summary) {
+        self.pending.push((item.clone(), summary.clone()));
     }
     fn push_tree(&mut self, tree: &'a SumTree<T>) {
         self.flush();
@@ -1113,7 +1197,7 @@ impl<'a, T: Item, D: Dimension<'a, T::Summary>> Cursor<'a, T, D> {
                         let mut item_end = self.position.clone();
                         item_end.add_summary(&item_summaries[entry.index]);
                         if skip(&item_end) {
-                            aggregate.push_item(&items[entry.index]);
+                            aggregate.push_item(&items[entry.index], &item_summaries[entry.index]);
                             self.position = item_end;
                             entry.index += 1;
                         } else {
@@ -1255,6 +1339,37 @@ mod tests {
                 check_invariants(&left, true);
                 assert_eq!(left.items(), (0..n).map(N).collect::<Vec<_>>());
             }
+        }
+    }
+
+    #[test]
+    fn leaves_and_leaf_level_rebuild() {
+        for n in [0u32, 1, 2, 3, 5, 17, 100, 333] {
+            let tree: SumTree<N> = (0..n).map(N).collect();
+            // The leaves in order hold exactly the items of the tree.
+            let leaves: Vec<&SumTree<N>> = tree.leaves().collect();
+            let items: Vec<u32> = leaves
+                .iter()
+                .flat_map(|l| l.leaf_parts().map_or(&[][..], |p| p.0).iter().map(|n| n.0))
+                .collect();
+            assert_eq!(items, (0..n).collect::<Vec<_>>());
+            // Reassembling shared leaves gives a valid tree with the same content.
+            let rebuilt = SumTree::from_leaf_nodes(leaves.into_iter().cloned().collect());
+            check_invariants(&rebuilt, true);
+            assert_eq!(rebuilt.items(), tree.items());
+            // Balanced leaf distribution never leaves a tiny trailing leaf.
+            let pairs: Vec<(N, NSummary)> = (0..n).map(|i| (N(i), N(i).summary())).collect();
+            let nodes = SumTree::balanced_leaf_nodes(pairs);
+            if nodes.len() > 1 {
+                let sizes: Vec<usize> = nodes
+                    .iter()
+                    .map(|l| l.leaf_parts().map_or(0, |p| p.0.len()))
+                    .collect();
+                assert!(sizes.iter().all(|&s| s >= MAX_CHILDREN / 2), "{sizes:?}");
+            }
+            let balanced = SumTree::from_leaf_nodes(nodes);
+            check_invariants(&balanced, true);
+            assert_eq!(balanced.items(), tree.items());
         }
     }
 

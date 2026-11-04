@@ -5,8 +5,8 @@ use std::ops::Range;
 use crate::buffer::Buffer;
 use crate::engine::{Change, EditKind, NewSel, Plan, Pos, Side};
 use crate::text_util::{
-    char_at, char_before, leading_ws_len, next_grapheme, prev_grapheme, row_of, row_start,
-    visual_col, word_left, word_right,
+    char_at, char_before, leading_ws_len, matching_opener, next_grapheme, prev_grapheme, row_of,
+    row_start, visual_col, word_left, word_right,
 };
 use crate::{IndentStyle, Transaction};
 
@@ -23,8 +23,22 @@ fn is_quote(c: char) -> bool {
     matches!(c, '"' | '\'' | '`')
 }
 
+fn opener_for(close: char) -> Option<char> {
+    match close {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        _ => None,
+    }
+}
+
 fn is_closer(c: char) -> bool {
     matches!(c, ')' | ']' | '}')
+}
+
+/// Whether a line ending in `c` is followed by a deeper indented one.
+fn opens_block(c: char, colon: bool) -> bool {
+    matches!(c, '{' | '(' | '[') || (colon && c == ':')
 }
 
 /// Characters after which an opener is auto-closed.
@@ -85,6 +99,7 @@ impl Buffer {
         let rope = &self.text;
         let mut changes: Vec<Change> = Vec::with_capacity(self.sels.len());
         let mut specs: Vec<NewSel> = Vec::with_capacity(self.sels.len());
+        let mut closers: Vec<(Pos, char)> = Vec::new();
         for s in &self.sels {
             let r = s.range();
             let idx = changes.len();
@@ -110,7 +125,10 @@ impl Buffer {
                         changes.push(Change::replace(r.start, r.end, wrapped));
                         handled = true;
                     }
-                } else if (is_closer(ch) || is_quote(ch)) && next == Some(ch) {
+                } else if (is_closer(ch) || is_quote(ch))
+                    && next == Some(ch)
+                    && self.has_auto_closer(r.end, ch)
+                {
                     let to = r.end + ch.len_utf8();
                     specs.push(Self::caret_spec(s.id, Pos::Old(to, Side::Before)));
                     handled = true;
@@ -118,6 +136,7 @@ impl Buffer {
                     if closes_before(next) {
                         changes.push(Change::insert(r.start, format!("{ch}{closer}")));
                         specs.push(Self::caret_spec(s.id, Pos::In(idx, ch.len_utf8())));
+                        closers.push((Pos::In(idx, ch.len_utf8()), closer));
                         handled = true;
                     }
                 } else if is_quote(ch) {
@@ -130,8 +149,21 @@ impl Buffer {
                     } {
                         changes.push(Change::insert(r.start, format!("{ch}{ch}")));
                         specs.push(Self::caret_spec(s.id, Pos::In(idx, ch.len_utf8())));
+                        closers.push((Pos::In(idx, ch.len_utf8()), ch));
                         handled = true;
                     }
+                }
+            }
+            if !handled && r.is_empty() && self.options.auto_indent {
+                if let Some((line_start, indent)) = single
+                    .filter(|c| is_closer(*c))
+                    .and_then(|c| self.electric_outdent(r.start, c))
+                {
+                    let typed = format!("{indent}{text}");
+                    let caret = typed.len();
+                    changes.push(Change::replace(line_start, r.start, typed));
+                    specs.push(Self::caret_spec(s.id, Pos::In(idx, caret)));
+                    handled = true;
                 }
             }
             if !handled {
@@ -139,11 +171,54 @@ impl Buffer {
                 specs.push(Self::caret_spec(s.id, Pos::In(idx, text.len())));
             }
         }
-        self.apply_plan(Plan {
-            changes,
-            sels: specs,
-            kind,
-        })
+        self.apply_plan_closing(
+            Plan {
+                changes,
+                sels: specs,
+                kind,
+            },
+            closers,
+        )
+    }
+
+    /// Typing the closer `close` at the end of a line that holds only
+    /// whitespace: the line start and the indentation the line should get so
+    /// the closer lines up with the line of its opener (one indent unit less
+    /// than now when no opener is found). `None` when nothing changes.
+    fn electric_outdent(&self, caret: usize, close: char) -> Option<(usize, String)> {
+        let rope = &self.text;
+        let row = row_of(rope, caret);
+        let line_range = rope.line_range(row);
+        if caret != line_range.end {
+            return None;
+        }
+        let current = rope.text_for_range(line_range.clone());
+        if !current.chars().all(|c| c == ' ' || c == '\t') {
+            return None;
+        }
+        let target = match opener_for(close)
+            .and_then(|open| matching_opener(rope, line_range.start, open, close))
+        {
+            Some(opener) => {
+                let opener_line = rope.text_for_range(rope.line_range(row_of(rope, opener)));
+                opener_line[..leading_ws_len(&opener_line)].to_string()
+            }
+            None => {
+                let width = self.indent_width() as usize;
+                let drop = if current.ends_with('\t') {
+                    1
+                } else {
+                    current
+                        .chars()
+                        .rev()
+                        .take_while(|c| *c == ' ')
+                        .count()
+                        .min(width)
+                };
+                current[..current.len() - drop].to_string()
+            }
+        };
+        (target != current).then_some((line_range.start, target))
     }
 
     /// Newline with auto-indent at every caret.
@@ -151,6 +226,7 @@ impl Buffer {
         let eol = self.eol().as_str();
         let unit = self.indent_unit();
         let auto = self.options.auto_indent;
+        let colon = self.options.indent_after_colon;
         let rope = &self.text;
         let mut changes = Vec::with_capacity(self.sels.len());
         let mut specs = Vec::with_capacity(self.sels.len());
@@ -171,7 +247,7 @@ impl Buffer {
                     let first = format!("{eol}{indent}{unit}");
                     let caret = first.len();
                     (format!("{first}{eol}{indent}"), caret)
-                } else if matches!(last, Some('{' | '(' | '[' | ':')) {
+                } else if last.is_some_and(|c| opens_block(c, colon)) {
                     let t = format!("{eol}{indent}{unit}");
                     let c = t.len();
                     (t, c)
@@ -207,6 +283,7 @@ impl Buffer {
         let eol = self.eol().as_str();
         let unit = self.indent_unit();
         let auto = self.options.auto_indent;
+        let colon = self.options.indent_after_colon;
         let rope = &self.text;
         let mut rows: Vec<u32> = Vec::new();
         let mut owners: Vec<Vec<u64>> = Vec::new();
@@ -241,10 +318,11 @@ impl Buffer {
                 }
             } else {
                 if auto
-                    && matches!(
-                        line.trim_end().chars().next_back(),
-                        Some('{' | '(' | '[' | ':')
-                    )
+                    && line
+                        .trim_end()
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| opens_block(c, colon))
                 {
                     indent.push_str(&unit);
                 }

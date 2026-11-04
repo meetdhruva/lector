@@ -357,3 +357,42 @@ fn find_in_text_basic() {
     assert_eq!(find_in_text("a.b axb", &q("a.b")).unwrap(), vec![0..3]);
     let _: PathBuf = PathBuf::new();
 }
+
+#[test]
+fn replacements_expand_capture_groups_only_in_regex_mode() {
+    let text = "let a = 1;\nlet bb = 22;\n";
+    let mut re = q(r"let (\w+) = (\d+)");
+    re.regex = true;
+    let out = replacements_in_text(text, &re, "$2 => $1").unwrap();
+    assert_eq!(
+        out,
+        vec![
+            (0..9, "1 => a".to_string()),
+            (11..22, "22 => bb".to_string())
+        ]
+    );
+    // Named groups, `$$` and a literal `$1` when regex mode is off.
+    let mut named = q(r"(?P<n>\d+)");
+    named.regex = true;
+    let out = replacements_in_text("x 5", &named, "${n}$$").unwrap();
+    assert_eq!(out, vec![(2..3, "5$".to_string())]);
+    let literal = q("a");
+    assert_eq!(
+        replacements_in_text("a", &literal, "$1").unwrap(),
+        vec![(0..1, "$1".to_string())]
+    );
+    // Same matches as find_in_text, including case and word options.
+    let mut word = q("foo");
+    word.whole_word = true;
+    word.case = CaseMode::Sensitive;
+    let ranges: Vec<_> = replacements_in_text("foo Foo foobar foo", &word, "x")
+        .unwrap()
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
+    assert_eq!(ranges, find_in_text("foo Foo foobar foo", &word).unwrap());
+    assert!(replacements_in_text("a", &q(""), "b").unwrap().is_empty());
+    let mut bad = q("(");
+    bad.regex = true;
+    assert!(replacements_in_text("a", &bad, "b").is_err());
+}

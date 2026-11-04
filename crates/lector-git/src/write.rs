@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use gix::bstr::ByteSlice;
 
 use crate::error::{Error, Result, ResultExt};
-use crate::{Oid, Repo};
+use crate::{Oid, OperationKind, Repo};
 
 /// Where [`Repo::apply_patch`] applies a patch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -339,6 +339,36 @@ impl Repo {
             Err(err) => return Err(err),
         };
         Ok(parse_ident(&String::from_utf8_lossy(&out)))
+    }
+
+    /// Continues a stopped operation: `git <op> --continue` (`merge`, `rebase`,
+    /// `cherry-pick`, `revert`, `am`). `GIT_EDITOR=true` keeps the prepared
+    /// message, so it never waits for an editor. Fails (with git's message)
+    /// while conflicts remain unresolved.
+    pub fn continue_operation(&self, kind: OperationKind) -> Result<()> {
+        let cli = self.write_cli()?;
+        let a = args([kind.command(), "--continue"]);
+        cli.run_with("continuing", false, &a, None).map(drop)
+    }
+
+    /// Aborts a stopped operation: `git <op> --abort`. This **discards** the
+    /// resolutions made so far and restores the state before the operation
+    /// started (callers confirm first).
+    pub fn abort_operation(&self, kind: OperationKind) -> Result<()> {
+        let cli = self.write_cli()?;
+        let a = args([kind.command(), "--abort"]);
+        cli.run_with("aborting", false, &a, None).map(drop)
+    }
+
+    /// Skips the current commit of a stopped rebase / cherry-pick / revert / am
+    /// (`git <op> --skip`); its changes are dropped. Not valid for a merge.
+    pub fn skip_operation_step(&self, kind: OperationKind) -> Result<()> {
+        if kind == OperationKind::Merge {
+            return Err(Error::Parse("a merge has no step to skip".into()));
+        }
+        let cli = self.write_cli()?;
+        let a = args([kind.command(), "--skip"]);
+        cli.run_with("skipping", false, &a, None).map(drop)
     }
 }
 
