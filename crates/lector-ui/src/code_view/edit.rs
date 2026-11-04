@@ -74,7 +74,12 @@ impl EditBuffer {
         cx: &mut Context<Self>,
     ) -> R {
         if let Some(sels) = selections {
-            self.buffer.set_selections(sels);
+            // Re-installing identical carets would end the current typing run
+            // (`set_selections` breaks undo coalescing), making every keystroke
+            // its own undo step.
+            if !same_selections(&self.buffer, &sels) {
+                self.buffer.set_selections(sels);
+            }
         }
         let (result, transaction) = f(&mut self.buffer);
         if !transaction.deltas.is_empty() {
@@ -141,6 +146,22 @@ pub fn to_buffer_selections(
             goal: None,
         })
         .collect()
+}
+
+/// Whether `sels` are the buffer's current selections (same ranges, same newest).
+fn same_selections(buffer: &Buffer, sels: &[lector_buffer::Selection]) -> bool {
+    let current = buffer.selections();
+    if current.len() != sels.len() {
+        return false;
+    }
+    // `set_selections` makes the last given selection the newest.
+    let newest = buffer.newest_selection();
+    sels.last()
+        .is_some_and(|s| s.anchor == newest.anchor && s.head == newest.head)
+        && current
+            .iter()
+            .zip(sels)
+            .all(|(a, b)| a.anchor == b.anchor && a.head == b.head)
 }
 
 /// Converts buffer selections back to view selections; returns them with the

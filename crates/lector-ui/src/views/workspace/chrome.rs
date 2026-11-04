@@ -133,7 +133,8 @@ impl Workspace {
     // Opening folders and files.
 
     /// Replaces this window's workspace with `root` (optionally opening
-    /// `file`), saving the current session first.
+    /// `file`), saving the current session first. Asks Save All / Don't Save /
+    /// Cancel first when tabs with unsaved changes would close.
     pub fn open_folder_in_window(
         &mut self,
         root: PathBuf,
@@ -144,6 +145,28 @@ impl Workspace {
         if self.has_folder && file.is_none() && paths_equal(&root, self.project.root()) {
             return;
         }
+        if self.dirty_file_views(cx).is_empty() {
+            self.replace_with_folder(root, file, window, cx);
+            return;
+        }
+        let confirm = self.confirm_close(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if confirm.await {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.replace_with_folder(root, file, window, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn replace_with_folder(
+        &mut self,
+        root: PathBuf,
+        file: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (settings, _) = lector_config::load_settings_for(Some(&root));
         let project = match Project::open(&root, settings) {
             Ok(p) => p,

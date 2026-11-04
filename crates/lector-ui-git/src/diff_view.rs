@@ -129,8 +129,25 @@ pub struct DiffView {
 
 impl EventEmitter<DiffViewEvent> for DiffView {}
 
+impl DiffView {
+    /// Whether the body shows the code views (a text diff with changes), as
+    /// opposed to a message ("No changes", binary, image, error, loading).
+    fn shows_code_views(&self) -> bool {
+        self.error.is_none()
+            && self
+                .loaded
+                .as_ref()
+                .is_some_and(|l| l.diff.kind == DiffKind::Text && !l.diff.is_identical())
+    }
+}
+
 impl Focusable for DiffView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // A code view that is not rendered cannot hold the focus: actions and
+        // key bindings would no longer reach the workspace.
+        if !self.shows_code_views() {
+            return self.focus_handle.clone();
+        }
         match self.last_layout {
             Layout::Split => self.new_view.focus_handle(cx),
             Layout::Unified => self.unified_view.focus_handle(cx),
@@ -795,6 +812,7 @@ impl DiffView {
             change: change.clone(),
             action,
             selection,
+            content_id: loaded.diff.content_id().to_string(),
         };
         if action == HunkAction::Discard && self.store.read(cx).settings(cx).git.confirm_discard {
             let Some(ws) = self.store.read(cx).workspace.upgrade() else {
@@ -1497,6 +1515,12 @@ pub fn viewed_checkbox(id: &'static str, viewed: bool, cx: &App) -> gpui::Statef
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Focused while there was nothing to show (loading, "No changes"): hand
+        // the focus to the code view once the diff appears.
+        if self.focus_handle.is_focused(window) && self.shows_code_views() {
+            let handle = Focusable::focus_handle(self, cx);
+            window.focus(&handle);
+        }
         let layout = self.layout(window, cx);
         if layout != self.last_layout {
             self.last_layout = layout;

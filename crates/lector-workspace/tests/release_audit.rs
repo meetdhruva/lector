@@ -10,7 +10,7 @@ use lector_config::{ReviewStore, Settings};
 use lector_git::{Changeset, LogQuery};
 use lector_search::CancelToken;
 use lector_workspace::project::Project;
-use lector_workspace::review;
+use lector_workspace::{conflicts, review};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -123,6 +123,32 @@ fn exercise(project: &Project, store: &ReviewStore) {
     };
     let _ = repo.head();
     let _ = repo.status();
+    // v0.2/v0.3 read paths: commit composer, operation banner, conflicts.
+    let _ = repo.identity();
+    let _ = repo.last_commit_message();
+    let _ = repo.operation();
+    let _ = repo.merge_message();
+    if let Ok(state) = conflicts::conflict_state(repo) {
+        for entry in &state.entries {
+            for stage in [
+                conflicts::ConflictStage::Base,
+                conflicts::ConflictStage::Ours,
+                conflicts::ConflictStage::Theirs,
+            ] {
+                let _ = conflicts::stage_text(repo, &entry.path, stage);
+            }
+            if let Ok(text) = fs::read_to_string(repo.workdir().join(&entry.path)) {
+                let parse = conflicts::parse_conflicts(&text);
+                for side in [
+                    conflicts::Side::Ours,
+                    conflicts::Side::Theirs,
+                    conflicts::Side::Base,
+                ] {
+                    let _ = conflicts::side_view(&text, &parse, side);
+                }
+            }
+        }
+    }
     let _ = repo.branches();
     let _ = repo.tags();
     let _ = repo.stashes();
@@ -157,6 +183,21 @@ fn exercise(project: &Project, store: &ReviewStore) {
                 }
                 let _ = diff.split_segments(3);
                 let _ = diff.unified_segments(3);
+                // Building a hunk patch (shown before staging) must not write.
+                for action in review::HunkAction::available_for(cs) {
+                    for k in 0..diff.diff.hunks.len().min(3) {
+                        if let Some(sel) = diff.hunk_selection(k) {
+                            let _ = review::hunk_patch(
+                                repo,
+                                cs,
+                                &file.change,
+                                *action,
+                                &sel,
+                                lector_diff::Algorithm::Histogram,
+                            );
+                        }
+                    }
+                }
             }
             let path = file.path().to_string();
             let _ = repo.file_history(&path, 50);
@@ -382,4 +423,60 @@ fn unusual_repositories_do_not_panic() {
     let sub = Project::open(&outer.join("sub"), settings()).unwrap();
     exercise(&sub, &store);
     assert_eq!(before, snapshot(&outer));
+}
+
+/// Reading a repository in the middle of a conflicted merge (operation banner,
+/// conflict list, stage texts, merge editor panes) leaves it byte-for-byte unchanged.
+#[test]
+fn conflicted_merge_is_byte_identical_after_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir(&root).unwrap();
+    init_repo(&root);
+    write(&root, "a.txt", "one\ntwo\nthree\n");
+    write(&root, "gone.txt", "x\n");
+    commit_all(&root, "base");
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    write(&root, "a.txt", "one\nTWO (feature)\nthree\n");
+    write(&root, "gone.txt", "changed on feature\n");
+    commit_all(&root, "feature");
+    git(&root, &["checkout", "-q", "main"]);
+    write(&root, "a.txt", "one\nTWO (main)\nthree\n");
+    fs::remove_file(root.join("gone.txt")).unwrap();
+    commit_all(&root, "main");
+    let out = Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(&root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git merge");
+    assert!(!out.status.success(), "the merge conflicts");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let before = snapshot(&root);
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ReviewStore::open(store_dir.path().join("review.json"));
+    let project = Project::open(&root, settings()).unwrap();
+    let repo = project.repo().expect("repo");
+    let state = conflicts::conflict_state(repo).unwrap();
+    assert!(state.operation.is_some());
+    assert_eq!(state.entries.len(), 2);
+    exercise(&project, &store);
+    let after = snapshot(&root);
+    let changed: Vec<_> = before
+        .iter()
+        .filter(|(k, v)| after.get(*k) != Some(*v))
+        .map(|(k, _)| k.display().to_string())
+        .chain(
+            after
+                .keys()
+                .filter(|k| !before.contains_key(*k))
+                .map(|k| format!("new: {}", k.display())),
+        )
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "Lector modified the repository: {changed:?}"
+    );
 }

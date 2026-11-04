@@ -477,3 +477,26 @@ fn replace_is_disabled_in_read_only_tabs(cx: &mut TestAppContext) {
     bar.update_in(cx, |b, window, cx| b.toggle_replace(window, cx));
     assert!(!bar.read_with(cx, |b, _| b.replace_open()));
 }
+
+/// Regression: Tab moves between the find and replace fields (it used to do
+/// nothing, so the replacement was typed into the query).
+#[gpui::test]
+fn tab_switches_between_find_and_replace_fields(cx: &mut TestAppContext) {
+    init(cx, |_| {});
+    let fx = fixture(&[("a.txt", b"x = 1\n")]);
+    let (ws, cx) = open_workspace(cx, &fx.root);
+    let view = open_file(&ws, fx.root.join("a.txt"), cx);
+    cx.dispatch_action(FindReplace);
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("y");
+    cx.dispatch_action(ReplaceAll);
+    cx.run_until_parked();
+    assert_eq!(view_text(&view, cx), "y = 1\n");
+    // Tab again goes back to the query.
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("z");
+    let bar = find_bar_of(&ws, cx);
+    bar.read_with(cx, |b, cx| assert_eq!(b.query_text(cx), "xz"));
+}

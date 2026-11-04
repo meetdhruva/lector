@@ -217,9 +217,9 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(d, "alt-k".into(), "diff::PrevFile");
     add(d, "v".into(), "diff::ToggleViewed");
     add(d, format!("{m}-alt-d"), "diff::ToggleLayout");
-    // v0.2: staging from the diff view.
-    add(d, "s".into(), "git::StageHunk");
-    add(d, "u".into(), "git::UnstageHunk");
+    // v0.2: staging from the diff view. No bare-letter bindings: a stray key
+    // (e.g. typing after Ctrl+F, which does not open a find bar in diffs) must
+    // never change the index.
     add(d, format!("{m}-alt-s"), "git::StageHunk");
     add(d, format!("{m}-alt-u"), "git::UnstageHunk");
 
@@ -319,6 +319,29 @@ mod tests {
         assert_eq!(find(&lin, "editor::ReplaceNext"), ["ctrl-shift-1"]);
         assert_eq!(find(&lin, "editor::ReplaceAll"), ["ctrl-alt-enter"]);
         assert_eq!(find(&lin, "editor::GoToDefinition"), ["f12"]);
+    }
+
+    /// Regression: writes to the repository are never bound to a bare letter
+    /// (typing into a diff that has no text field must not stage anything).
+    #[test]
+    fn git_writes_need_a_modifier() {
+        for p in [Platform::MacOS, Platform::Linux, Platform::Windows] {
+            for b in default_keymap(p) {
+                let writes = b.action.starts_with("git::")
+                    && ["Stage", "Unstage", "Discard", "Commit", "Accept", "Resolve"]
+                        .iter()
+                        .any(|w| b.action[5..].starts_with(w));
+                if writes {
+                    let first = b.keys.split(' ').next().unwrap_or_default();
+                    assert!(
+                        first.contains('-') && first.len() > 1 || first == "space",
+                        "{p:?}: {} bound to bare `{}`",
+                        b.action,
+                        b.keys
+                    );
+                }
+            }
+        }
     }
 
     #[test]

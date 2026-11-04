@@ -7,11 +7,13 @@ Today's editors are built for typing. Lector is built for reading: understanding
 unfamiliar codebase, following definitions, and reviewing changes — working-tree
 edits, commits, branches, or whatever an agent just did.
 
-v0.1.0 is **strictly read-only**. It never modifies your files or your repository.
+Reading comes first, but you can act on what you read: stage and commit, make the small
+fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly ask it to
+(save, stage, commit, discard, resolve) — browsing, diffing and blame never touch your files.
 
 ![Lector reading code](docs/screenshots/reader-dark.png)
 
-## Features (v0.1.0)
+## Features (v0.3)
 
 **Reading**
 - Native, GPU-rendered UI (GPUI) with embedded JetBrains Mono and Inter fonts
@@ -32,11 +34,28 @@ v0.1.0 is **strictly read-only**. It never modifies your files or your repositor
 - History with commit graph, ref labels and filters; commit detail view
 - Branches, tags and stashes; blame gutter; file and line history
 - Permalinks for GitHub, GitLab, Bitbucket, Gitea/Codeberg, sourcehut
+- Stage, unstage and discard files, hunks or selected lines; commit composer with amend,
+  sign-off and hook output
+- Merge conflicts: inline accept actions, three-way merge editor, Continue/Abort for
+  merges, rebases, cherry-picks and reverts
+
+**Light editing**
+- Multiple carets, IME, undo/redo, auto-indent, comment toggling, line moves, find & replace
+- Saves are atomic and keep encoding, BOM, line endings and permissions; unsaved-change
+  prompts; files changed or deleted on disk are handled without losing work
+- Language servers: diagnostics, format (and format on save), code actions, rename
+- Read-only mode per tab or globally (`editor.read_only = true`)
+
+**Everywhere**
+- Menu bar on every platform (in the title bar on Linux and Windows), welcome screen with
+  recent projects, keyboard shortcut viewer — every command is reachable by mouse or keys
 
 | | |
 |---|---|
 | ![Split diff](docs/screenshots/diff-split-dark.png) | ![History graph](docs/screenshots/history-graph-dark.png) |
 | ![Review tab](docs/screenshots/review-tab-dark.png) | ![Outline](docs/screenshots/outline-light.png) |
+| ![Commit composer](docs/screenshots/commit-composer-light.png) | ![Merge editor](docs/screenshots/merge-editor-dark.png) |
+| ![Welcome](docs/screenshots/welcome-dark.png) | ![Diagnostics](docs/screenshots/diagnostics-dark.png) |
 
 ## Download
 
@@ -108,8 +127,9 @@ synchronous, and reusable on its own:
 | `lector-syntax` | tree-sitter language registry, highlights, outline, folds, tags |
 | `lector-diff` | line diff (imara-diff histogram), word refinement, split/unified rows |
 | `lector-search` | gitignore-aware walker, fuzzy picker (nucleo), project grep |
-| `lector-git` | read-only git via gitoxide, git CLI for blame and line history |
-| `lector-lsp` | read-only LSP client without an async runtime |
+| `lector-git` | git reads via gitoxide; blame, history and all writes via the git CLI |
+| `lector-lsp` | LSP client without an async runtime (navigation, diagnostics, edits) |
+| `lector-buffer` | editing model: multi-cursor selections, edit operations, undo/redo |
 | `lector-fs` | file loading, encoding and kind detection, debounced watcher |
 | `lector-config` | settings, keymaps, paths, session and review state |
 | `lector-theme`, `lector-icons` | theme model and built-in themes; file and UI icons |
@@ -124,8 +144,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
 
 | Release | Scope |
 |---|---|
-| 0.2 | Stage/unstage hunks, revert, commit composer |
-| 0.3 | Editing, multi-cursor, formatting, LSP code actions, conflict resolution |
+| ✅ 0.2 | Stage/unstage hunks, discard, commit composer, menus and welcome screen |
+| ✅ 0.3 | Editing, multi-cursor, formatting, LSP code actions, conflict resolution |
 | 0.4 | Full accessibility (screen readers via AccessKit) |
 | 0.5 | Agent integration: ACP client, MCP server, headless CLI |
 | 0.6+ | WASM plugins, PR integration, stacked changes, structural diff |

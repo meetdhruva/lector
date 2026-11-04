@@ -1,8 +1,9 @@
-# Lector architecture (v0.1.0)
+# Lector architecture (v0.3)
 
-Lector is a **reading-first** code viewer and git review tool. v0.1.0 is strictly
-**read-only**: it never writes to the user's files or repository. It may write
-its own settings, session and review state under the platform data directory.
+Lector is a **reading-first** code viewer and git review tool with light editing.
+v0.1 was strictly read-only; since v0.2 it writes to the user's files or repository
+only on explicit user actions (see "Write policy"). Its own settings, session and
+review state live under the platform config/data directories.
 
 ## Principles
 
@@ -721,7 +722,7 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
   * Diff view (`DiffView::changeset()` from the tab's changeset key): `HunkAction::available_for` decides the actions —
     floating "+ Stage / ↶ Discard" (Unstaged) or "− Unstage" (Staged) toolbars at the right edge above each visible
     hunk (the hunk at the cursor is outlined; repositioned on scroll), `git::StageHunk` / `UnstageHunk` / `DiscardHunk`
-    on the hunk at the cursor (`s` / `u`), `git::StageSelectedLines` / `UnstageSelectedLines` (rows of the selection in
+    on the hunk at the cursor (`cmd/ctrl-alt-s` / `cmd/ctrl-alt-u`; deliberately no bare-letter keys, so stray typing never stages), `git::StageSelectedLines` / `UnstageSelectedLines` (rows of the selection in
     the active column; both sides of changed rows), `git::Stage` / `Unstage` / `DiscardChanges` for the whole file, and
     a right-click menu (captured before the code view's) with Stage/Unstage/Discard Selected Lines, … Hunk, Copy,
     Open File. Discarding a hunk confirms. After an op the diff reloads and the cursor moves to the hunk now at the
@@ -971,6 +972,9 @@ swapped(), is_empty()}`; `CONTEXT_LINES = 3`.
 `HunkAction::available_for(&Changeset)` (Unstaged → Stage + Discard, Staged → Unstage, others → none),
 `FileDiff::{hunk_selection(ix), hunk_at(old, new)}`, `hunk_patch(repo, &changeset, &change, action, &selection, algorithm)
 -> Result<Option<(Vec<u8>, PatchTarget)>>` and `apply_hunk_action(..) -> Result<bool>` (false = nothing to apply).
+`apply_hunk_action_if_unchanged(.., expected_content_id: &str)` (used by the UI) first checks that both sides still match
+`FileDiff::content_id()` of the diff the rows were selected in (blob ids / content hashes, working copy normalized as
+below) and otherwise refuses with an error and writes nothing — rows of a stale diff never stage or discard other lines.
 Stage applies `index → worktree` to the index; Unstage builds `index → HEAD` and Discard `worktree → index` with the
 selection swapped and applies them forwards, so context always comes from the content being patched (neighbouring
 unselected changes and staged+unstaged mixes never break it). Working-tree bytes are compared in git's normalized form

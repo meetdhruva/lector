@@ -141,17 +141,19 @@ fn stage_and_unstage_paths_including_deletions_and_untracked() {
 
 #[test]
 fn literal_pathspecs_never_glob() {
+    // `[x].txt` is a valid file name everywhere (unlike `*`) and, as a glob, matches
+    // `x.txt`: a literal pathspec must only ever touch the bracketed file.
     let fx = Fx::new();
     fx.write("x.txt", "x\n");
     fx.commit_all("init");
-    fx.write("*.txt", "star\n");
+    fx.write("[x].txt", "bracket\n");
     fx.write("x.txt", "changed\n");
-    fx.repo().stage_paths(&["*.txt"]).unwrap();
-    assert_eq!(fx.status(), [" M x.txt", "A  *.txt"]);
-    fx.repo().unstage_paths(&["*.txt"]).unwrap();
-    assert_eq!(fx.status(), [" M x.txt", "?? *.txt"]);
-    fx.repo().discard_paths(&["*.txt"]).unwrap();
-    assert!(fx.read("*.txt").is_none());
+    fx.repo().stage_paths(&["[x].txt"]).unwrap();
+    assert_eq!(fx.status(), [" M x.txt", "A  [x].txt"]);
+    fx.repo().unstage_paths(&["[x].txt"]).unwrap();
+    assert_eq!(fx.status(), [" M x.txt", "?? [x].txt"]);
+    fx.repo().discard_paths(&["[x].txt"]).unwrap();
+    assert!(fx.read("[x].txt").is_none());
     assert_eq!(fx.read("x.txt").as_deref(), Some("changed\n"));
 }
 

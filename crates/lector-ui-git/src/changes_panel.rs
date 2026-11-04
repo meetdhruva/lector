@@ -1286,6 +1286,7 @@ impl ChangesPanel {
                     .into_any_element()
             }
             Some(Row::Empty) => v_flex()
+                .w_full()
                 .h(metrics::ROW_HEIGHT * 3.)
                 .items_center()
                 .justify_center()

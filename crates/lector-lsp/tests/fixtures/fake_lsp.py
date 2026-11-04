@@ -100,6 +100,15 @@ log("start")
 docs = {}
 versions = {}
 root_uri = "file:///tmp"
+
+
+def uri_to_path(uri):
+    """file:// URI to a local path (Windows: file:///C:/x -> C:\\x)."""
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname  # also percent-decodes
+    return url2pathname(urlparse(uri).path)
+
+
 while True:
     m = read()
     if m is None:
@@ -190,7 +199,7 @@ while True:
                     "edits": occurrences(docs.get(uri, ""), word, p["newName"])}]
         other = root_uri.rstrip("/") + "/other.rs"
         try:
-            other_text = open(other[len("file://"):]).read()
+            other_text = open(uri_to_path(other)).read()
         except OSError:
             other_text = ""
         if word in other_text:

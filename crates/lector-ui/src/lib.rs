@@ -70,6 +70,11 @@ pub fn init(
             tracing::error!("cannot open a window: {err:#}");
         }
     });
+    // GPUI has no native prompts on Linux / FreeBSD; its fallback is unthemed,
+    // truncates the detail text and ignores Enter / Escape.
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        components::prompt::install(cx);
+    }
     // macOS draws these natively; Linux and Windows draw the same model in
     // the title bar (`views::app_menu`).
     if cfg!(target_os = "macos") {

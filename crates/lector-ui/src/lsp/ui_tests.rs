@@ -63,7 +63,8 @@ fn fixture(files: &[(&str, &str)]) -> Fixture {
     for (name, text) in files {
         std::fs::write(dir.path().join(name), text).unwrap();
     }
-    let root = dir.path().canonicalize().unwrap();
+    // dunce: no `\\?\` verbatim prefix on Windows, matching the project's spelling.
+    let root = dunce::canonicalize(dir.path()).unwrap();
     Fixture { _dir: dir, root }
 }
 

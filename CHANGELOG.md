@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.0 — 2026-11-04
+
+Light editing on top of the reader, language server edits and merge-conflict resolution.
+Released together with 0.2.0.
+
+- **Editing:** file tabs are editable (or read-only per tab / with `editor.read_only`):
+  multiple carets (Ctrl/Cmd+D, Shift+Alt+Up/Down, Alt+click), IME, undo/redo, auto-indent
+  and electric outdent, auto-closing brackets, comment toggling, line moves and
+  duplication, whole-word occurrence selection, find and replace with regex groups.
+- **Saving:** Save, Save As, Save All, Revert; atomic writes that keep encoding, BOM, line
+  endings and file permissions; optional trim-trailing-whitespace and final newline;
+  opt-in auto-save; prompts before closing or switching folders with unsaved changes;
+  files changed or deleted on disk show Reload / Keep Mine / Compare instead of losing work.
+- **Language servers:** diagnostics (squiggles, gutter icons, Problems tab, F8), Format and
+  format on save, code actions with a lightbulb, inline rename (F2). Edits across several
+  files open as unsaved tabs for review — nothing is written until you save.
+- **Merge conflicts:** banner for merges, rebases, cherry-picks and reverts with Continue
+  and Abort; inline Accept Current / Incoming / Both actions; three-way merge editor with
+  an editable result; Mark Resolved saves and stages the file.
+- Live Markdown preview of unsaved text; blame follows unsaved edits.
+
+## 0.2.0 — 2026-11-04
+
+Every command is reachable by mouse, and you can stage and commit.
+
+- **Menus and window chrome:** one menu model shown natively on macOS and in the title
+  bar on Linux and Windows (File, Edit, Selection, View, Go, Git, Window, Help); window
+  controls; welcome screen with recent projects; Open File, Open Recent, New Window,
+  Close Folder, Close All Tabs; keyboard shortcut viewer; About dialog; log file;
+  toolbar buttons and a clickable status bar.
+- **Staging:** stage, unstage and discard files, hunks or selected lines from the Changes
+  panel and the diff view (discard always asks first; staging refuses if the file changed
+  since the diff was shown).
+- **Commit composer:** multi-line message with a 50/72 guide, amend, sign-off, identity
+  check with setup help, hook output shown inline; Ctrl/Cmd+Enter commits.
+- **Write policy:** Lector writes only on explicit actions; git writes go through the git
+  CLI so hooks, filters and signing behave as in the terminal.
+
+Known limitations (0.2/0.3): find (Ctrl+F) is not available inside diff tabs; a conflicted
+file's diff still offers hunk staging; committing doesn't warn about unsaved files; auto-save
+can save text mid-IME composition; Windows can maximize but not restore from the
+ToggleMaximize command (the title bar button works); no code completion yet.
+
 ## 0.1.0 — 2026-11-03
 
 First release: a complete read-only reader and git review tool.

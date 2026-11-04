@@ -255,7 +255,13 @@ impl Pane {
         item_opened(item.as_ref(), cx);
         let entry = PaneEntry { id, item, preview };
         let ix = if preview {
-            if let Some(ix) = self.entries.iter().position(|e| e.preview) {
+            // A preview tab with unsaved edits is never replaced (it is normally
+            // pinned on the first edit; this guards against a missed event).
+            if let Some(ix) = self
+                .entries
+                .iter()
+                .position(|e| e.preview && !e.item.is_dirty(cx))
+            {
                 let old = std::mem::replace(&mut self.entries[ix], entry);
                 item_closed(old.item.as_ref(), cx);
                 ix

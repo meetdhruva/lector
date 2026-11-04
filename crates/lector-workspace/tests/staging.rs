@@ -370,3 +370,86 @@ fn wrong_changeset_is_refused() {
         &[HunkAction::Unstage]
     );
 }
+
+/// Regression: rows selected in a diff that is no longer current (the file was edited
+/// and saved after the diff was shown) must not be applied to the new content, where
+/// they would stage / discard different lines.
+#[test]
+fn stale_diff_is_refused_and_writes_nothing() {
+    let fx = Fx::new();
+    fx.commit("f.txt", BASE.as_bytes());
+    fx.write("f.txt", TWO_HUNKS.as_bytes());
+    let shown = fx.diff(&Changeset::Unstaged, "f.txt");
+    let sel = shown.hunk_selection(0).expect("hunk 0");
+    let change = fx.change(&Changeset::Unstaged, "f.txt");
+    // The file changes on disk: a new line is inserted at the top.
+    fx.write("f.txt", format!("NEW\n{TWO_HUNKS}").as_bytes());
+    for action in [HunkAction::Stage, HunkAction::Discard] {
+        let err = review::apply_hunk_action_if_unchanged(
+            &fx.repo(),
+            &Changeset::Unstaged,
+            &change,
+            action,
+            &sel,
+            Algorithm::Histogram,
+            shown.content_id(),
+        );
+        assert!(err.is_err(), "{action:?} on a stale diff must fail");
+    }
+    assert_eq!(fx.index("f.txt"), BASE.as_bytes());
+    assert_eq!(fx.read("f.txt"), format!("NEW\n{TWO_HUNKS}").as_bytes());
+
+    // With a fresh diff the same call goes through.
+    let fresh = fx.diff(&Changeset::Unstaged, "f.txt");
+    let sel = fresh.hunk_selection(1).expect("hunk 1");
+    let applied = review::apply_hunk_action_if_unchanged(
+        &fx.repo(),
+        &Changeset::Unstaged,
+        &change,
+        HunkAction::Stage,
+        &sel,
+        Algorithm::Histogram,
+        fresh.content_id(),
+    )
+    .unwrap();
+    assert!(applied);
+    assert_eq!(
+        fx.index("f.txt"),
+        "l1\nL2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n".as_bytes()
+    );
+}
+
+/// The content id check also holds for staged diffs (unstage) and CRLF working files
+/// under autocrlf, where the working copy is compared normalized.
+#[test]
+fn content_id_matches_for_unchanged_staged_and_crlf_files() {
+    let fx = Fx::new();
+    fx.git(&["config", "core.autocrlf", "true"]);
+    fx.commit("f.txt", BASE.as_bytes());
+    fx.write("f.txt", TWO_HUNKS.replace('\n', "\r\n").as_bytes());
+    let d = fx.diff(&Changeset::Unstaged, "f.txt");
+    let change = fx.change(&Changeset::Unstaged, "f.txt");
+    assert!(review::apply_hunk_action_if_unchanged(
+        &fx.repo(),
+        &Changeset::Unstaged,
+        &change,
+        HunkAction::Stage,
+        &d.hunk_selection(0).unwrap(),
+        Algorithm::Histogram,
+        d.content_id(),
+    )
+    .unwrap());
+    let s = fx.diff(&Changeset::Staged, "f.txt");
+    let change = fx.change(&Changeset::Staged, "f.txt");
+    assert!(review::apply_hunk_action_if_unchanged(
+        &fx.repo(),
+        &Changeset::Staged,
+        &change,
+        HunkAction::Unstage,
+        &s.hunk_selection(0).unwrap(),
+        Algorithm::Histogram,
+        s.content_id(),
+    )
+    .unwrap());
+    assert_eq!(fx.index("f.txt"), BASE.as_bytes());
+}

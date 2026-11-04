@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.meetdhruva.Lector</id>
   <name>Lector</name>
-  <summary>Fast, reading-first code viewer and git review tool</summary>
+  <summary>Fast, reading-first code viewer, git review tool and light editor</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
   <developer id="io.github.meetdhruva">
@@ -39,6 +39,12 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-11-04">
+      <description><p>Light editing (multiple carets, save, find and replace), language server diagnostics, formatting, code actions and rename, and merge-conflict resolution.</p></description>
+    </release>
+    <release version="0.2.0" date="2026-11-04">
+      <description><p>Menu bar and window controls on every platform, welcome screen, staging by file, hunk or line, and a commit composer.</p></description>
+    </release>
     <release version="0.1.0" date="2026-11-03">
       <description><p>First release: a complete read-only reader and git review tool.</p></description>
     </release>

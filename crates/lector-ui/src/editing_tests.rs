@@ -652,3 +652,63 @@ fn typing_latency_10k_lines(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// Regression: Open Recent / Open Folder replace the window's workspace; with unsaved
+/// edits they must ask first (Cancel keeps everything) instead of silently dropping them.
+#[gpui::test]
+fn opening_another_folder_in_the_window_asks_about_unsaved_changes(cx: &mut TestAppContext) {
+    init(cx, |_| {});
+    let fx = fixture(&[("a.txt", b"hello\n")]);
+    let other = fixture(&[("b.txt", b"other\n")]);
+    let (ws, cx) = open_workspace(cx, &fx.root);
+    let view = open_file(&ws, fx.root.join("a.txt"), cx);
+    cx.simulate_input("X");
+    ws.update_in(cx, |ws, window, cx| {
+        ws.open_folder_in_window(other.root.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.has_pending_prompt(),
+        "asks before dropping unsaved edits"
+    );
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    view.read_with(cx, |v, cx| assert!(v.is_dirty(cx), "edits kept"));
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(ws.active_pane().read(cx).item_count(), 1)
+    });
+    assert_eq!(std::fs::read(fx.root.join("a.txt")).unwrap(), b"hello\n");
+
+    // Save All writes, then the folder opens.
+    ws.update_in(cx, |ws, window, cx| {
+        ws.open_folder_in_window(other.root.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Save");
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(fx.root.join("a.txt")).unwrap(), b"Xhello\n");
+}
+
+/// Regression: consecutive keystrokes in a code view form one undo step (the view
+/// used to re-install its unchanged carets before every edit, which ended the
+/// typing run, so Undo removed one character at a time).
+#[gpui::test]
+fn typing_in_a_code_view_is_one_undo_step(cx: &mut TestAppContext) {
+    init(cx, |_| {});
+    let (view, cx) = editable_view(cx, "fn a() {}\n");
+    view.update(cx, |v, cx| v.set_cursor(Pos::new(0, 9), cx));
+    for c in ["/", "/", " ", "h", "i"] {
+        cx.simulate_input(c);
+    }
+    assert_eq!(buffer_text(&view, cx), "fn a() {}// hi\n");
+    cx.dispatch_action(Undo);
+    assert_eq!(buffer_text(&view, cx), "fn a() {}\n");
+    // Moving the caret still starts a new step.
+    cx.dispatch_action(Redo);
+    cx.simulate_input("x");
+    view.update(cx, |v, cx| v.set_cursor(Pos::new(0, 0), cx));
+    cx.simulate_input("y");
+    cx.dispatch_action(Undo);
+    assert_eq!(buffer_text(&view, cx), "fn a() {}// hix\n");
+}

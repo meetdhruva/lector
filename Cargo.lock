@@ -4351,7 +4351,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lector"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4372,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "lector-buffer"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "lector-text",
@@ -4383,7 +4383,7 @@ dependencies = [
 
 [[package]]
 name = "lector-config"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
@@ -4400,7 +4400,7 @@ dependencies = [
 
 [[package]]
 name = "lector-diff"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "imara-diff",
@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "lector-fs"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "dunce",
  "encoding_rs",
@@ -4422,7 +4422,7 @@ dependencies = [
 
 [[package]]
 name = "lector-git"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "gix",
  "proptest",
@@ -4433,11 +4433,11 @@ dependencies = [
 
 [[package]]
 name = "lector-icons"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "lector-lsp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "futures",
@@ -4454,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "lector-search"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "globset",
  "grep-matcher",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "lector-syntax"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "insta",
  "lector-text",
@@ -4505,7 +4505,7 @@ dependencies = [
 
 [[package]]
 name = "lector-text"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -4520,7 +4520,7 @@ dependencies = [
 
 [[package]]
 name = "lector-theme"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "tempfile",
@@ -4530,9 +4530,10 @@ dependencies = [
 
 [[package]]
 name = "lector-ui"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
+ "dunce",
  "futures",
  "gpui",
  "image",
@@ -4560,7 +4561,7 @@ dependencies = [
 
 [[package]]
 name = "lector-ui-git"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -4583,7 +4584,7 @@ dependencies = [
 
 [[package]]
 name = "lector-workspace"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dunce",

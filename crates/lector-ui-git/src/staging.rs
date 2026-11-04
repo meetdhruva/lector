@@ -35,6 +35,9 @@ pub enum GitOp {
         action: HunkAction,
         /// Rows of the file's diff.
         selection: LineSelection,
+        /// [`lector_workspace::review::FileDiff::content_id`] of the diff the
+        /// selection was made in: the op refuses when the file changed since.
+        content_id: String,
     },
     /// `git <op> --continue` (rebase, cherry-pick, revert, am; merge commits
     /// go through the commit composer).
@@ -78,14 +81,16 @@ impl GitOp {
                 change,
                 action,
                 selection,
+                content_id,
             } => {
-                return review::apply_hunk_action(
+                return review::apply_hunk_action_if_unchanged(
                     repo,
                     changeset,
                     change,
                     *action,
                     selection,
                     Algorithm::Histogram,
+                    content_id,
                 )
                 .map_err(|e| workspace_error_text(&e));
             }

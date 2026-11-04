@@ -579,6 +579,9 @@ pub struct FileDiff {
     pub unified: Vec<UnifiedRow>,
     /// Options used.
     pub options: DiffOptions,
+    /// Identity of the exact contents this diff was computed from (see
+    /// [`FileDiff::content_id`]).
+    content_id: String,
     pairs: Vec<(u32, u32)>,
     pair_by_old: HashMap<u32, usize>,
     pair_by_new: HashMap<u32, usize>,
@@ -586,6 +589,13 @@ pub struct FileDiff {
 }
 
 impl FileDiff {
+    /// Identity of the contents (both sides) this diff was computed from. Pass it to
+    /// [`apply_hunk_action_if_unchanged`] so a hunk is never applied to content that
+    /// changed since the diff was shown.
+    pub fn content_id(&self) -> &str {
+        &self.content_id
+    }
+
     /// Line stats.
     pub fn stats(&self) -> DiffStats {
         self.diff.stats()
@@ -760,13 +770,18 @@ pub fn load_file_diff_with(
 ) -> Result<FileDiff> {
     let old_loaded = load_side(repo, &change.old)?;
     let new_loaded = normalize_loaded_pair(&old_loaded, &change.new, load_side(repo, &change.new)?);
-    Ok(build_file_diff(
-        change.clone(),
-        &old_loaded,
-        &new_loaded,
-        languages,
-        opts,
-    ))
+    let mut fd = build_file_diff(change.clone(), &old_loaded, &new_loaded, languages, opts);
+    fd.content_id = pair_content_id(change, &old_loaded, &new_loaded);
+    Ok(fd)
+}
+
+/// Identity of both loaded sides of `change` (blob ids, else content hashes).
+fn pair_content_id(change: &FileChange, old: &Loaded, new: &Loaded) -> String {
+    format!(
+        "{}|{}",
+        side_identity(&change.old, old),
+        side_identity(&change.new, new)
+    )
 }
 
 /// Builds a diff of two in-memory texts (e.g. a file vs a revision).
@@ -822,6 +837,7 @@ fn build_file_diff(
         split: Vec::new(),
         unified: Vec::new(),
         options: *opts,
+        content_id: String::new(),
         pairs: Vec::new(),
         pair_by_old: HashMap::new(),
         pair_by_new: HashMap::new(),
@@ -1143,6 +1159,18 @@ pub fn hunk_patch(
     selection: &LineSelection,
     algorithm: Algorithm,
 ) -> Result<Option<(Vec<u8>, lector_git::PatchTarget)>> {
+    hunk_patch_checked(repo, changeset, change, action, selection, algorithm, None)
+}
+
+fn hunk_patch_checked(
+    repo: &Repo,
+    changeset: &Changeset,
+    change: &FileChange,
+    action: HunkAction,
+    selection: &LineSelection,
+    algorithm: Algorithm,
+    expected_content_id: Option<&str>,
+) -> Result<Option<(Vec<u8>, lector_git::PatchTarget)>> {
     use lector_diff::patch::{build_patch_with, PatchFile};
     use lector_git::PatchTarget;
 
@@ -1168,6 +1196,22 @@ pub fn hunk_patch(
     };
     let old = patch_bytes(repo, &change.old)?;
     let new = patch_bytes(repo, &change.new)?;
+    if let Some(expected) = expected_content_id {
+        let as_loaded = |b: &Option<Vec<u8>>| match b {
+            None => Loaded::Missing,
+            Some(b) if b.len() as u64 > MAX_DIFF_BYTES => Loaded::TooLarge(b.len() as u64),
+            Some(b) => Loaded::Bytes(b.clone()),
+        };
+        let old_loaded = as_loaded(&old);
+        let new_loaded = normalize_loaded_pair(&old_loaded, &change.new, as_loaded(&new));
+        if pair_content_id(change, &old_loaded, &new_loaded) != expected {
+            return Err(Error::Other(format!(
+                "{} changed since this diff was shown; nothing was applied. \
+                 Review the updated diff and try again.",
+                change.path()
+            )));
+        }
+    }
     let (base, other, sel, target) = match action {
         HunkAction::Stage => {
             let new = new.map(|w| normalize_checkout_eol(old.as_deref(), w));
@@ -1195,7 +1239,52 @@ pub fn apply_hunk_action(
     selection: &LineSelection,
     algorithm: Algorithm,
 ) -> Result<bool> {
-    match hunk_patch(repo, changeset, change, action, selection, algorithm)? {
+    apply_checked(repo, changeset, change, action, selection, algorithm, None)
+}
+
+/// [`apply_hunk_action`], but refuses (with an error, writing nothing) when either side
+/// of the file no longer matches `expected_content_id` ([`FileDiff::content_id`] of the
+/// diff the selection was made in), so rows of a stale diff never stage, unstage or
+/// discard the wrong lines.
+pub fn apply_hunk_action_if_unchanged(
+    repo: &Repo,
+    changeset: &Changeset,
+    change: &FileChange,
+    action: HunkAction,
+    selection: &LineSelection,
+    algorithm: Algorithm,
+    expected_content_id: &str,
+) -> Result<bool> {
+    apply_checked(
+        repo,
+        changeset,
+        change,
+        action,
+        selection,
+        algorithm,
+        Some(expected_content_id),
+    )
+}
+
+fn apply_checked(
+    repo: &Repo,
+    changeset: &Changeset,
+    change: &FileChange,
+    action: HunkAction,
+    selection: &LineSelection,
+    algorithm: Algorithm,
+    expected_content_id: Option<&str>,
+) -> Result<bool> {
+    let patch = hunk_patch_checked(
+        repo,
+        changeset,
+        change,
+        action,
+        selection,
+        algorithm,
+        expected_content_id,
+    )?;
+    match patch {
         Some((patch, target)) => {
             repo.apply_patch(&patch, target, false)?;
             Ok(true)

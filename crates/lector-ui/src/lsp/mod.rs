@@ -234,4 +234,40 @@ mod tests {
         );
         assert_eq!(edits[0].range, 10..12);
     }
+
+    /// Servers send stale or out-of-range positions (past EOF, past the line end,
+    /// inside a surrogate pair, CRLF, empty text, no final newline): every
+    /// conversion must clamp to a char boundary and never panic.
+    #[test]
+    fn out_of_range_lsp_positions_clamp_to_char_boundaries() {
+        for src in [
+            "",
+            "x",
+            "a😀b",
+            "é\r\n😀\r\n",
+            "\n\n",
+            "fn a() {}\nlet s = \"👍🏽\";",
+        ] {
+            let text = Rope::from_str(src);
+            let s = text.to_string();
+            for row in 0..text.line_count() + 3 {
+                for column in 0..12 {
+                    let off = offset_for_point(&text, PointUtf16 { row, column });
+                    assert!(
+                        off <= s.len() && s.is_char_boundary(off),
+                        "{src:?} {row}:{column}"
+                    );
+                    let range = range_for_lsp(
+                        &text,
+                        &(PointUtf16 { row, column }..PointUtf16 { row: 0, column: 0 }),
+                    );
+                    assert!(range.start <= range.end && s.is_char_boundary(range.end));
+                }
+            }
+            for off in 0..s.len() + 3 {
+                let p = point_for_offset(&text, off);
+                assert!(p.row < text.line_count().max(1));
+            }
+        }
+    }
 }

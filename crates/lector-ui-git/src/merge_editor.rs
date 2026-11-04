@@ -556,13 +556,23 @@ impl MergeEditor {
                             cx,
                         )
                     });
-                    window.dispatch_action(Box::new(ws_actions::ShowChanges), cx);
+                    // `ShowChanges` toggles: only send it when the panel is hidden.
+                    let showing = ws.read(cx).is_sidebar_visible()
+                        && ws.read(cx).sidebar().read(cx).active_panel()
+                            == lector_ui::views::sidebar::SidebarPanel::Changes;
+                    if !showing {
+                        window.dispatch_action(Box::new(ws_actions::ShowChanges), cx);
+                    }
                 }
             }
-            // Close this merge tab (it is clean after the save).
+            // Close this merge tab (it is clean after the save; if the Result was
+            // edited again while staging ran, the tab stays open with its changes).
             let pane = ws.read(cx).active_pane().clone();
             if let Some(ix) = pane.read(cx).index_for_key(&key, cx) {
-                pane.update(cx, |p, cx| p.close_without_prompt(ix, window, cx));
+                let dirty = pane.read(cx).items().nth(ix).is_some_and(|i| i.is_dirty(cx));
+                if !dirty {
+                    pane.update(cx, |p, cx| p.close_without_prompt(ix, window, cx));
+                }
             }
         });
     }

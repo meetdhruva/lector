@@ -163,6 +163,11 @@ impl FindBar {
         bar
     }
 
+    /// The query as typed.
+    pub fn query_text(&self, cx: &App) -> String {
+        self.input.read(cx).text().to_string()
+    }
+
     /// Whether the replace row is shown.
     pub fn replace_open(&self) -> bool {
         self.replace_open
@@ -506,6 +511,17 @@ impl Render for FindBar {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::replace_next_action))
             .on_action(cx.listener(Self::replace_all_action))
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                // Tab / Shift-Tab move between the find and replace fields.
+                let k = &e.keystroke;
+                if k.key != "tab" || k.modifiers.control || k.modifiers.alt || k.modifiers.platform
+                {
+                    return;
+                }
+                if this.focus_other_field(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .w(px(560.))
             .child(
                 h_flex()
@@ -541,6 +557,23 @@ impl Render for FindBar {
 }
 
 impl FindBar {
+    /// Moves the caret between the find and replace fields (when the replace
+    /// row is shown). Returns whether focus moved.
+    fn focus_other_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !(self.replace_open && self.can_replace(cx)) {
+            return false;
+        }
+        let find = self.input.focus_handle(cx);
+        let target = if find.contains_focused(window, cx) {
+            self.replace_input.focus_handle(cx)
+        } else {
+            find
+        };
+        window.focus(&target);
+        cx.notify();
+        true
+    }
+
     /// Chevron (or search icon when replacing is unavailable) at the row start.
     fn render_chevron(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();

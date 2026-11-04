@@ -6,6 +6,7 @@ pub mod list;
 pub mod modal;
 pub mod picker;
 pub mod popover;
+pub mod prompt;
 pub mod scrollbar;
 pub mod split;
 pub mod tabs;

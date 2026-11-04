@@ -5,11 +5,21 @@ set -euo pipefail
 VERSION="$1"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# CHANGELOG section for this version (from its "## <version>" heading to the next "## ").
-awk -v v="$VERSION" '
-  /^## / { if (found) exit; if (index($0, "## " v " ") == 1 || $0 == "## " v) { found = 1; next } }
-  found { print }
-' "$ROOT/CHANGELOG.md"
+# CHANGELOG section for a version (from its "## <version>" heading to the next "## ").
+section() {
+  awk -v v="$1" '
+    /^## / { if (found) exit; if (index($0, "## " v " ") == 1 || $0 == "## " v) { found = 1; next } }
+    found { print }
+  ' "$ROOT/CHANGELOG.md"
+}
+
+NOTES="$(section "$VERSION")"
+printf '%s\n' "$NOTES"
+# Versions shipped in the same release ("Released together with X.Y.Z").
+for other in $(printf '%s\n' "$NOTES" | sed -n 's/.*Released together with \([0-9][0-9.]*[0-9]\).*/\1/p'); do
+  printf '\n## Also in this release: %s\n' "$other"
+  section "$other"
+done
 
 cat <<EOF
 
