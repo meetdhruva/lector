@@ -18,7 +18,7 @@ pub use recent::{RecentProjects, MAX_RECENT_PROJECTS};
 pub use review::{content_hash, ReviewStore};
 pub use session::{Axis, PaneState, Session, SessionStore, TabKind, TabState, WindowBounds};
 pub use settings::{
-    default_settings_toml, load_settings, load_settings_for, DiffLayout, DiffSettings,
-    FileSettings, GitSettings, LspSettings, ServerOverride, SessionSettings, Settings,
-    ShowWhitespace, ThemeMode, ThemeSettings,
+    default_settings_toml, load_settings, load_settings_for, AutoSave, DiffLayout, DiffSettings,
+    EditorSettings, FileSettings, GitSettings, LspSettings, ServerOverride, SessionSettings,
+    Settings, ShowWhitespace, ThemeMode, ThemeSettings,
 };

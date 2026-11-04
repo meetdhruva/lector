@@ -157,6 +157,12 @@ pub struct GitSettings {
     pub blame_gutter: bool,
     /// Show change marks in the gutter.
     pub show_gutter: bool,
+    /// Ask before discarding changes (files or hunks). Discarding cannot be undone.
+    pub confirm_discard: bool,
+    /// Add a `Signed-off-by` trailer to commits.
+    pub commit_sign_off: bool,
+    /// Column of the guide shown in the commit message editor (0 = none).
+    pub commit_message_ruler: u32,
 }
 
 impl Default for GitSettings {
@@ -164,6 +170,62 @@ impl Default for GitSettings {
         Self {
             blame_gutter: false,
             show_gutter: true,
+            confirm_discard: true,
+            commit_sign_off: false,
+            commit_message_ruler: 72,
+        }
+    }
+}
+
+/// When modified files are saved automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSave {
+    /// Only on explicit save.
+    #[default]
+    Off,
+    /// After `auto_save_delay_ms` without typing.
+    AfterDelay,
+    /// When the window or the tab loses focus.
+    OnFocusChange,
+}
+
+/// Editing options (v0.3+). Lector opens files read-only unless `read_only = false`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorSettings {
+    /// Open files read-only (editing disabled). Toggle per tab with "Toggle Read-Only".
+    pub read_only: bool,
+    /// Insert spaces for Tab; `None` follows the file's detected indentation.
+    pub insert_spaces: Option<bool>,
+    /// Keep the indentation of the previous line on Enter (and indent after `{`, `:` ...).
+    pub auto_indent: bool,
+    /// Insert the closing bracket or quote when typing an opening one.
+    pub auto_close_brackets: bool,
+    /// Automatic saving.
+    pub auto_save: AutoSave,
+    /// Delay for `auto_save = "after_delay"`.
+    pub auto_save_delay_ms: u64,
+    /// Format with the language server when saving.
+    pub format_on_save: bool,
+    /// Remove trailing whitespace when saving.
+    pub trim_trailing_whitespace: bool,
+    /// End files with exactly one newline when saving.
+    pub ensure_final_newline: bool,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            read_only: false,
+            insert_spaces: None,
+            auto_indent: true,
+            auto_close_brackets: true,
+            auto_save: AutoSave::Off,
+            auto_save_delay_ms: 1000,
+            format_on_save: false,
+            trim_trailing_whitespace: false,
+            ensure_final_newline: false,
         }
     }
 }
@@ -240,6 +302,8 @@ pub struct Settings {
     pub lsp: LspSettings,
     /// Git options.
     pub git: GitSettings,
+    /// Editing (v0.3+).
+    pub editor: EditorSettings,
     /// Session options.
     pub session: SessionSettings,
 }
@@ -272,6 +336,7 @@ impl Default for Settings {
             files: FileSettings::default(),
             lsp: LspSettings::default(),
             git: GitSettings::default(),
+            editor: EditorSettings::default(),
             session: SessionSettings::default(),
         }
     }
@@ -361,6 +426,32 @@ enabled = true
 blame_gutter = false
 # Show added/modified/deleted marks in the gutter.
 show_gutter = true
+# Ask before discarding changes (files or hunks); discarding cannot be undone.
+confirm_discard = true
+# Add a "Signed-off-by" trailer to commits.
+commit_sign_off = false
+# Guide column in the commit message editor (0 = none).
+commit_message_ruler = 72
+
+[editor]
+# Open files read-only. Each tab can still be toggled with "Toggle Read-Only".
+read_only = false
+# Insert spaces for Tab. Leave unset to follow each file's detected indentation.
+# insert_spaces = true
+# Keep (and increase after `{`, `:`, ...) indentation on Enter.
+auto_indent = true
+# Insert the closing bracket or quote when typing an opening one.
+auto_close_brackets = true
+# "off", "after_delay" or "on_focus_change".
+auto_save = "off"
+# Delay for auto_save = "after_delay", in milliseconds.
+auto_save_delay_ms = 1000
+# Format with the language server on save.
+format_on_save = false
+# Remove trailing whitespace on save.
+trim_trailing_whitespace = false
+# End files with exactly one newline on save.
+ensure_final_newline = false
 
 [session]
 # Reopen the tabs and layout from the last session.

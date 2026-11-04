@@ -82,6 +82,23 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(w, format!("{m}-+"), "workspace::ZoomIn");
     add(w, format!("{m}--"), "workspace::ZoomOut");
     add(w, format!("{m}-0"), "workspace::ZoomReset");
+    // v0.2: ease of access.
+    add(w, format!("{m}-alt-o"), "workspace::OpenFile");
+    add(w, "ctrl-r".into(), "workspace::OpenRecent");
+    add(w, format!("{m}-shift-n"), "workspace::NewWindow");
+    add(w, format!("{m}-k f"), "workspace::CloseFolder");
+    add(w, format!("{m}-k {m}-w"), "workspace::CloseAllTabs");
+    add(w, format!("{m}-k {m}-s"), "workspace::ShowKeybindings");
+    if !mac {
+        add(w, "ctrl-shift-w".into(), "workspace::CloseWindow");
+        add(w, "f11".into(), "workspace::ToggleFullScreen");
+        add(w, "alt-f".into(), "workspace::ShowAppMenu");
+    } else {
+        add(w, "cmd-ctrl-f".into(), "workspace::ToggleFullScreen");
+        add(w, "cmd-m".into(), "workspace::Minimize");
+    }
+    // v0.3: editing.
+    add(w, format!("{m}-alt-s"), "workspace::SaveAll");
 
     let c = "CodeView";
     add(c, "ctrl-g".into(), "editor::GoToLine");
@@ -130,6 +147,59 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
         add(c, "ctrl-end".into(), "editor::ScrollToBottom");
     }
 
+    // v0.3: editing (CodeView of an editable tab; read-only views ignore them).
+    add(c, format!("{m}-z"), "editor::Undo");
+    if mac {
+        add(c, "cmd-shift-z".into(), "editor::Redo");
+    } else {
+        add(c, "ctrl-y".into(), "editor::Redo");
+        add(c, "ctrl-shift-z".into(), "editor::Redo");
+    }
+    add(c, format!("{m}-x"), "editor::Cut");
+    add(c, format!("{m}-v"), "editor::Paste");
+    add(c, format!("{m}-s"), "editor::Save");
+    add(c, format!("{m}-shift-s"), "editor::SaveAs");
+    add(c, "enter".into(), "editor::Newline");
+    add(c, "shift-enter".into(), "editor::Newline");
+    add(c, format!("{m}-enter"), "editor::NewlineBelow");
+    add(c, format!("{m}-shift-enter"), "editor::NewlineAbove");
+    add(c, "backspace".into(), "editor::Backspace");
+    add(c, "shift-backspace".into(), "editor::Backspace");
+    add(c, "delete".into(), "editor::Delete");
+    if mac {
+        add(c, "alt-backspace".into(), "editor::DeleteWordLeft");
+        add(c, "alt-delete".into(), "editor::DeleteWordRight");
+        add(c, "cmd-backspace".into(), "editor::DeleteToLineStart");
+    } else {
+        add(c, "ctrl-backspace".into(), "editor::DeleteWordLeft");
+        add(c, "ctrl-delete".into(), "editor::DeleteWordRight");
+    }
+    add(c, format!("{m}-shift-k"), "editor::DeleteLine");
+    add(c, "tab".into(), "editor::Tab");
+    add(c, "shift-tab".into(), "editor::Outdent");
+    add(c, format!("{m}-]"), "editor::Indent");
+    add(c, format!("{m}-["), "editor::Outdent");
+    add(c, format!("{m}-/"), "editor::ToggleComment");
+    add(c, format!("{m}-shift-d"), "editor::DuplicateLine");
+    add(c, "alt-up".into(), "editor::MoveLineUp");
+    add(c, "alt-down".into(), "editor::MoveLineDown");
+    add(c, format!("{m}-l"), "editor::SelectLine");
+    add(c, format!("{m}-d"), "editor::SelectNextOccurrence");
+    add(c, format!("{m}-shift-l"), "editor::SelectAllOccurrences");
+    if mac {
+        add(c, "cmd-alt-up".into(), "editor::AddCursorAbove");
+        add(c, "cmd-alt-down".into(), "editor::AddCursorBelow");
+        add(c, "shift-alt-f".into(), "editor::Format");
+    } else {
+        add(c, "shift-alt-up".into(), "editor::AddCursorAbove");
+        add(c, "shift-alt-down".into(), "editor::AddCursorBelow");
+        add(c, "ctrl-shift-i".into(), "editor::Format");
+    }
+    add(c, "shift-alt-i".into(), "editor::SplitSelectionIntoLines");
+    add(c, format!("{m}-."), "editor::CodeActions");
+    add(c, "f2".into(), "editor::Rename");
+    add(c, "escape".into(), "editor::ClearSelection");
+
     let d = "DiffView";
     add(d, "alt-n".into(), "diff::NextHunk");
     add(d, "alt-p".into(), "diff::PrevHunk");
@@ -139,6 +209,28 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(d, "alt-k".into(), "diff::PrevFile");
     add(d, "v".into(), "diff::ToggleViewed");
     add(d, format!("{m}-alt-d"), "diff::ToggleLayout");
+    // v0.2: staging from the diff view.
+    add(d, "s".into(), "git::StageHunk");
+    add(d, "u".into(), "git::UnstageHunk");
+    add(d, format!("{m}-alt-s"), "git::StageHunk");
+    add(d, format!("{m}-alt-u"), "git::UnstageHunk");
+
+    // v0.2: changes panel and commit message editor.
+    let g = "ChangesPanel";
+    add(g, "space".into(), "git::Stage");
+    add(g, format!("{m}-enter"), "git::Commit");
+    let cm = "CommitEditor";
+    add(cm, format!("{m}-enter"), "git::Commit");
+    add(w, format!("{m}-k {m}-c"), "git::FocusCommitMessage");
+    add(w, format!("{m}-shift-r"), "git::Refresh");
+
+    // v0.3: conflict resolution.
+    let mg = "MergeEditor";
+    add(mg, "alt-1".into(), "git::AcceptOurs");
+    add(mg, "alt-2".into(), "git::AcceptTheirs");
+    add(mg, "alt-3".into(), "git::AcceptBoth");
+    add(mg, "alt-n".into(), "git::NextConflict");
+    add(mg, "alt-p".into(), "git::PrevConflict");
 
     let p = "Picker";
     add(p, "enter".into(), "picker::Confirm");

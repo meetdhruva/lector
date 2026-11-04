@@ -46,6 +46,23 @@ pub mod workspace {
             ToggleColorblindDiff,
             About,
             ShowOutline,
+            // v0.2: ease of access (menus, welcome screen, window controls).
+            OpenFile,
+            OpenRecent,
+            NewWindow,
+            CloseFolder,
+            CloseAllTabs,
+            ShowWelcome,
+            ShowKeybindings,
+            OpenLogFile,
+            OpenDocumentation,
+            ReportIssue,
+            Minimize,
+            ToggleMaximize,
+            ToggleFullScreen,
+            ShowAppMenu,
+            // v0.3: editing.
+            SaveAll,
         ]
     );
 }
@@ -105,6 +122,72 @@ pub mod editor {
             SelectToTop,
             SelectToBottom,
             ClearSelection,
+            // v0.3: editing.
+            Undo,
+            Redo,
+            Cut,
+            Paste,
+            Save,
+            SaveAs,
+            RevertFile,
+            ToggleReadOnly,
+            Newline,
+            NewlineBelow,
+            NewlineAbove,
+            Backspace,
+            Delete,
+            DeleteWordLeft,
+            DeleteWordRight,
+            DeleteToLineStart,
+            DeleteLine,
+            Tab,
+            Indent,
+            Outdent,
+            ToggleComment,
+            DuplicateLine,
+            MoveLineUp,
+            MoveLineDown,
+            SelectLine,
+            SelectNextOccurrence,
+            SelectAllOccurrences,
+            AddCursorAbove,
+            AddCursorBelow,
+            SplitSelectionIntoLines,
+            Format,
+            CodeActions,
+            Rename,
+        ]
+    );
+}
+
+/// `git::*` actions (v0.2+: staging, committing, discarding, conflicts).
+pub mod git {
+    use gpui::actions;
+    actions!(
+        git,
+        [
+            Stage,
+            Unstage,
+            StageAll,
+            UnstageAll,
+            DiscardChanges,
+            DiscardAll,
+            StageHunk,
+            UnstageHunk,
+            DiscardHunk,
+            StageSelectedLines,
+            UnstageSelectedLines,
+            Commit,
+            ToggleAmend,
+            FocusCommitMessage,
+            Refresh,
+            OpenMergeEditor,
+            AcceptOurs,
+            AcceptTheirs,
+            AcceptBoth,
+            NextConflict,
+            PrevConflict,
+            MarkResolved,
         ]
     );
 }
@@ -164,7 +247,7 @@ pub mod text_input {
 }
 
 /// Namespaces whose actions are user commands (shown in the palette).
-pub const COMMAND_NAMESPACES: &[&str] = &["workspace", "editor", "diff"];
+pub const COMMAND_NAMESPACES: &[&str] = &["workspace", "editor", "diff", "git"];
 
 /// Actions hidden from the command palette (motion primitives etc.).
 pub fn is_palette_hidden(name: &str) -> bool {
@@ -175,9 +258,23 @@ pub fn is_palette_hidden(name: &str) -> bool {
         return true;
     }
     ns == "editor"
-        && (action.starts_with("Move")
-            || action.starts_with("Select") && action != "SelectAll"
-            || matches!(action, "PageUp" | "PageDown" | "ClearSelection"))
+        && (action.starts_with("Move") && !action.starts_with("MoveLine")
+            || action.starts_with("Select")
+                && !matches!(
+                    action,
+                    "SelectAll" | "SelectLine" | "SelectNextOccurrence" | "SelectAllOccurrences"
+                )
+            || matches!(
+                action,
+                "PageUp"
+                    | "PageDown"
+                    | "ClearSelection"
+                    | "Newline"
+                    | "Backspace"
+                    | "Delete"
+                    | "Tab"
+                    | "DeleteToLineStart"
+            ))
 }
 
 /// Human-readable label for an action name: `"workspace::ToggleSidebar"` →

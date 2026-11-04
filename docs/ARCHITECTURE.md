@@ -40,6 +40,28 @@ its own settings, session and review state under the platform data directory.
 7. **Every user command is an action** (palette, keybinding, menu, context menu
    all dispatch the same GPUI action). This is the future hook for agents/MCP.
 
+## Write policy (v0.2+)
+
+v0.1 was strictly read-only. From v0.2 Lector can stage and commit, and from v0.3 it
+can edit and save files. The rules:
+
+1. **Only explicit user actions write.** Save, Save All, stage/unstage, commit, discard,
+   accept a conflict resolution, rename/format via LSP *applied to the buffer* (and then
+   saved by the user). Opening, browsing, status refresh, diffing, blame and history
+   never write — `crates/lector-workspace/tests/release_audit.rs` keeps enforcing this
+   for every read path.
+2. **Opt-in automation only.** Auto-save and format-on-save are off by default.
+3. **Destructive operations confirm** (`git.confirm_discard`, closing unsaved tabs,
+   reloading a modified file) and say what will be lost.
+4. **Git writes go through the git CLI** (`lector-git::write`): hooks, index locking,
+   filters (autocrlf, LFS) and signing behave exactly as in the terminal. Read paths stay
+   on gix. Commands run with `-C <workdir>`, never through a shell, with arguments
+   passed as separate argv entries; patches go through stdin.
+5. **Saves are atomic** (temp file in the same directory + rename), keep the file's
+   permissions, encoding (UTF-8, UTF-8 BOM, UTF-16 LE/BE) and line endings, and refuse
+   to overwrite a file that changed on disk since it was loaded unless the user confirms.
+6. Language servers keep running with the "no writes into the project" options from v0.1.
+
 ## Coordinates
 
 * Byte offsets are `usize`, UTF-8, into the text.
@@ -609,6 +631,95 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
 * Session: diff / review / commit tabs save as `TabKind::{Diff{changeset_key, path}, Other{"review:<key>" |
   "vs:<rev>:<path>"}, Commit{oid}}` and are reopened by `init` (the workspace restores its own session before
   extensions register, so `restore_git_tabs` re-reads the session; tabs are deduped by `item_key`).
+
+### lector-buffer (v0.3, UI-free editing model; no GPUI, no tokio)
+```rust
+pub struct Selection { pub id: u64, pub anchor: usize, pub head: usize, pub goal: Option<u32> }
+// byte offsets into the text; `head` is the caret; goal = preferred column (chars) for up/down
+impl Selection { pub fn range(&self) -> Range<usize>; pub fn is_empty(&self) -> bool; pub fn reversed(&self) -> bool; }
+pub enum IndentStyle { Tabs, Spaces(u32) }
+pub struct CommentTokens { pub line: Option<String>, pub block: Option<(String, String)> }
+pub struct BufferOptions { pub tab_size: u32, pub indent: IndentStyle, pub auto_indent: bool,
+                           pub auto_close_brackets: bool, pub comment: CommentTokens }
+pub struct TextEdit { pub range: Range<usize>, pub new_text: String }   // offsets in the text *before* the edit batch
+pub struct EditDelta { pub start_byte: usize, pub old_end_byte: usize, pub new_end_byte: usize,
+                       pub start: Point, pub old_end: Point, pub new_end: Point }  // tree-sitter InputEdit / LSP change shape
+pub struct Transaction { pub deltas: Vec<EditDelta> }  // returned by every mutating call (empty = nothing changed)
+pub enum Motion { Left, Right, Up, Down, WordLeft, WordRight, LineStart /*smart: first non-blank, then col 0*/,
+                  LineEnd, PageUp(u32 /*rows*/), PageDown(u32), BufferStart, BufferEnd }
+pub struct Buffer;   // owns a Rope + selections + undo history; Clone is cheap-ish (Rope is O(1))
+impl Buffer {
+    pub fn new(text: Rope, options: BufferOptions) -> Buffer;      // one caret at 0
+    pub fn text(&self) -> &Rope;  pub fn version(&self) -> u64;    // bumps on every change, undo/redo included
+    pub fn is_dirty(&self) -> bool; pub fn mark_saved(&mut self);  // dirty = version != saved version (undo back to it → clean)
+    pub fn options(&self) -> &BufferOptions; pub fn set_options(&mut self, o: BufferOptions);
+    pub fn selections(&self) -> &[Selection];                     // sorted, non-overlapping, merged after every op
+    pub fn set_selections(&mut self, sels: Vec<Selection>);       // normalizes (clip to char boundaries, sort, merge)
+    pub fn set_cursor(&mut self, offset: usize);                  // single caret
+    // editing — all multi-cursor aware; each call is one undo step unless coalesced (typing within 1 s,
+    // same kind, adjacent) — see `begin_transaction`/`end_transaction` for explicit grouping
+    pub fn insert(&mut self, text: &str) -> Transaction;          // typed text: auto-close brackets/quotes, type-over closers
+    pub fn paste(&mut self, text: &str) -> Transaction;           // distributes lines across carets when counts match
+    pub fn newline(&mut self) -> Transaction;                     // auto-indent (+1 level after `{ ( [ :` and between pairs)
+    pub fn newline_below(&mut self) -> Transaction; pub fn newline_above(&mut self) -> Transaction;
+    pub fn backspace(&mut self) -> Transaction;                   // deletes a whole indent unit in leading whitespace, pairs `(|)`
+    pub fn delete(&mut self) -> Transaction;
+    pub fn delete_word_left(&mut self) -> Transaction; pub fn delete_word_right(&mut self) -> Transaction;
+    pub fn delete_to_line_start(&mut self) -> Transaction; pub fn delete_line(&mut self) -> Transaction;
+    pub fn tab(&mut self) -> Transaction;                         // indent selected lines, else insert indent unit
+    pub fn indent(&mut self) -> Transaction; pub fn outdent(&mut self) -> Transaction;
+    pub fn toggle_comment(&mut self) -> Transaction;              // line comments (block if no line token)
+    pub fn duplicate_line(&mut self) -> Transaction;
+    pub fn move_lines(&mut self, up: bool) -> Transaction;
+    pub fn cut(&mut self) -> (String, Transaction);               // empty selection cuts the whole line
+    pub fn copy(&self) -> String;                                 // empty selection copies the whole line
+    pub fn apply_edits(&mut self, edits: Vec<TextEdit>) -> Transaction;  // external (LSP format/rename/code action, reload); one undo step; selections mapped
+    pub fn replace_all(&mut self, text: &str) -> Transaction;     // keeps carets near their old line/column
+    pub fn undo(&mut self) -> Transaction; pub fn redo(&mut self) -> Transaction;  // restore selections too
+    pub fn begin_transaction(&mut self); pub fn end_transaction(&mut self);
+    // selection & multi-cursor
+    pub fn move_carets(&mut self, motion: Motion, extend: bool);  // collapses non-empty selections on plain Left/Right
+    pub fn select_all(&mut self); pub fn select_line(&mut self);  // repeated: extends
+    pub fn select_word_at(&mut self, offset: usize);
+    pub fn select_next_occurrence(&mut self) -> bool;             // first call selects word under caret; wraps
+    pub fn select_all_occurrences(&mut self);
+    pub fn add_caret_above(&mut self); pub fn add_caret_below(&mut self);
+    pub fn add_caret(&mut self, offset: usize);                    // alt-click
+    pub fn split_selection_into_lines(&mut self);
+    pub fn collapse_selections(&mut self);                        // Escape: keep the newest caret only
+}
+pub mod save {  // encoding back to bytes for saving
+    pub enum Encoding { Utf8, Utf8Bom, Utf16Le, Utf16Be }
+    pub enum LineEnding { Lf, CrLf }
+    pub struct SaveOptions { pub encoding: Encoding, pub line_ending: Option<LineEnding> /* None = keep text as is */,
+                             pub trim_trailing_whitespace: bool, pub ensure_final_newline: bool }
+    pub fn encode(text: &Rope, opts: &SaveOptions) -> Vec<u8>;
+}
+```
+`lector-fs` adds `write_atomic(path, bytes) -> io::Result<()>` (temp file in the same dir,
+fsync, rename, keep permissions; symlinks are written through to their target) and
+`FileStamp { len, modified }` + `stamp(path)` for "changed on disk since load" checks.
+`lector-syntax` adds `Syntax::edit_and_reparse(&self, text: &Text, deltas: &[EditDelta-like]) -> Result<Syntax>`
+(tree-sitter incremental parse, < 5 ms for typical edits in a 10k-line file).
+
+### lector-git write API (v0.2; `lector_git::write`, git CLI)
+```rust
+impl Repo {
+    pub fn stage_paths(&self, paths: &[&str]) -> Result<()>;          // git add -- <paths> (also deletions: add -A -- <paths>)
+    pub fn unstage_paths(&self, paths: &[&str]) -> Result<()>;        // git restore --staged -- <paths> (unborn HEAD: rm --cached)
+    pub fn stage_all(&self) -> Result<()>; pub fn unstage_all(&self) -> Result<()>;
+    pub fn discard_paths(&self, paths: &[&str]) -> Result<()>;        // tracked: restore --worktree; untracked: delete file
+    pub fn apply_patch(&self, patch: &str, target: PatchTarget, reverse: bool) -> Result<()>;
+        // PatchTarget::Index (stage/unstage hunk or lines: git apply --cached [-R] --unidiff-zero? no: proper context)
+        // PatchTarget::Worktree (discard hunk: git apply -R)
+    pub fn commit(&self, opts: &CommitOptions) -> Result<Oid>;        // message via -F -, amend, sign_off, allow_empty=false
+    pub fn last_commit_message(&self) -> Result<Option<String>>;      // for amend
+    pub fn identity(&self) -> Result<Option<(String, String)>>;      // user.name/email, None if missing (UI explains)
+}
+pub struct CommitOptions { pub message: String, pub amend: bool, pub sign_off: bool }
+lector_diff / lector_workspace::review: build a valid unified-diff patch for one hunk or a
+line selection of a hunk (git-apply compatible, with correct headers for new/deleted/renamed files).
+```
 
 ### lector-ui (extension seams)
 ```rust
