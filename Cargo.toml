@@ -26,6 +26,8 @@ lector-theme = { path = "crates/lector-theme" }
 lector-icons = { path = "crates/lector-icons" }
 lector-workspace = { path = "crates/lector-workspace" }
 lector-app = { path = "crates/lector-app" }
+lector-agent = { path = "crates/lector-agent" }
+lector-forge = { path = "crates/lector-forge" }
 lector-ui = { path = "crates/lector-ui" }
 lector-ui-git = { path = "crates/lector-ui-git" }
 # common

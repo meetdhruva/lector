@@ -1,0 +1,25 @@
+[package]
+name = "lector-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Agent sessions for Lector: Agent Client Protocol client, per-turn checkpoints, feedback loop."
+
+[dependencies]
+lector-app.workspace = true
+lector-git.workspace = true
+lector-workspace.workspace = true
+lector-config.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+lector-config = { workspace = true, features = ["test-support"] }

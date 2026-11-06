@@ -1417,6 +1417,61 @@ published after the first batch (<= 2048 items) and then at most every 12 ms, `t
 Completed match sets of the last 16 queries are remembered, so typing narrows the previous set and backspace
 reuses a remembered one.
 
+### v0.5 / v0.6 — agents, CLI/MCP, code hosts, review UX (contracts)
+
+**lector-agent (v0.5; UI-free).** Drives coding agents over the Agent Client Protocol
+(ACP: JSON-RPC over the agent's stdio; agents: Gemini CLI `--experimental-acp`,
+Claude Code via `claude-code-acp`, Codex via `codex-acp`, any ACP agent from settings).
+```rust
+pub struct AgentConfig { pub name: String, pub command: String, pub args: Vec<String>, pub env: Vec<(String, String)> }  // settings [[agent.servers]]
+pub struct AgentSession;   // one conversation with one agent in one project; Clone handle
+impl AgentSession {
+    pub fn start(core: &AppCore, project: &Project, cfg: &AgentConfig) -> Result<AgentSession>;
+    pub fn prompt(&self, text: String, context: Vec<PromptContext /* file, range, diff, comments */>) -> Result<TurnId>;
+    pub fn cancel(&self); pub fn turns(&self) -> Vec<Turn>; pub fn subscribe(&self, cb) -> Subscription;
+    pub fn answer_permission(&self, req: PermissionRequestId, choice: PermissionChoice);
+}
+pub struct Turn { pub id: TurnId, pub prompt: String, pub before: ShadowSnapshot, pub after: Option<ShadowSnapshot>,
+                  pub messages: Vec<AgentMessage>, pub tool_calls: Vec<ToolCall>, pub plan: Vec<PlanEntry>, pub state: TurnState }
+```
+* Every turn is bracketed by `ShadowRepo::snapshot_worktree` checkpoints; the turn's changes are a
+  `Changeset::Snapshots { from, to }` reviewable in the existing diff/review views; "Undo turn" restores
+  the `before` snapshot through the journal (undoable itself).
+* ACP file-system requests (`fs/read_text_file`, `fs/write_text_file`) go through `DocumentStore` so
+  agent edits appear live in open tabs; writes are journaled with the turn id. Permission requests
+  are shown to the user (allow once / always for this session / reject).
+* Feedback loop: review comments (below) on a turn's changes → "Send to agent" builds a prompt with
+  file/line anchors and the comment text.
+
+**lector-app review comments (v0.6, Agent FORGE).** `lector_app::comments::{CommentStore, Comment,
+Thread, Anchor}` in the Db: threads anchored to (path, line, line text + context, changeset/blob id),
+re-anchored on new revisions with `lector_diff::remap`; states open/resolved/outdated; origin
+local | github | gitlab; drafts. Used by local review, PR review and the agent feedback loop.
+
+**Provenance (v0.5, Agent REVIEWUX defines; AGENT implements a provider).**
+`lector_app::provenance::{ProvenanceProvider, LineProvenance { kind: Commit | AgentTurn | Uncommitted, title,
+detail, id }}` — "why is this line like this?" shown on hover over changed lines (commit message, or
+the agent prompt + turn).
+
+**lector-forge (v0.6; UI-free, blocking HTTP via ureq, no tokio).**
+```rust
+pub trait Forge: Send + Sync { fn kind(&self) -> ForgeKind; fn list_pull_requests(&self, state) -> Result<Vec<PullRequest>>;
+    fn pull_request(&self, number) -> Result<PullRequest>; fn review_threads(&self, number) -> Result<Vec<ReviewThread>>;
+    fn submit_review(&self, number, review: &ReviewSubmission /* event: Approve|RequestChanges|Comment, body, comments */) -> Result<()>;
+    fn reply(&self, number, thread, body) -> Result<()>; }
+pub fn detect(remote_url: &str) -> Option<ForgeRemote>;   // github.com, GitHub Enterprise, gitlab.com, self-hosted GitLab
+pub fn auth_token(remote: &ForgeRemote) -> Option<Token>;   // env (GITHUB_TOKEN/GH_TOKEN/GITLAB_TOKEN), `gh auth token`, OS keychain
+```
+PR head/base commits are fetched into the **shadow repo** (never the user's repo) and reviewed as a
+`Changeset::Range` there; inline comments come from `review_threads` and drafts from `CommentStore`.
+Submitting a review is an explicit user action, irreversible → confirmation dialog.
+
+**CLI and MCP (v0.5, Agent CLI).** Subcommands of the `lector` binary drive `AppCore` headlessly:
+`lector status`, `lector changes [--json]`, `lector diff <changeset> [--json]`, `lector commands`,
+`lector run <command-id> [--args JSON]`, `lector mcp` (Model Context Protocol server over stdio:
+registry commands are MCP tools with their JSON schemas; read commands always available, write
+commands only with `--allow-writes`, each journaled). No tokio: JSON-RPC handled directly.
+
 ### lector-ui (extension seams)
 ```rust
 // Data in through traits; integration plugs the core crates in here.

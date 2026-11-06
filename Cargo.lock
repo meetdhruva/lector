@@ -4371,6 +4371,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "lector-agent"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "lector-app",
+ "lector-config",
+ "lector-git",
+ "lector-workspace",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "lector-app"
 version = "0.3.0"
 dependencies = [
@@ -4435,6 +4452,19 @@ dependencies = [
  "imara-diff",
  "insta",
  "proptest",
+]
+
+[[package]]
+name = "lector-forge"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "lector-git",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
