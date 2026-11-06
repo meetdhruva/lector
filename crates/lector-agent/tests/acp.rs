@@ -551,3 +551,41 @@ fn provenance_explains_lines_written_by_a_turn() {
     s.stop();
     let _ = Changeset::WorkingTree;
 }
+
+/// Regression: checkpoints leave ignored files out, so an agent overwriting an ignored file
+/// (`.env`) during a checkpointed turn was neither backed up nor undoable; and a dangling
+/// symlink inside the project let a write create its target outside the project.
+#[test]
+fn ignored_files_are_backed_up_and_dangling_links_refused() {
+    let fx = fx!();
+    fs::write(fx.root.join(".gitignore"), ".env\n").unwrap();
+    fs::write(fx.root.join(".env"), "SECRET=keep\n").unwrap();
+    let outside = fx._work.path().join("planted.txt");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, fx.root.join("link.txt")).unwrap();
+    let s = fx.start();
+    let t = fx.run(&s, "write .env SECRET=agent\\n\nwrite link.txt evil\\n");
+    assert_eq!(fx.read(".env").unwrap(), "SECRET=agent\n");
+    assert!(
+        !outside.exists(),
+        "write-through to a target outside the project"
+    );
+    #[cfg(unix)]
+    assert!(t.answer().contains("WRITE-ERROR:"), "{}", t.answer());
+    let journal = Journal::of(&fx.core).unwrap();
+    let entry = journal
+        .list(20)
+        .into_iter()
+        .find(|e| e.command == "agent.write_file" && e.summary.contains(".env"))
+        .expect("journaled");
+    assert!(
+        entry.undo.is_some(),
+        "the ignored file's write must be undoable"
+    );
+    let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
+    journal
+        .undo(entry.id, &cx, lector_app::journal::UndoMode::Check)
+        .unwrap();
+    assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
+    s.stop();
+}

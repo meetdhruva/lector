@@ -39,6 +39,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.6.0" date="2026-11-06">
+      <description><p>Review GitHub and GitLab pull requests locally, and comments that follow the code through edits and rebases.</p></description>
+    </release>
+    <release version="0.5.0" date="2026-11-06">
+      <description><p>Drive coding agents from the Agent panel with a reviewable, undoable checkpoint per turn; command line and MCP server.</p></description>
+    </release>
+    <release version="0.4.0" date="2026-11-06">
+      <description><p>Undo and an Activity log instead of confirmation dialogs, a risk-ordered review queue, moved-code detection and keyboard accessibility.</p></description>
+    </release>
     <release version="0.3.0" date="2026-11-04">
       <description><p>Light editing (multiple carets, save, find and replace), language server diagnostics, formatting, code actions and rename, and merge-conflict resolution.</p></description>
     </release>

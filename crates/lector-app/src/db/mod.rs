@@ -216,13 +216,20 @@ impl Db {
                 path.display()
             ),
         }
-        let copy = std::env::temp_dir().join(format!(
-            "lector-{}-{}.redb",
+        // The copy holds review state, comments and the activity journal: keep it
+        // next to the original (same owner, same protection), readable only by the user.
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let copy = dir.join(format!(
+            ".lector-{}-{}.redb",
             std::process::id(),
             now_nanos()
         ));
         let copied = if path.exists() {
-            std::fs::copy(path, &copy).map(|_| ())
+            std::fs::copy(path, &copy).and_then(|_| restrict_to_owner(&copy))
         } else {
             Ok(())
         };
@@ -738,3 +745,33 @@ impl Db {
 
 #[cfg(test)]
 mod tests;
+
+/// Makes `path` readable and writable by its owner only (no-op where not applicable).
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod fallback_permission_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fallback_copy_is_private_and_next_to_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("lector.redb");
+        std::fs::write(&original, b"not a redb file").unwrap();
+        let copy = dir.path().join(".copy.redb");
+        std::fs::copy(&original, &copy).unwrap();
+        restrict_to_owner(&copy).unwrap();
+        let mode = std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}

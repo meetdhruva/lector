@@ -29,6 +29,10 @@ use crate::feedback::Chip;
 /// A message's parsed Markdown and the text length it was parsed at.
 pub(crate) type ParsedMessage = (usize, std::rc::Rc<Vec<Block>>);
 
+/// Painted bounds of the changed-file rows, keyed by (turn, row).
+pub(crate) type RowBounds =
+    std::rc::Rc<std::cell::RefCell<HashMap<(TurnId, usize), gpui::Bounds<gpui::Pixels>>>>;
+
 /// What the panel shows for an undo that found files edited since the turn.
 #[derive(Clone, Debug)]
 pub struct UndoConflict {
@@ -58,6 +62,10 @@ pub struct AgentPanel {
     pub(crate) expanded_thoughts: HashSet<(TurnId, usize)>,
     pub(crate) collapsed_tools: HashSet<(TurnId, usize)>,
     pub(crate) picker_menu: ContextMenuState,
+    /// Context menu of a changed-file row (right click, Shift+F10 / Menu key).
+    pub(crate) file_menu: ContextMenuState,
+    /// Last painted bounds of the changed-file rows (anchor of the keyboard menu).
+    pub(crate) row_bounds: RowBounds,
     pub(crate) markdown: HashMap<(TurnId, usize), ParsedMessage>,
     pub(crate) focus_handle: FocusHandle,
     /// Focus the prompt box at the next render (after a session started).
@@ -115,6 +123,8 @@ impl AgentPanel {
             expanded_thoughts: HashSet::new(),
             collapsed_tools: HashSet::new(),
             picker_menu: ContextMenuState::default(),
+            file_menu: ContextMenuState::default(),
+            row_bounds: RowBounds::default(),
             markdown: HashMap::new(),
             focus_handle: cx.focus_handle(),
             focus_composer: false,
@@ -305,6 +315,42 @@ impl AgentPanel {
         self.picker_menu
             .deploy(menu, position, window, cx, |this: &mut Self| {
                 &mut this.picker_menu
+            });
+        cx.notify();
+    }
+
+    /// The menu of a changed-file row: open, review the turn, copy the path.
+    pub(crate) fn deploy_file_menu(
+        &mut self,
+        turn: TurnId,
+        path: String,
+        abs: Option<PathBuf>,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu;
+            if let Some(abs) = abs.clone() {
+                let this = this.clone();
+                menu = menu.entry("Open File", move |window, cx| {
+                    let abs = abs.to_string_lossy().into_owned();
+                    let _ = this.update(cx, |this, cx| this.open_location(abs, None, window, cx));
+                });
+            }
+            let review = this.clone();
+            menu = menu.entry("Review Turn", move |window, cx| {
+                let _ = review.update(cx, |this, cx| this.review_turn(turn, window, cx));
+            });
+            let path = path.clone();
+            menu.entry("Copy Path", move |_, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
+            })
+        });
+        self.file_menu
+            .deploy(menu, position, window, cx, |this: &mut Self| {
+                &mut this.file_menu
             });
         cx.notify();
     }

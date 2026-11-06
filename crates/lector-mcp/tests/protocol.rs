@@ -541,6 +541,21 @@ fn a_symlink_cannot_escape_the_project_through_resources() {
     }
 }
 
+/// Regression: `resources/read` served files inside `.git` (remote URLs with credentials).
+#[test]
+fn resources_never_serve_the_git_dir() {
+    let fx = fixture();
+    let out = converse(
+        &fx.server(false),
+        &[req(
+            1,
+            "resources/read",
+            json!({ "uri": "lector://document/.git/config" }),
+        )],
+    );
+    assert_eq!(response(&out, 1)["error"]["code"], -32002, "{out:?}");
+}
+
 #[test]
 fn batches_are_answered_together() {
     let fx = fixture();
@@ -634,4 +649,61 @@ fn a_server_without_a_project_reports_tool_errors() {
     assert!(!tool_names(response(&out, 1)).is_empty());
     assert_eq!(response(&out, 2)["result"]["isError"], true);
     assert_eq!(response(&out, 3)["result"]["resources"], json!([]));
+}
+
+/// Regression: `document.*` / `workspace.open_path` accepted absolute paths and `..`
+/// anywhere on disk, so an MCP client could read (or, with `--allow-writes`, overwrite)
+/// files outside the project, and `settings.get` handed out agent API keys.
+#[test]
+fn path_arguments_cannot_leave_the_project() {
+    let fx = fixture();
+    let outside = fx.repo.parent().expect("parent").join("secret.txt");
+    std::fs::write(&outside, "secret").expect("write");
+    let abs = outside.to_string_lossy().into_owned();
+    let mut msgs = handshake();
+    msgs.extend([
+        call(2, "document_read", json!({ "path": abs })),
+        call(3, "document_read", json!({ "path": "../secret.txt" })),
+        call(4, "workspace_open_path", json!({ "path": abs })),
+        call(5, "document_read", json!({ "path": ".git/config" })),
+        call(
+            6,
+            "document_apply_edits",
+            json!({ "path": abs, "edits": [{ "range": [0, 0], "new_text": "x" }] }),
+        ),
+        call(7, "document_save", json!({ "path": abs })),
+        call(8, "document_read", json!({ "path": "src/../README.md" })),
+    ]);
+    let out = converse(&fx.server(true), &msgs);
+    for id in 2..=7 {
+        let r = &response(&out, id)["result"];
+        assert_eq!(r["isError"], true, "call {id} must be refused: {r}");
+        assert!(!r.to_string().contains("\"secret\""), "{r}");
+    }
+    assert_eq!(response(&out, 8)["result"]["isError"], false, "{out:?}");
+    assert_eq!(std::fs::read_to_string(&outside).expect("read"), "secret");
+}
+
+/// Regression: `settings.get` returned agent environments (API keys) verbatim.
+#[test]
+fn settings_get_redacts_agent_environments() {
+    let fx = fixture();
+    let mut settings = fx.project.settings();
+    settings.agent.servers.push(lector_config::AgentServer {
+        name: "A".into(),
+        command: "a".into(),
+        args: vec![],
+        env: [("API_KEY".to_string(), "sk-very-secret".to_string())].into(),
+    });
+    let project = Project::open(&fx.repo, settings).expect("project");
+    let server = McpServer::new(fx.core.clone(), Some(project), ServerOptions::default());
+    let mut msgs = handshake();
+    msgs.push(call(2, "settings_get", json!({})));
+    msgs.push(call(3, "settings_get", json!({ "key": "agent.servers" })));
+    let out = converse(&server, &msgs);
+    for id in [2, 3] {
+        let text = response(&out, id).to_string();
+        assert!(!text.contains("sk-very-secret"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+    }
 }

@@ -635,7 +635,7 @@ pub fn run_diff(args: &DiffArgs, io: &mut Io) -> anyhow::Result<()> {
             view.files
                 .iter()
                 .find(|f| f.path() == loaded[i].0)
-                .is_some_and(&selected)
+                .is_some_and(selected)
         })
         .collect();
 

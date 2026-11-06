@@ -26,6 +26,13 @@ the Keyboard Shortcuts view (File → Preferences, or the command palette) lists
 Tab stops follow the visual order. The editor itself keeps `Tab` for indentation when the
 file is editable; in read-only views `Tab` moves to the next control.
 
+In the Agent panel every control is a tab stop: the agent picker (`Enter` opens it), thought
+and tool-call headers (`Enter` expands or collapses), file locations, the turn buttons
+(Review, Undo turn), permission buttons (Allow once, Always, Reject), the changed-file rows
+(`Enter` opens the file, `Shift-F10` opens its menu: Open File, Review Turn, Copy Path) and the
+prompt box with its attach / Send buttons. Status badges carry their text ("done", "M" with a
+"Modified: path" tooltip), not only a color.
+
 ### Focus is always visible
 
 Every focusable control shows the theme's `focus_ring`: 2 px (3 px at 160 % scale or more).

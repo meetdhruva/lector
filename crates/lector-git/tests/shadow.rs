@@ -862,3 +862,54 @@ fn fetch_pull_request_into_shadow_leaves_user_repo_untouched() {
     assert!(shadow.resolve("refs/lector/pr/8/head").unwrap().is_none());
     fx.assert_git_untouched(&before, "refusals");
 }
+
+/// Regression: the alternates entry was written unquoted, so a repository path containing a
+/// newline (or starting with `"`) produced a broken entry and the shadow could not see the
+/// user's objects.
+#[cfg(unix)]
+#[test]
+fn alternates_entry_is_quoted_for_awkward_paths() {
+    hermetic();
+    let base = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let work = base.path().join("we\"ird\nrepo");
+    fs::create_dir_all(&work).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(work.join("a.txt"), "a\n").unwrap();
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    let repo = Repo::discover(&work).unwrap();
+    let shadow = ShadowRepo::open(data.path(), &repo).unwrap();
+    let alternates = fs::read_to_string(shadow.git_dir().join("objects/info/alternates")).unwrap();
+    assert_eq!(alternates.lines().count(), 1, "{alternates:?}");
+    let head = git(&["rev-parse", "HEAD"]);
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(shadow.git_dir())
+        .args(["cat-file", "-t", head.trim()])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "commit");
+}

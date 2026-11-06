@@ -13,7 +13,7 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 
 ![Lector reading code](docs/screenshots/reader-dark.png)
 
-## Features (v0.3)
+## Features (v0.6)
 
 **Reading**
 - Native, GPU-rendered UI (GPUI) with embedded JetBrains Mono and Inter fonts
@@ -39,6 +39,26 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 - Merge conflicts: inline accept actions, three-way merge editor, Continue/Abort for
   merges, rebases, cherry-picks and reverts
 
+**Review what agents (and people) changed**
+- Review queue ordered by risk, with the reason on each file ("changes a public function
+  signature"); generated and lock files grouped out of the way; hunk-level "reviewed"
+  marks that survive new revisions, agent turns and rebases
+- Moved code shown as moved (also across files), not as hundreds of red and green lines;
+  optional syntax-aware diff
+- Comments on any line of any changeset that follow the code through edits and rebases
+- Hover a changed line to see why it changed: the commit, or the agent prompt and turn
+
+**Agents** — drive Gemini CLI, Claude Code, Codex or any Agent Client Protocol
+agent from the Agent panel. Each turn is checkpointed, reviewable as a diff and undoable;
+edits show up live in open tabs; review comments go back to the agent in one click.
+
+**Pull requests** — review GitHub and GitLab pull requests locally: inline threads, drafts,
+reply and resolve, Approve / Request changes. Pull requests are fetched into Lector's own
+storage, never into your repository.
+
+**Undo instead of "are you sure?"** — discards, merge resolutions, agent turns and other
+writes are backed up first, listed in the Activity log, and can be undone.
+
 **Light editing**
 - Multiple carets, IME, undo/redo, auto-indent, comment toggling, line moves, find & replace
 - Saves are atomic and keep encoding, BOM, line endings and permissions; unsaved-change
@@ -49,6 +69,9 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 **Everywhere**
 - Menu bar on every platform (in the title bar on Linux and Windows), welcome screen with
   recent projects, keyboard shortcut viewer — every command is reachable by mouse or keys
+- Keyboard-only operation (F6 cycles regions), visible focus, UI scale, reduced motion,
+  non-color cues ([docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md))
+- Headless CLI and an MCP server: every command is scriptable and available to AI tools
 
 | | |
 |---|---|
@@ -56,6 +79,8 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 | ![Review tab](docs/screenshots/review-tab-dark.png) | ![Outline](docs/screenshots/outline-light.png) |
 | ![Commit composer](docs/screenshots/commit-composer-light.png) | ![Merge editor](docs/screenshots/merge-editor-dark.png) |
 | ![Welcome](docs/screenshots/welcome-dark.png) | ![Diagnostics](docs/screenshots/diagnostics-dark.png) |
+| ![Review queue](docs/screenshots/review-queue-dark.png) | ![Moved code](docs/screenshots/moved-code-light.png) |
+| ![Agent panel](docs/screenshots/agent-panel-dark.png) | ![Pull request review](docs/screenshots/pr-review-comments-light.png) |
 
 ## Download
 
@@ -221,8 +246,12 @@ synchronous, and reusable on its own:
 | `lector-fs` | file loading, encoding and kind detection, debounced watcher |
 | `lector-config` | settings, keymaps, paths, session and review state |
 | `lector-theme`, `lector-icons` | theme model and built-in themes; file and UI icons |
-| `lector-workspace` | UI-free app model: project, documents, navigation, review |
-| `lector-ui`, `lector-ui-git` | GPUI shell, widgets and views |
+| `lector-workspace` | project model, navigation, review, risk, structural diff, caches |
+| `lector-app` | headless core: commands, scheduler, documents, git state, journal, database |
+| `lector-agent` | agent sessions over the Agent Client Protocol |
+| `lector-forge` | GitHub and GitLab pull requests |
+| `lector-cli`, `lector-mcp` | command line and MCP server over the same core |
+| `lector-ui`, `lector-ui-git`, `lector-ui-agent` | GPUI shell, widgets and views |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements, and
@@ -234,9 +263,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
 |---|---|
 | ✅ 0.2 | Stage/unstage hunks, discard, commit composer, menus and welcome screen |
 | ✅ 0.3 | Editing, multi-cursor, formatting, LSP code actions, conflict resolution |
-| 0.4 | Full accessibility (screen readers via AccessKit) |
-| 0.5 | Agent integration: ACP client, MCP server, headless CLI |
-| 0.6+ | WASM plugins, PR integration, stacked changes, structural diff |
+| ✅ 0.4 | Headless core and command API, undo/Activity log, review queue, moved code, accessibility |
+| ✅ 0.5 | Agents (ACP), per-turn checkpoints, CLI and MCP server |
+| ✅ 0.6 | Pull request review (GitHub, GitLab), comments that survive rebases |
+| next | Screen readers (needs a GPUI version with AccessKit), WASM plugins, stacked changes, code completion |
 
 ## License
 

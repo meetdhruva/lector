@@ -766,7 +766,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// The absolute path of project-relative `rel`, if it is an existing file inside the
-/// project root after resolving symlinks (no `..` escapes).
+/// project root after resolving symlinks (no `..` escapes), outside `.git`.
 fn inside_project(project: &Project, rel: &str) -> Option<PathBuf> {
     if rel.is_empty() {
         return None;
@@ -774,5 +774,11 @@ fn inside_project(project: &Project, rel: &str) -> Option<PathBuf> {
     let path = project.absolute_path(rel);
     let canonical = dunce::canonicalize(&path).ok()?;
     let root = dunce::canonicalize(project.root()).ok()?;
-    (canonical.starts_with(&root) && Path::new(&canonical).is_file()).then_some(canonical)
+    // `.git` holds credentials (remote URLs, config) and is not project content.
+    let in_git_dir = canonical.strip_prefix(&root).is_ok_and(|rel| {
+        rel.components()
+            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+    });
+    (canonical.starts_with(&root) && !in_git_dir && Path::new(&canonical).is_file())
+        .then_some(canonical)
 }

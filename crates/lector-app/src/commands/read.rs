@@ -74,9 +74,9 @@ fn resolve_path(cx: &CommandContext, args: &Value) -> anyhow::Result<PathBuf> {
         Some(p) => {
             let p = Path::new(p);
             if p.is_absolute() {
-                Ok(p.to_path_buf())
+                cx.confine_path(p.to_path_buf())
             } else {
-                Ok(cx.require_project()?.absolute_path(&p.to_string_lossy()))
+                cx.confine_path(cx.require_project()?.absolute_path(&p.to_string_lossy()))
             }
         }
         None => cx
@@ -766,7 +766,20 @@ fn settings_get() -> FnCommand {
                 Some(p) => p.settings(),
                 None => lector_config::load_settings().0,
             };
-            let all = serde_json::to_value(&settings)?;
+            let mut all = serde_json::to_value(&settings)?;
+            // Agent environments carry API keys: never hand them out.
+            if let Some(servers) = all
+                .pointer_mut("/agent/servers")
+                .and_then(Value::as_array_mut)
+            {
+                for env in servers.iter_mut().filter_map(|s| s.get_mut("env")) {
+                    if let Some(env) = env.as_object_mut() {
+                        for v in env.values_mut() {
+                            *v = json!("<redacted>");
+                        }
+                    }
+                }
+            }
             let value = match str_arg(args, "key") {
                 None => all,
                 Some(key) => {

@@ -510,6 +510,8 @@ pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is
 // SessionSettings); `buffer_font_family: Vec<String>` (accepts a string or list in TOML); `Platform::{MacOS,Linux,Windows}`
 // + `Platform::current()`; `merge_keymap`; keymap.toml = `[[bindings]] keys/action/context` ("none"/"" unbinds).
 // Env overrides: LECTOR_CONFIG_DIR, LECTOR_DATA_DIR. Contexts: Workspace, CodeView, DiffView, Picker.
+// Project layer (`<project>/.lector/settings.toml`) cannot set `[forge]`, `agent.servers`, `lsp.servers.*.command` /
+// `args` or `lsp.servers.*.enabled = true` (dropped with a warning): opening a project never runs a program it chose.
 // SessionStore::{new(), with_dir(dir), load(&root) -> Option<Session>, save(&root, &Session) -> io::Result<()>};
 // Session { panes: Vec<PaneState{tabs: Vec<TabState{kind: TabKind, scroll_row, active}>}>, axis, active_pane,
 //           sidebar_visible, sidebar_width, sidebar_tab, window: Option<WindowBounds> };
@@ -1103,6 +1105,9 @@ pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'st
                          pub ui_action: Option<&'static str> /* "git::Stage" — the GPUI action that dispatches it */ }
 pub enum Availability { Available, Unavailable(String /* why, shown as tooltip */) }
 pub struct CommandContext { pub core: AppCore, pub project: Option<Project>, pub focus: Focus /* active path, selections, changeset, hunk */ }
+// is_sandboxed(): source is Mcp or Agent; confine_path(path) -> Result<PathBuf>: for sandboxed callers, path
+// arguments of `document.*` / `workspace.open_path` / `git.*` reads must stay inside the project (after `..` and
+// symlinks of the deepest existing ancestor) and outside `.git`; GUI and CLI callers are not restricted.
 pub trait Command: Send + Sync {
     fn spec(&self) -> &CommandSpec;
     fn available(&self, cx: &CommandContext) -> Availability;
@@ -1296,6 +1301,7 @@ impl ShadowRepo {
     pub fn snapshot_paths(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;   // working-tree contents (missing = recorded as absent)
     pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;   // index entries incl. conflict stages 1-3 and modes
     pub fn snapshot_worktree(&self, note: &str) -> Result<ShadowSnapshot>;                // whole tree incl. untracked, honours .gitignore (agent checkpoints)
+    pub fn is_ignored(&self, rel: &str) -> bool;                                           // `git check-ignore`: left out of snapshot_worktree
     pub fn snapshots(&self) -> Result<Vec<ShadowSnapshot>>;  contains(&snap) -> bool;  kind(&snap) -> Result<SnapshotKind>;
     pub fn entries(&self, &snap) -> Result<Vec<SnapshotEntry>>;  index_entries(&snap) -> Result<Vec<IndexRecord>>;  file_at(&snap, path) -> Result<Option<Vec<u8>>>;
     pub fn changes_between(&self, a: &ShadowSnapshot, b: &ShadowSnapshot) -> Result<Vec<FileChange>>;
@@ -1474,9 +1480,11 @@ pub struct Turn { pub id: TurnId, pub prompt: String, pub before: Option<ShadowS
   (`line`/`limit` honoured); `fs/write_text_file` goes through the open `DocHandle` (`replace_all` + `save`, no hooks /
   cleanup; refused when the tab is locked read-only or the file changed on disk) or `lector_fs::write_atomic` for files
   that are not open (parents created). Both only inside the project root (`paths::resolve_in_root`: `..`, absolute
-  paths elsewhere, symlinked directories leading out and `.git/` are refused with an error to the agent). Each write
-  is journaled as `agent.write_file` (`Source::Agent`, args `{session, turn, path}`); when the turn has no checkpoint the
-  file is backed up first (`snapshot_paths`) and the entry is undoable on its own.
+  paths elsewhere, symlinks leading out — including dangling ones, whose target a write would create — and `.git/`
+  compared case-insensitively, ignoring trailing dots/spaces and HFS+-ignored code points, are refused with an error to
+  the agent). Each write is journaled as `agent.write_file` (`Source::Agent`, args `{session, turn, path}`); when the turn
+  has no checkpoint, or the file is git-ignored (checkpoints leave those out), the file is backed up first
+  (`snapshot_paths`) and the entry is undoable on its own.
 * *Permissions*: `session/request_permission` becomes a `PermissionRequest` in the turn (and `pending_permissions()`);
   `AllowAlways` remembers the tool kind for the session; `auto_allow_reads` answers `read` requests whose locations are
   inside the project. `PermissionChoice` maps to the agent's option of kind `allow_once` / `allow_always` /
@@ -1713,7 +1721,8 @@ Two UI-free crates, layered `lector (bin) → lector-cli → lector-mcp → lect
   *Resources*: `lector://changeset/<key>` (JSON of `git.show_diff`; `worktree`, `staged`, `unstaged` are listed) and
   `lector://document/<percent-encoded project-relative path>` (text of the live buffer, so unsaved edits of documents opened
   by tools are visible; listed for the documents open in the store). Documents are only served from inside the project root
-  after resolving symlinks. Tools are not restricted that way (`document.read` takes absolute paths, as in the app).
+  after resolving symlinks, never from `.git`. Tool path arguments are confined the same way (`CommandContext::confine_path`
+  for `Source::Mcp` / `Source::Agent`), and `settings.get` redacts `agent.servers[].env` values.
 * Tests: `crates/lector-mcp/tests/protocol.rs` (handshake and version negotiation, JSON-RPC errors, dynamic and
   write-filtered `tools/list`, structured results, write refusal without `--allow-writes` and journaling with it, resources
   incl. symlink and `..` escapes, batches, cancellation, ordering); `crates/lector-cli/tests/suite` (JSON formats, human

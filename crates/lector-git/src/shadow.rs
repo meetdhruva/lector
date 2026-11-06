@@ -217,6 +217,32 @@ fn objects_dir(repo: &Repo) -> PathBuf {
     common.join("objects")
 }
 
+/// One line of `objects/info/alternates` naming `path`. Git reads a line starting with
+/// `"` as a C-quoted string and skips lines starting with `#`, and a newline would split
+/// the entry, so such paths are written quoted.
+fn alternates_entry(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let needs_quotes =
+        raw.starts_with('"') || raw.starts_with('#') || raw.chars().any(|c| c.is_ascii_control());
+    if !needs_quotes {
+        return raw.into_owned();
+    }
+    let mut out = String::from("\"");
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_ascii_control() => out.push_str(&format!("\\{:03o}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Shadow repositories opened in this process: (canonical workdir, shadow), newest last.
 static KNOWN_SHADOWS: std::sync::RwLock<Vec<(PathBuf, ShadowRepo)>> =
     std::sync::RwLock::new(Vec::new());
@@ -347,7 +373,7 @@ impl ShadowRepo {
         // Alternates: the user's objects are read-only here; keep the file in sync with
         // where the objects are now (the repository may have moved).
         let alternates = self.git_dir.join("objects").join("info").join("alternates");
-        let wanted = format!("{}\n", user_objects.display());
+        let wanted = format!("{}\n", alternates_entry(user_objects));
         if fs::read_to_string(&alternates).ok().as_deref() != Some(wanted.as_str()) {
             if let Some(parent) = alternates.parent() {
                 fs::create_dir_all(parent)?;
@@ -1601,6 +1627,31 @@ impl ShadowRepo {
             (_, e) => e,
         })?;
         Ok(())
+    }
+
+    /// Whether git ignores the work-tree path `rel` (`git check-ignore`), i.e. whether
+    /// [`ShadowRepo::snapshot_worktree`] leaves it out. Errors count as "not ignored".
+    pub fn is_ignored(&self, rel: &str) -> bool {
+        let Ok(rel) = check_rel(rel) else {
+            return false;
+        };
+        // Not `user_git`: check-ignore rejects `--literal-pathspecs` (paths are taken
+        // literally by this command anyway).
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.workdir)
+            .args(["check-ignore", "-q", "--no-index", "--"])
+            .arg(&rel)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     }
 
     /// Resolves a ref or commit-ish of the shadow (which also sees the user's objects).

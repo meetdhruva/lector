@@ -52,8 +52,8 @@ fn resolve(cx: &CommandContext, args: &Value) -> anyhow::Result<PathBuf> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
-        Some(p) if Path::new(p).is_absolute() => Ok(PathBuf::from(p)),
-        Some(p) => Ok(cx.require_project()?.absolute_path(p)),
+        Some(p) if Path::new(p).is_absolute() => cx.confine_path(PathBuf::from(p)),
+        Some(p) => cx.confine_path(cx.require_project()?.absolute_path(p)),
         None => cx
             .focus
             .path

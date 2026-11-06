@@ -13,6 +13,7 @@ use lector_agent::{
     ToolDiff, ToolStatus, Turn, TurnItem, TurnState,
 };
 use lector_diff::{diff_lines, DiffOptions};
+use lector_ui::a11y;
 use lector_ui::actions::agent as agent_actions;
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
@@ -87,7 +88,16 @@ impl AgentPanel {
                     .rounded(metrics::radius())
                     .min_w_0()
                     .when(can_pick, |el| {
-                        el.hover(|s| s.bg(ui.hover.hsla())).cursor_pointer()
+                        el.hover(|s| s.bg(ui.hover.hsla()))
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .focus(a11y::ring_focus(cx))
+                            // Enter / Space on the focused picker (the mouse opens it on press).
+                            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, window, cx| {
+                                if ev.is_keyboard() && this.configs.len() > 1 {
+                                    this.deploy_picker(ev.position(), false, window, cx);
+                                }
+                            }))
                     })
                     .child(
                         Icon::new(IconName::Bot)
@@ -430,20 +440,38 @@ impl AgentPanel {
                                     lector_git::ChangeKind::Deleted => theme.git.deleted.hsla(),
                                     _ => theme.git.modified.hsla(),
                                 };
-                                let letter = match f.kind {
-                                    lector_git::ChangeKind::Added => "A",
-                                    lector_git::ChangeKind::Deleted => "D",
-                                    _ => "M",
+                                let (letter, kind_name) = match f.kind {
+                                    lector_git::ChangeKind::Added => ("A", "Added"),
+                                    lector_git::ChangeKind::Deleted => ("D", "Deleted"),
+                                    _ => ("M", "Modified"),
                                 };
                                 let abs = self.project.repo().map(|r| r.workdir().join(&path));
+                                let row_key = (id, ix);
+                                let bounds = self.row_bounds.clone();
+                                let (menu_path, menu_abs) = (path.clone(), abs.clone());
                                 h_flex()
                                     .id(("agent-file", id.0 as usize * 1000 + ix))
+                                    .key_context(lector_ui::keymap::contexts::LIST_PANEL)
+                                    .relative()
                                     .gap(px(6.))
                                     .px(px(4.))
                                     .rounded(metrics::radius())
                                     .cursor_pointer()
+                                    .tab_index(0)
+                                    .focus(a11y::ring_focus(cx))
                                     .hover(|s| s.bg(ui.hover.hsla()))
                                     .text_size(metrics::text_xs())
+                                    .tooltip(Tooltip::text(format!("{kind_name}: {path}")))
+                                    .child(
+                                        gpui::canvas(
+                                            move |b, _, _| {
+                                                bounds.borrow_mut().insert(row_key, b);
+                                            },
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .size_full(),
+                                    )
                                     .child(
                                         div()
                                             .w(px(10.))
@@ -452,6 +480,35 @@ impl AgentPanel {
                                             .child(letter),
                                     )
                                     .child(div().text_color(ui.text_muted.hsla()).child(path))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener({
+                                            let (p, a) = (menu_path.clone(), menu_abs.clone());
+                                            move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                                                this.deploy_file_menu(
+                                                    id, p.clone(), a.clone(), ev.position, window, cx,
+                                                );
+                                            }
+                                        }),
+                                    )
+                                    .on_action(cx.listener(
+                                        move |this, _: &lector_ui::actions::workspace::ShowContextMenu, window, cx| {
+                                            let at = this
+                                                .row_bounds
+                                                .borrow()
+                                                .get(&row_key)
+                                                .map(|b| b.bottom_left())
+                                                .unwrap_or_default();
+                                            this.deploy_file_menu(
+                                                id,
+                                                menu_path.clone(),
+                                                menu_abs.clone(),
+                                                at,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         if let Some(abs) = abs.clone() {
                                             this.open_location(
@@ -555,6 +612,8 @@ impl AgentPanel {
                     .items_start()
                     .gap(px(6.))
                     .cursor_pointer()
+                    .tab_index(0)
+                    .focus(a11y::ring_focus(cx))
                     .text_size(metrics::text_xs())
                     .text_color(ui.text_faint.hsla())
                     .italic()
@@ -630,6 +689,8 @@ impl AgentPanel {
                     .px(px(8.))
                     .py(px(5.))
                     .cursor_pointer()
+                    .tab_index(0)
+                    .focus(a11y::ring_focus(cx))
                     .hover(|s| s.bg(ui.hover.hsla()))
                     .child(
                         Icon::new(kind_icon(&call.kind))
@@ -684,6 +745,8 @@ impl AgentPanel {
                     .text_size(metrics::text_xs())
                     .text_color(ui.link.hsla())
                     .cursor_pointer()
+                    .tab_index(0)
+                    .focus(a11y::ring_focus(cx))
                     .hover(|s| s.underline())
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1146,5 +1209,6 @@ impl Render for AgentPanel {
             )
             .child(self.render_composer(window, cx))
             .children(self.picker_menu.render())
+            .children(self.file_menu.render())
     }
 }

@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.6.0 — 2026-11-06
+
+Team review. Released together with 0.5.0.
+Released together with 0.4.0.
+
+- **Pull requests:** review GitHub and GitLab pull requests (incl. GitHub Enterprise and
+  self-hosted GitLab) in Lector: Pull Requests panel (review requested / mine / all), the
+  review tab with existing threads inline, draft comments, reply and resolve, and Submit
+  review (Approve / Request changes / Comment; asks before posting). Pull requests are
+  fetched into Lector's own shadow storage — never into your repository.
+- **Sign-in without setup:** tokens come from `GITHUB_TOKEN`/`GH_TOKEN`/`GITLAB_TOKEN`, the
+  `gh` / `glab` CLIs, or the OS keychain; they are never logged or stored in plain text.
+- **Comments that survive change:** comment on any line of any changeset; threads follow the
+  code through edits, moves and rebases, and become "outdated" (keeping the original
+  snippet) only when the code is really gone. Copy as Markdown or send to an agent.
+
+## 0.5.0 — 2026-11-06
+
+Agents.
+
+- **Agent panel:** drive Gemini CLI, Claude Code, Codex or any Agent Client Protocol agent.
+  Streaming replies, plans, tool calls with mini-diffs, inline permission prompts (allow once
+  / always for this session / reject), context chips for files, selections and diffs.
+- **Every turn is a checkpoint:** review a turn's changes in the review tab, undo a turn
+  (itself undoable), see which prompt changed a line by hovering it. Agent edits appear live
+  in open tabs, are confined to the project (never `.git`, never outside through symlinks)
+  and are journaled.
+- **Feedback loop:** "Send to agent" turns review comments into a prompt with file and line
+  anchors.
+- **Command line:** `lector status | changes | diff | commands | run | activity | undo` with
+  stable `--json` output (`lector-cli` console binary on Windows).
+- **MCP server:** `lector mcp [path]` exposes Lector's commands as tools to MCP clients;
+  read-only unless started with `--allow-writes`, and every write is journaled.
+
+## 0.4.0 — 2026-11-06
+
+Foundations: a headless core, undo instead of "are you sure?", calmer reviews.
+
+- **Undo instead of confirm:** discards, merge resolutions, accept-all and other writes are
+  backed up first (in Lector's own data folder, never your `.git`) and show an Undo toast.
+  The **Activity log** lists everything Lector wrote, with Undo per entry.
+- **Review queue:** files ordered by risk with the reason shown ("changes a public function
+  signature", "removes error handling", "touches CI workflows"); generated and lock files
+  grouped; "N of M hunks reviewed" progress; `]` jumps to the next unreviewed hunk; hunk
+  "reviewed" marks survive new revisions and rebases.
+- **Moved code:** blocks moved within or across files are shown dimmed with "Moved from
+  file:line" instead of as deletions and additions; optional syntax-aware diff view.
+- **Provenance:** hover a changed line to see the commit (or agent turn) behind it.
+- **Missing language server?** The exact install command for your OS is shown.
+- **Accessibility:** F6 / Shift+F6 cycle regions, Tab order in dialogs and panels, visible
+  focus rings, Shift+F10 context menus, UI scale (Ctrl/Cmd+Alt+= / - / 0), reduced motion,
+  text or glyph cues next to colors. Screen readers need a GPUI version with AccessKit —
+  see docs/ACCESSIBILITY.md.
+- **Under the hood:** a headless core shared by the UI, CLI, MCP and agents (typed command
+  registry with JSON schemas, priority scheduler, one git state per repository shared by
+  all windows, document store with versioned queries, embedded database), faster fuzzy
+  finder, trigram search index, content-addressed caches.
+- **Security hardening:** project settings can no longer change which programs run
+  (language servers, agents); command paths are confined to the project.
+
 ## 0.3.0 — 2026-11-04
 
 Light editing on top of the reader, language server edits and merge-conflict resolution.

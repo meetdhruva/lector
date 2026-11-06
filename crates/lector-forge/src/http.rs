@@ -139,6 +139,13 @@ impl Client {
     }
 
     pub(crate) fn get(&self, path: &str) -> Result<Response> {
+        // Absolute URLs come from `Link` headers: never send the token to another origin.
+        if path.contains("://") && origin(path) != origin(&self.base) {
+            return Err(ForgeError::Decode(format!(
+                "refusing to follow a link to another host ({})",
+                origin(path)
+            )));
+        }
         let req = self.with_headers(self.agent.get(&self.url(path)));
         self.finish(path, req.call())
     }
@@ -220,6 +227,14 @@ impl Client {
     }
 }
 
+/// `scheme://host[:port]` of a URL, lowercased (no userinfo, path or query).
+pub(crate) fn origin(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    format!("{}://{}", scheme, host).to_ascii_lowercase()
+}
+
 /// The `rel="next"` URL of a `Link` header.
 pub(crate) fn next_link(link: &str) -> Option<String> {
     link.split(',').find_map(|part| {
@@ -279,6 +294,31 @@ pub(crate) fn encode_segment(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a `Link: rel="next"` to another host received the `Authorization` header.
+    #[test]
+    fn pagination_never_leaves_the_api_origin() {
+        assert_eq!(
+            origin("https://API.github.com/repos?page=2"),
+            "https://api.github.com"
+        );
+        assert_eq!(
+            origin("https://x@evil.example:8443/a"),
+            "https://evil.example:8443"
+        );
+        let c = Client::new(
+            "http://127.0.0.1:9".into(),
+            "github.com".into(),
+            ForgeKind::Github,
+            Token::new("secret"),
+        );
+        match c.get("http://evil.example/steal?page=2") {
+            Err(ForgeError::Decode(m)) => {
+                assert!(m.contains("another host") && !m.contains("secret"))
+            }
+            other => panic!("expected a refusal, got {:?}", other.map(|r| r.json)),
+        }
+    }
 
     #[test]
     fn links_and_encoding() {

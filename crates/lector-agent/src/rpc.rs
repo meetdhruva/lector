@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -21,6 +21,14 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 /// JSON-RPC "internal error".
 pub const INTERNAL_ERROR: i64 = -32603;
+/// Server busy: too many requests from the agent are already being handled.
+pub const BUSY_ERROR: i64 = -32000;
+
+/// Largest single message accepted from an agent; longer lines are skipped.
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// Agent requests handled at the same time (each may wait for the user, e.g. a
+/// permission prompt); further requests are answered "busy" instead of spawning threads.
+pub const MAX_REQUESTS_IN_FLIGHT: usize = 16;
 
 /// Failure of a request.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -89,6 +97,7 @@ struct Inner {
     next_id: AtomicU64,
     closed: Mutex<Option<String>>,
     malformed: AtomicU64,
+    in_flight: AtomicUsize,
 }
 
 /// An outstanding request (see [`Connection::start_request`]). Dropping it forgets the answer.
@@ -136,6 +145,7 @@ impl Connection {
             next_id: AtomicU64::new(1),
             closed: Mutex::new(None),
             malformed: AtomicU64::new(0),
+            in_flight: AtomicUsize::new(0),
         });
         let conn = Connection { inner };
         let reader_conn = conn.clone();
@@ -259,9 +269,16 @@ impl Connection {
         let mut line = Vec::new();
         let reason = loop {
             line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) => break "the agent closed its output".to_string(),
-                Ok(_) => {}
+            match read_line_bounded(&mut reader, &mut line, MAX_MESSAGE_BYTES) {
+                Ok(LineRead::Eof) => break "the agent closed its output".to_string(),
+                Ok(LineRead::Line) => {}
+                Ok(LineRead::TooLong) => {
+                    self.inner.malformed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "skipped a message from the agent over {MAX_MESSAGE_BYTES} bytes"
+                    );
+                    continue;
+                }
                 Err(err) => break format!("read failed: {err}"),
             }
             let text = String::from_utf8_lossy(&line);
@@ -298,14 +315,28 @@ impl Connection {
                     self.respond(id, Err(RpcError::remote(INTERNAL_ERROR, "session ended")));
                     return;
                 };
+                let in_flight = self.inner.in_flight.fetch_add(1, Ordering::AcqRel);
+                if in_flight >= MAX_REQUESTS_IN_FLIGHT {
+                    self.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
+                    self.respond(
+                        id,
+                        Err(RpcError::remote(
+                            BUSY_ERROR,
+                            "too many requests in progress; retry later",
+                        )),
+                    );
+                    return;
+                }
                 let conn = self.clone();
                 let spawned = std::thread::Builder::new()
                     .name("acp-request".into())
                     .spawn(move || {
                         let result = h.on_request(&method, params);
+                        conn.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
                         conn.respond(id, result);
                     });
                 if let Err(err) = spawned {
+                    self.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
                     tracing::warn!("cannot handle an agent request: {err}");
                 }
             }
@@ -403,5 +434,97 @@ mod tests {
     fn truncate_respects_char_boundaries() {
         assert_eq!(truncate("héllo", 2), "h");
         assert_eq!(truncate("abc", 10), "abc");
+    }
+}
+
+enum LineRead {
+    Line,
+    TooLong,
+    Eof,
+}
+
+/// Reads one `\n`-terminated line into `buf`, keeping at most `max` bytes in memory.
+/// A longer line is consumed to its end and reported as [`LineRead::TooLong`].
+fn read_line_bounded(
+    reader: &mut impl BufRead,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<LineRead> {
+    let mut too_long = false;
+    let mut read_any = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return Ok(match (read_any, too_long) {
+                (false, _) => LineRead::Eof,
+                (true, true) => LineRead::TooLong,
+                (true, false) => LineRead::Line,
+            });
+        }
+        read_any = true;
+        let (chunk, done) = match available.iter().position(|b| *b == b'\n') {
+            Some(i) => (&available[..=i], true),
+            None => (available, false),
+        };
+        let used = chunk.len();
+        if !too_long {
+            if buf.len() + chunk.len() > max {
+                too_long = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(chunk);
+            }
+        }
+        reader.consume(used);
+        if done {
+            return Ok(if too_long {
+                LineRead::TooLong
+            } else {
+                LineRead::Line
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use super::*;
+
+    #[test]
+    fn lines_over_the_limit_are_skipped_and_reading_continues() {
+        let data = b"short\n0123456789abcdef\nnext\nlast".to_vec();
+        let mut r = BufReader::with_capacity(4, &data[..]);
+        let mut buf = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut r, &mut buf, 8).unwrap(),
+            LineRead::Line
+        ));
+        assert_eq!(buf, b"short\n");
+        buf.clear();
+        assert!(matches!(
+            read_line_bounded(&mut r, &mut buf, 8).unwrap(),
+            LineRead::TooLong
+        ));
+        buf.clear();
+        assert!(matches!(
+            read_line_bounded(&mut r, &mut buf, 8).unwrap(),
+            LineRead::Line
+        ));
+        assert_eq!(buf, b"next\n");
+        buf.clear();
+        assert!(matches!(
+            read_line_bounded(&mut r, &mut buf, 8).unwrap(),
+            LineRead::Line
+        ));
+        assert_eq!(buf, b"last");
+        buf.clear();
+        assert!(matches!(
+            read_line_bounded(&mut r, &mut buf, 8).unwrap(),
+            LineRead::Eof
+        ));
     }
 }

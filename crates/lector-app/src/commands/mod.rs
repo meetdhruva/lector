@@ -227,6 +227,51 @@ impl CommandContext {
             .repo()
             .ok_or_else(|| anyhow::anyhow!("the folder is not in a git repository"))
     }
+
+    /// Whether path arguments must stay inside the project: MCP clients and agents may
+    /// only reach the project they were given (the GUI and CLI act for the user directly).
+    pub fn is_sandboxed(&self) -> bool {
+        matches!(self.source, Source::Mcp | Source::Agent)
+    }
+
+    /// Checks a resolved path argument. For [sandboxed](Self::is_sandboxed) callers the
+    /// path must lie inside the project root after resolving `..` and symlinks of its
+    /// deepest existing ancestor, and outside any `.git` directory; other callers pass.
+    pub fn confine_path(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        if !self.is_sandboxed() {
+            return Ok(path);
+        }
+        let outside = || anyhow::anyhow!("{} is outside the project", path.display());
+        let root = self.require_project()?.root();
+        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let mut lexical = PathBuf::new();
+        for c in path.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    if !lexical.pop() {
+                        return Err(outside());
+                    }
+                }
+                std::path::Component::CurDir => {}
+                other => lexical.push(other.as_os_str()),
+            }
+        }
+        let mut existing = lexical.as_path();
+        while std::fs::symlink_metadata(existing).is_err() {
+            existing = existing.parent().ok_or_else(outside)?;
+        }
+        let real = dunce::canonicalize(existing).map_err(|_| outside())?;
+        let rest = lexical.strip_prefix(existing).map_err(|_| outside())?;
+        let resolved = real.join(rest);
+        let rel = resolved.strip_prefix(&root).map_err(|_| outside())?;
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+        {
+            anyhow::bail!("{} is inside .git", path.display());
+        }
+        Ok(lexical)
+    }
 }
 
 /// A request for the front-end, carried in [`Outcome::ui`]. Headless callers may

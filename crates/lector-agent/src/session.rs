@@ -998,7 +998,9 @@ impl Shared {
             (turn, has)
         };
         // Without a turn checkpoint, back the file up on its own so the write is undoable.
-        let backup = if has_checkpoint {
+        // Checkpoints leave ignored files out (`.env`, build output...): back those up too.
+        let covered = has_checkpoint && !self.shadow().is_some_and(|s| s.is_ignored(&rel));
+        let backup = if covered {
             None
         } else {
             self.shadow().and_then(|s| {
