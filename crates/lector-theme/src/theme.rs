@@ -105,6 +105,9 @@ pub struct UiColors {
     pub border_variant: Color,
     /// Border of the focused element.
     pub border_focused: Color,
+    /// The 2 px keyboard focus ring drawn around the focused control. At least 3:1
+    /// against every surface it can sit on (checked by the theme tests).
+    pub focus_ring: Color,
     /// Primary text.
     pub text: Color,
     /// Secondary text (labels, inactive items).

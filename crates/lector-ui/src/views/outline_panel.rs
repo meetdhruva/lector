@@ -4,8 +4,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, Entity, FocusHandle, Focusable, SharedString, Subscription, Window,
+    div, prelude::*, App, Entity, FocusHandle, Focusable, SharedString, Subscription, Window,
 };
 use lector_syntax::OutlineItem;
 
@@ -59,7 +60,7 @@ impl OutlinePanel {
             selected: None,
             filter,
             list: VirtualListState::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             _subscriptions: vec![sub],
         }
     }
@@ -196,7 +197,7 @@ impl Render for OutlinePanel {
             div()
                 .px(px(14.))
                 .py(px(10.))
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_faint.hsla())
                 .child(message)
                 .into_any_element()

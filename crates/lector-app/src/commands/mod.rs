@@ -38,6 +38,7 @@ pub fn register_builtin(registry: &CommandRegistry) {
     read::register(registry);
     documents::register(registry);
     git_write::register(registry);
+    crate::comments::register_commands(registry);
 }
 
 /// Static description of a command.

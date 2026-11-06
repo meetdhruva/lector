@@ -1,0 +1,4 @@
+[
+  {"filename": "src/manifest.rs", "status": "modified", "additions": 24, "deletions": 9},
+  {"filename": "src/loader.rs", "previous_filename": "src/load.rs", "status": "renamed", "additions": 3, "deletions": 1}
+]

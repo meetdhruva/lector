@@ -4,8 +4,8 @@
 //! commit errors, and a success toast with the short sha.
 
 use gpui::{
-    div, prelude::*, px, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, SharedString, Subscription, Task, Window,
+    div, prelude::*, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, SharedString, Subscription, Task, Window,
 };
 use lector_git::CommitOptions;
 use lector_ui::actions::git as git_actions;
@@ -13,6 +13,7 @@ use lector_ui::components::text_area::{first_line_chars, TextArea, TextAreaEvent
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
+use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
 
 use crate::staging::{git_error_text, notify_repo_changed};
@@ -327,7 +328,7 @@ impl CommitComposer {
             IdentityState::Known(name, email) => h_flex()
                 .gap(px(5.))
                 .min_w_0()
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .text_color(ui.text_faint.hsla())
                 .child(
                     Icon::new(IconName::User)
@@ -349,11 +350,11 @@ impl CommitComposer {
                 v_flex()
                     .gap(px(4.))
                     .p(px(8.))
-                    .rounded(metrics::RADIUS)
+                    .rounded(metrics::radius())
                     .border_1()
                     .border_color(ui.warning.hsla().opacity(0.6))
                     .bg(ui.warning.hsla().opacity(0.08))
-                    .text_size(metrics::TEXT_XS)
+                    .text_size(metrics::text_xs())
                     .text_color(ui.text_muted.hsla())
                     .child(
                         h_flex()
@@ -391,7 +392,7 @@ impl CommitComposer {
                     .child(
                         div()
                             .p(px(6.))
-                            .rounded(metrics::RADIUS)
+                            .rounded(metrics::radius())
                             .bg(ui.surface.hsla())
                             .font_family(lector_ui::code_view::EditorSettings::get(cx).font_family)
                             .text_color(ui.text.hsla())
@@ -412,14 +413,23 @@ fn checkbox(
     cx: &App,
 ) -> gpui::Stateful<gpui::Div> {
     let ui = &cx.theme().ui;
+    let ring = lector_ui::a11y::ring_color(cx);
+    let pad_focused = lector_ui::a11y::ring_padding(px(4.), 0.);
     h_flex()
         .id(id)
         .gap(px(5.))
         .h(px(22.))
         .px(px(4.))
-        .rounded(metrics::RADIUS)
+        .rounded(metrics::radius())
+        // A tab stop with the focus ring; Space and Enter toggle it.
+        .tab_index(0)
+        .focus(move |s| {
+            lector_ui::a11y::focus_ring_style(s, ring)
+                .pl(pad_focused)
+                .pr(pad_focused)
+        })
         .cursor_pointer()
-        .text_size(metrics::TEXT_SM)
+        .text_size(metrics::text_sm())
         .text_color(if checked {
             ui.text.hsla()
         } else {
@@ -492,7 +502,7 @@ impl Render for CommitComposer {
                     .px(px(8.))
                     .pt(px(6.))
                     .pb(px(16.))
-                    .rounded(metrics::RADIUS)
+                    .rounded(metrics::radius())
                     .border_1()
                     .border_color(if focused {
                         ui.border_focused.hsla()
@@ -500,7 +510,7 @@ impl Render for CommitComposer {
                         ui.border.hsla()
                     })
                     .bg(ui.input_bg.hsla())
-                    .text_size(metrics::TEXT)
+                    .text_size(metrics::text())
                     .text_color(ui.text.hsla())
                     .child(self.editor.clone())
                     .child(
@@ -509,7 +519,7 @@ impl Render for CommitComposer {
                             .absolute()
                             .right(px(6.))
                             .bottom(px(2.))
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(subject_color)
                             .when(subject > 0, |el| el.child(subject.to_string()))
                             .tooltip(Tooltip::text(format!(
@@ -562,7 +572,7 @@ impl Render for CommitComposer {
                 el.child(
                     v_flex()
                         .relative()
-                        .rounded(metrics::RADIUS)
+                        .rounded(metrics::radius())
                         .border_1()
                         .border_color(ui.error.hsla().opacity(0.7))
                         .bg(ui.error.hsla().opacity(0.08))
@@ -574,7 +584,7 @@ impl Render for CommitComposer {
                                 .p(px(8.))
                                 .pr(px(24.))
                                 .font_family(lector_ui::code_view::EditorSettings::get(cx).font_family)
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .text_color(ui.text.hsla())
                                 .child(error),
                         )
@@ -591,5 +601,106 @@ impl Render for CommitComposer {
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{div, FocusHandle, TestAppContext, Window};
+    use lector_app::{AppCore, CoreOptions};
+    use lector_ui::views::Workspace;
+    use lector_workspace::Project;
+
+    /// Hosts a composer inside a container so the tests can tell when focus leaves it.
+    struct Host {
+        composer: Entity<CommitComposer>,
+        container: FocusHandle,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .track_focus(&self.container)
+                .child(self.composer.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn tab_walks_the_message_then_the_options_and_shift_tab_walks_back(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .expect("git runs");
+        assert!(status.success());
+        let data = tempfile::tempdir().expect("tempdir");
+        let mut settings = lector_config::Settings::default();
+        settings.lsp.enabled = false;
+        settings.session.restore = false;
+        let core = AppCore::open(CoreOptions {
+            data_dir: Some(data.path().to_path_buf()),
+            ..CoreOptions::for_tests()
+        });
+        cx.update(|cx| {
+            lector_ui::ThemeState::init(
+                cx,
+                lector_theme::ThemeRegistry::new(),
+                lector_ui::ThemeMode::Dark,
+                lector_theme::Appearance::Dark,
+            );
+            cx.set_global(lector_ui::code_view::EditorSettings::default());
+            cx.set_global(lector_ui::settings::AppSettings {
+                settings: std::sync::Arc::new(settings.clone()),
+                warnings: Default::default(),
+            });
+            cx.set_global(lector_ui::commands_bridge::CoreGlobal(core));
+            crate::init(cx);
+        });
+        let project = Project::open(&root, settings).expect("project");
+        let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
+        cx.run_until_parked();
+        let store = cx
+            .update(|_, cx| crate::store_for(ws.entity_id(), cx))
+            .expect("git store");
+
+        let (host, cx) = cx.add_window_view(|_, cx| Host {
+            composer: cx.new(|cx| CommitComposer::new(store.clone(), cx)),
+            container: cx.focus_handle(),
+        });
+        cx.run_until_parked();
+        let (composer, container) =
+            host.read_with(cx, |h, _| (h.composer.clone(), h.container.clone()));
+        let message = cx.update(|_, cx| composer.read(cx).focus_handle(cx));
+        cx.update(|window, _| window.focus(&message));
+        assert!(cx.update(|window, _| message.is_focused(window)));
+
+        // Tab: the message, then Amend, then Sign off, each a distinct stop inside the composer.
+        let mut stops = vec![cx.update(|window, cx| window.focused(cx))];
+        for _ in 0..2 {
+            cx.update(|window, _| window.focus_next());
+            cx.run_until_parked();
+            assert!(
+                cx.update(|window, cx| container.contains_focused(window, cx)),
+                "focus stays inside the composer"
+            );
+            assert!(!cx.update(|window, _| message.is_focused(window)));
+            stops.push(cx.update(|window, cx| window.focused(cx)));
+        }
+        assert!(
+            stops[0] != stops[1] && stops[1] != stops[2] && stops[0] != stops[2],
+            "message, Amend and Sign off are distinct stops"
+        );
+
+        // Shift-Tab walks back to the message.
+        for _ in 0..2 {
+            cx.update(|window, _| window.focus_prev());
+            cx.run_until_parked();
+        }
+        assert!(cx.update(|window, _| message.is_focused(window)));
     }
 }

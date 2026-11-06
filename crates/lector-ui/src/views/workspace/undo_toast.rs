@@ -4,7 +4,8 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{div, prelude::*, px, App, Context, SharedString, Window};
+use crate::scale::px;
+use gpui::{div, prelude::*, App, Context, SharedString, Window};
 
 use super::Workspace;
 use crate::components::{h_flex, metrics, Button, ButtonStyle};
@@ -86,18 +87,18 @@ impl Workspace {
             div()
                 .id("action-toast")
                 .absolute()
-                .bottom(metrics::STATUS_BAR_HEIGHT + px(12.))
+                .bottom(metrics::status_bar_height() + px(12.))
                 .right(px(16.))
                 .max_w(px(560.))
                 .pl(px(12.))
                 .pr(px(6.))
                 .py(px(5.))
-                .rounded(metrics::RADIUS_LG)
+                .rounded(metrics::radius_lg())
                 .bg(ui.elevated.hsla())
                 .border_1()
                 .border_color(ui.border.hsla())
                 .shadow_lg()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text.hsla())
                 .child(
                     h_flex()

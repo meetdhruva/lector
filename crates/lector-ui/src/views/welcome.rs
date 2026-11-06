@@ -5,8 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, Action, AnyView, App, EventEmitter, FocusHandle, Focusable, FontWeight,
+    div, prelude::*, Action, AnyView, App, EventEmitter, FocusHandle, Focusable, FontWeight,
     SharedString, Window,
 };
 
@@ -69,6 +70,7 @@ pub fn recent_entries() -> Vec<RecentEntry> {
 pub struct WelcomeView {
     recent: Vec<RecentEntry>,
     current_root: Option<PathBuf>,
+    review_hint: Option<super::workspace::ReviewHint>,
     focus_handle: FocusHandle,
 }
 
@@ -87,8 +89,75 @@ impl WelcomeView {
         WelcomeView {
             recent: recent_entries(),
             current_root,
-            focus_handle: cx.focus_handle(),
+            review_hint: None,
+            focus_handle: cx.focus_handle().tab_stop(true),
         }
+    }
+
+    /// Sets the "Review your N uncommitted changes" entry (`None` hides it).
+    pub fn set_review_hint(
+        &mut self,
+        hint: Option<super::workspace::ReviewHint>,
+        cx: &mut Context<Self>,
+    ) {
+        self.review_hint = hint;
+        cx.notify();
+    }
+
+    /// The prominent "Review your N uncommitted changes" row, when there are changes.
+    fn render_review_prompt(&self, cx: &App) -> Option<gpui::AnyElement> {
+        let hint = self.review_hint.as_ref().filter(|h| h.uncommitted > 0)?;
+        let ui = &cx.theme().ui;
+        let open = hint.open_review;
+        let noun = if hint.uncommitted == 1 {
+            "change"
+        } else {
+            "changes"
+        };
+        let (hover, active) = (ui.hover.hsla(), ui.active.hsla());
+        Some(
+            h_flex()
+                .id("welcome-review-changes")
+                .h(px(44.))
+                .px(px(12.))
+                .gap(px(10.))
+                .rounded(metrics::radius_lg())
+                .border_1()
+                .border_color(ui.text_accent.hsla().opacity(0.5))
+                .bg(ui.surface.hsla())
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .active(move |s| s.bg(active))
+                .tab_index(0)
+                .focus(crate::a11y::ring_focus(cx))
+                .on_click(move |_, window, cx| window.dispatch_action(open(), cx))
+                .child(
+                    Icon::new(IconName::GitCompare)
+                        .size(IconSize::Medium)
+                        .color(ui.text_accent.hsla()),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_size(metrics::text())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(ui.text.hsla())
+                                .child(format!(
+                                    "Review your {} uncommitted {noun}",
+                                    hint.uncommitted
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(metrics::text_xs())
+                                .text_color(ui.text_muted.hsla())
+                                .child("Riskiest files first, with moved code collapsed"),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Re-reads the recent projects list.
@@ -129,10 +198,12 @@ impl WelcomeView {
             .h(px(32.))
             .px(px(10.))
             .gap(px(10.))
-            .rounded(metrics::RADIUS)
+            .rounded(metrics::radius())
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .active(move |s| s.bg(active))
+            .tab_index(0)
+            .focus(crate::a11y::ring_focus(cx))
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
             .child(
                 Icon::new(icon)
@@ -142,7 +213,7 @@ impl WelcomeView {
             .child(
                 div()
                     .flex_1()
-                    .text_size(metrics::TEXT)
+                    .text_size(metrics::text())
                     .text_color(ui.text.hsla())
                     .child(label),
             )
@@ -159,7 +230,7 @@ impl WelcomeView {
                     .px(px(10.))
                     .py(px(12.))
                     .gap(px(4.))
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .text_color(ui.text_faint.hsla())
                     .child("No recent projects yet.")
                     .child("Folders you open appear here."),
@@ -177,10 +248,12 @@ impl WelcomeView {
                 .pl(px(10.))
                 .pr(px(4.))
                 .gap(px(10.))
-                .rounded(metrics::RADIUS)
+                .rounded(metrics::radius())
                 .hover(move |s| s.bg(hover))
                 .when(exists, |el| {
                     el.cursor_pointer()
+                        .tab_index(0)
+                        .focus(crate::a11y::ring_focus(cx))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(WelcomeEvent::OpenRecent(path.clone()))
                         }))
@@ -207,7 +280,7 @@ impl WelcomeView {
                         .min_w_0()
                         .child(
                             div()
-                                .text_size(metrics::TEXT)
+                                .text_size(metrics::text())
                                 .text_color(if exists {
                                     ui.text.hsla()
                                 } else {
@@ -221,7 +294,7 @@ impl WelcomeView {
                         )
                         .child(
                             div()
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .text_color(ui.text_faint.hsla())
                                 .overflow_hidden()
                                 .whitespace_nowrap()
@@ -255,7 +328,7 @@ pub fn keycap(text: SharedString, cx: &App) -> impl IntoElement {
         .border_1()
         .border_color(ui.border_variant.hsla())
         .bg(ui.surface.hsla())
-        .text_size(metrics::TEXT_XS)
+        .text_size(metrics::text_xs())
         .text_color(ui.text_muted.hsla())
         .child(text)
 }
@@ -265,7 +338,7 @@ fn section_title(title: &'static str, cx: &App) -> impl IntoElement {
     div()
         .px(px(10.))
         .pb(px(6.))
-        .text_size(metrics::TEXT_XS)
+        .text_size(metrics::text_xs())
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(ui.text_faint.hsla())
         .child(title.to_uppercase())
@@ -321,7 +394,7 @@ impl Render for WelcomeView {
                     h_flex()
                         .gap(px(8.))
                         .justify_between()
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .child(div().text_color(ui.text_muted.hsla()).child(label))
                         .child(keycap(kb, cx)),
                 )
@@ -331,7 +404,7 @@ impl Render for WelcomeView {
             let ui = &cx.theme().ui;
             v_flex()
                 .p(px(8.))
-                .rounded(metrics::RADIUS_LG)
+                .rounded(metrics::radius_lg())
                 .border_1()
                 .border_color(ui.border_variant.hsla())
                 .bg(ui.surface.hsla())
@@ -433,7 +506,7 @@ impl Render for WelcomeView {
                                         )
                                         .child(
                                             div()
-                                                .text_size(metrics::TEXT)
+                                                .text_size(metrics::text())
                                                 .text_color(ui.text_muted.hsla())
                                                 .child(format!(
                                                     "Version {} · Read, review and edit code",
@@ -459,6 +532,7 @@ impl Render for WelcomeView {
                                             .flex_1()
                                             .min_w_0()
                                             .gap(px(18.))
+                                            .children(self.render_review_prompt(cx))
                                             .child(
                                                 card(cx)
                                                     .child(section_title("Recent projects", cx))

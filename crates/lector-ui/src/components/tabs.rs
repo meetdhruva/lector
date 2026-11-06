@@ -3,8 +3,9 @@
 
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, ElementId, MouseButton, MouseDownEvent, ScrollHandle,
+    div, prelude::*, AnyElement, App, ElementId, MouseButton, MouseDownEvent, ScrollHandle,
     SharedString, Window,
 };
 
@@ -139,7 +140,7 @@ impl RenderOnce for Tab {
         let hover = ui.hover.hsla();
         let border = ui.border.hsla();
         let indicator = if self.focused_pane {
-            ui.accent.hsla()
+            ui.focus_ring.hsla()
         } else {
             ui.text_faint.hsla()
         };
@@ -204,7 +205,7 @@ impl RenderOnce for Tab {
             // omits it so it merges with the editor below.
             .when(!active, |el| el.border_b_1())
             .border_color(border)
-            .text_size(metrics::TEXT)
+            .text_size(metrics::text())
             .text_color(fg)
             .cursor_pointer()
             .when(!active, |el| el.hover(move |s| s.bg(hover)))
@@ -234,7 +235,7 @@ impl RenderOnce for Tab {
                 el.child(
                     div()
                         .whitespace_nowrap()
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(detail),
                 )
@@ -304,7 +305,7 @@ impl RenderOnce for TabBar {
         let ui = &cx.theme().ui;
         h_flex()
             .relative()
-            .h(metrics::TAB_BAR_HEIGHT)
+            .h(metrics::tab_bar_height())
             .w_full()
             .flex_none()
             .bg(ui.tab_bar_bg.hsla())

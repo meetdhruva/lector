@@ -5,11 +5,14 @@
 #![forbid(unsafe_code)]
 
 pub mod commands; // Agent APP
+pub mod comments; // Agent FORGE
 mod core; // Agent APP
 pub mod db; // Agent APP
 pub mod documents; // Agent DOCS
 pub mod git_service; // Agent APP
 pub mod journal; // Agent SAFE
+pub mod provenance; // Agent REVIEWUX
+pub mod review_queue; // Agent REVIEWUX
 pub mod scheduler; // Agent APP
 
 pub use crate::commands::{

@@ -214,8 +214,10 @@ jobs:
         with:
           name: release-meta
           path: target
+      # lector.exe is a GUI-subsystem app (no console); lector-cli.exe is the console build of the
+      # command line (no GUI dependencies) that the packages ship as lector-cli.exe and lector.com.
       - name: Build
-        run: cargo build --locked --profile dist -p lector --target ${{ matrix.target }}
+        run: cargo build --locked --profile dist -p lector -p lector-cli --target ${{ matrix.target }}
       - name: Smoke test
         if: matrix.arch == 'x64'
         shell: pwsh
@@ -223,6 +225,11 @@ jobs:
           $out = (& "target\${{ matrix.target }}\dist\lector.exe" --version | Out-String)
           Write-Host $out
           if ($out -notmatch [regex]::Escape("${{ needs.prepare.outputs.version }}")) { throw "unexpected version output" }
+          $cli = (& "target\${{ matrix.target }}\dist\lector-cli.exe" --version | Out-String)
+          Write-Host $cli
+          if ($cli -notmatch [regex]::Escape("${{ needs.prepare.outputs.version }}")) { throw "unexpected lector-cli version output" }
+          $status = (& "target\${{ matrix.target }}\dist\lector-cli.exe" status . --json | Out-String)
+          if ($status -notmatch '"schema"') { throw "lector-cli status produced no JSON" }
       - name: Installer tools
         shell: pwsh
         run: |
@@ -235,6 +242,7 @@ jobs:
         shell: pwsh
         run: |
           pwsh scripts/package-windows.ps1 -Binary "target\${{ matrix.target }}\dist\lector.exe" `
+            -CliBinary "target\${{ matrix.target }}\dist\lector-cli.exe" `
             -Version "${{ needs.prepare.outputs.version }}" -Arch ${{ matrix.arch }} -OutDir dist
           Get-ChildItem dist
       - uses: actions/upload-artifact@v4

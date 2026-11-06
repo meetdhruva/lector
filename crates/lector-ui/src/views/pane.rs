@@ -3,9 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyElement, AnyView, App, Axis, Entity, EventEmitter, FocusHandle,
-    Focusable, MouseDownEvent, ScrollHandle, SharedString, WeakEntity, Window,
+    div, prelude::*, AnyElement, AnyView, App, Axis, Entity, EventEmitter, FocusHandle, Focusable,
+    ScrollHandle, SharedString, WeakEntity, Window,
 };
 
 use crate::actions::workspace::*;
@@ -170,6 +171,7 @@ pub struct Pane {
     context_menu: ContextMenuState,
     root: Option<PathBuf>,
     pub(crate) is_active_pane: bool,
+    bounds: crate::components::anchor::TrackedBounds,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -194,7 +196,24 @@ impl Pane {
             context_menu: ContextMenuState::default(),
             root,
             is_active_pane: false,
+            bounds: Default::default(),
         }
+    }
+
+    /// The pane's own focus handle: it contains the focus whenever the tab bar or the active
+    /// item has it (F6 region cycling).
+    pub fn region_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    /// Opens the active tab's menu below the tab bar (shift-F10 / the Menu key).
+    pub fn show_active_tab_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let position = self.bounds.top_left_offset(px(28.), px(30.));
+        let ix = self.active;
+        self.deploy_tab_menu(ix, position, window, cx);
     }
 
     /// Number of items.
@@ -473,7 +492,7 @@ impl Pane {
     fn deploy_tab_menu(
         &mut self,
         ix: usize,
-        event: &MouseDownEvent,
+        position: gpui::Point<gpui::Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -515,7 +534,7 @@ impl Pane {
             menu
         });
         self.context_menu
-            .deploy(menu, event.position, window, cx, |this: &mut Self| {
+            .deploy(menu, position, window, cx, |this: &mut Self| {
                 &mut this.context_menu
             });
         cx.notify();
@@ -587,7 +606,7 @@ impl Pane {
 }
 
 impl Render for Pane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let ui = &theme.ui;
         let this = cx.entity().downgrade();
@@ -616,8 +635,9 @@ impl Render for Pane {
                         let _ = t2.update(cx, |pane, cx| pane.close(ix, window, cx));
                     })
                     .on_secondary_mouse_down(move |event, window, cx| {
-                        let _ =
-                            t3.update(cx, |pane, cx| pane.deploy_tab_menu(ix, event, window, cx));
+                        let _ = t3.update(cx, |pane, cx| {
+                            pane.deploy_tab_menu(ix, event.position, window, cx)
+                        });
                     })
                     .into_any_element()
             })
@@ -659,7 +679,21 @@ impl Render for Pane {
                         ),
                 )
             })
-            .child(div().flex_1().min_h_0().relative().child(content))
+            .on_action(cx.listener(
+                |pane, _: &crate::actions::workspace::ShowContextMenu, window, cx| {
+                    pane.show_active_tab_menu(window, cx)
+                },
+            ))
+            .child(self.bounds.element())
+            .child(div().flex_1().min_h_0().relative().child(content).children(
+                // Items without a caret (diffs, previews, images) show the pane's focus.
+                crate::a11y::region_ring(
+                    self.focus_handle.contains_focused(window, cx)
+                        && self.active_item().is_some_and(|i| i.code_view().is_none()),
+                    cx,
+                    px(0.),
+                ),
+            ))
             .children(self.context_menu.render())
     }
 }

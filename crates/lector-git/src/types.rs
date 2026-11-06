@@ -86,6 +86,16 @@ pub enum Changeset {
         /// The target branch.
         base: String,
     },
+    /// Shadow snapshot → shadow snapshot (v0.5: an agent turn's checkpoints, see
+    /// [`crate::ShadowRepo::snapshot_worktree`]). Both ids are snapshot commits in the
+    /// repository's shadow repo; the sides are shadow blobs, which [`crate::Repo::load`]
+    /// finds through the shadow repos opened in this process.
+    Snapshots {
+        /// The snapshot before.
+        from: Oid,
+        /// The snapshot after.
+        to: Oid,
+    },
 }
 
 /// Where to read one side of a [`FileChange`] from. Load with [`crate::Repo::load`].

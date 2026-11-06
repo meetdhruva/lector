@@ -4,9 +4,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use crate::scale::px;
 use gpui::{
-    img, prelude::*, px, svg, App, Hsla, Image, ImageFormat, ImageSource, Pixels, SharedString,
-    Window,
+    img, prelude::*, svg, App, Hsla, Image, ImageFormat, ImageSource, Pixels, SharedString, Window,
 };
 use lector_icons::{FileIcons, IconRef, UiIcon};
 

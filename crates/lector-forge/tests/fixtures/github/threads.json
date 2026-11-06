@@ -1,0 +1,15 @@
+{"data": {"repository": {"pullRequest": {"reviewThreads": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+    {"id": "PRRT_1", "isResolved": false, "isOutdated": false, "viewerCanResolve": true,
+     "path": "src/manifest.rs", "diffSide": "RIGHT", "line": 14, "startLine": null, "originalLine": 14, "originalStartLine": null,
+     "comments": {"nodes": [
+       {"id": "PRRC_a", "databaseId": 501, "body": "Should this be `OnceLock`?", "createdAt": "2026-11-04T10:00:00Z", "author": {"login": "linus"}},
+       {"id": "PRRC_b", "databaseId": 502, "body": "Good idea, done.", "createdAt": "2026-11-04T11:00:00Z", "author": {"login": "grace"}}
+     ]}},
+    {"id": "PRRT_2", "isResolved": true, "isOutdated": true, "viewerCanResolve": true,
+     "path": "src/loader.rs", "diffSide": "LEFT", "line": null, "startLine": null, "originalLine": 3, "originalStartLine": 1,
+     "comments": {"nodes": [
+       {"id": "PRRC_c", "databaseId": 503, "body": "Typo", "createdAt": "2026-11-03T10:00:00Z", "author": {"login": "ada"}}
+     ]}}
+  ]}}}}}

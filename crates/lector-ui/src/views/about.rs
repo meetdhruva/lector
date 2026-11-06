@@ -1,8 +1,9 @@
 //! The About dialog (`workspace::About`) and the version/environment text
 //! shared with `workspace::ReportIssue`.
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, ClipboardItem, DismissEvent, EventEmitter, FocusHandle, Focusable,
+    div, prelude::*, App, ClipboardItem, DismissEvent, EventEmitter, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, SharedString, Window,
 };
 
@@ -111,10 +112,12 @@ impl Render for AboutDialog {
             let ui = &cx.theme().ui;
             div()
                 .id(id)
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_accent.hsla())
                 .cursor_pointer()
                 .hover(|s| s.underline())
+                .tab_index(0)
+                .focus(crate::a11y::ring_focus(cx))
                 .on_click(move |_, _, cx| cx.open_url(url))
                 .child(label)
         };
@@ -122,7 +125,7 @@ impl Render for AboutDialog {
             let ui = &cx.theme().ui;
             h_flex()
                 .gap(px(12.))
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .child(
                     div()
                         .w(px(70.))
@@ -160,13 +163,13 @@ impl Render for AboutDialog {
                     )
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .text_color(ui.text_muted.hsla())
                             .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
                     .child(
                         div()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_faint.hsla())
                             .text_center()
                             .child("A fast, reading-first code viewer and git review tool."),

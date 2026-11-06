@@ -40,6 +40,9 @@ pub mod contexts {
     pub const TEXT_AREA: &str = "TextArea";
     /// The Changes panel file list.
     pub const CHANGES_PANEL: &str = "ChangesPanel";
+    /// A keyboard-navigable list panel or results view (history, branches, references...):
+    /// Up / Down move the selection, Enter opens it.
+    pub const LIST_PANEL: &str = "ListPanel";
     /// The commit message editor.
     pub const COMMIT_EDITOR: &str = "CommitEditor";
 }
@@ -286,6 +289,12 @@ pub fn default_keymap() -> Vec<KeySpec> {
         add("ctrl-shift-end".into(), "text_area::SelectToEnd", ta);
         add("ctrl-y".into(), "text_area::Redo", ta);
     }
+
+    // Generic list panels.
+    let lp = Some(LIST_PANEL);
+    add("up".into(), "picker::SelectPrev", lp);
+    add("down".into(), "picker::SelectNext", lp);
+    add("enter".into(), "picker::Confirm", lp);
 
     // Changes panel list (`space` = git::Stage comes from lector-config's keymap).
     let cp = Some(CHANGES_PANEL);

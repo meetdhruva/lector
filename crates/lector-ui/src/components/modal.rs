@@ -3,8 +3,9 @@
 
 use std::any::TypeId;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyView, App, DismissEvent, Entity, FocusHandle, Focusable, ManagedView,
+    div, prelude::*, AnyView, App, DismissEvent, Entity, FocusHandle, Focusable, ManagedView,
     Subscription, Window,
 };
 
@@ -14,6 +15,8 @@ struct ActiveModal {
     view: AnyView,
     type_id: TypeId,
     focus: FocusHandle,
+    /// Contains the focus while any control of the modal has it (Tab stays inside).
+    container: FocusHandle,
     previous_focus: Option<FocusHandle>,
     _subscription: Subscription,
 }
@@ -71,6 +74,7 @@ impl ModalLayer {
             view: view.into(),
             type_id: TypeId::of::<V>(),
             focus,
+            container: cx.focus_handle(),
             previous_focus,
             _subscription: subscription,
         });
@@ -103,6 +107,11 @@ impl ModalLayer {
     pub fn modal_focus(&self) -> Option<&FocusHandle> {
         self.active.as_ref().map(|m| &m.focus)
     }
+
+    /// Handle that contains the focus while any control inside the modal has it.
+    pub fn modal_container(&self) -> Option<&FocusHandle> {
+        self.active.as_ref().map(|m| &m.container)
+    }
 }
 
 impl Render for ModalLayer {
@@ -124,6 +133,7 @@ impl Render for ModalLayer {
             .child(
                 div()
                     .occlude()
+                    .track_focus(&active.container)
                     .on_mouse_down_out(
                         cx.listener(|this, _, window, cx| this.hide_modal(window, cx)),
                     )

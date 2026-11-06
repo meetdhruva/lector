@@ -21,9 +21,11 @@ path = "src/main.rs"
 dunce.workspace = true
 lector-ui.workspace = true
 lector-ui-git.workspace = true
+lector-ui-agent.workspace = true
 lector-theme.workspace = true
 lector-workspace.workspace = true
 lector-config.workspace = true
+lector-cli.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -35,6 +37,7 @@ url = "2"
 [dev-dependencies]
 lector-config = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

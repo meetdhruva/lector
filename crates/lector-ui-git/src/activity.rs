@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 
 use futures::StreamExt as _;
 use gpui::{
-    div, prelude::*, px, AnyView, App, Context, Entity, FocusHandle, Focusable, FontWeight,
+    div, prelude::*, AnyView, App, Context, Entity, FocusHandle, Focusable, FontWeight,
     SharedString, Task, Window,
 };
 use lector_app::commands::{CommandContext, Source};
@@ -25,6 +25,7 @@ use lector_app::journal::{
 use lector_git::{Repo, ShadowRepo, Side};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
+use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::workspace::UNDO_TOAST_DURATION;
 use lector_ui::views::Workspace;
@@ -275,7 +276,7 @@ impl ActivityView {
             load_task: None,
             _watch_task: Some(watch),
             _subscription: Some(subscription),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
         };
         view.reload(cx);
         view
@@ -492,14 +493,14 @@ impl ActivityView {
                             .gap(px(2.))
                             .child(
                                 div()
-                                    .text_size(metrics::TEXT_SM)
+                                    .text_size(metrics::text_sm())
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(summary_color)
                                     .child(entry.summary.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(metrics::TEXT_XS)
+                                    .text_size(metrics::text_xs())
                                     .text_color(ui.text_faint.hsla())
                                     .child(meta),
                             ),
@@ -510,7 +511,7 @@ impl ActivityView {
                             .py(px(2.))
                             .rounded_full()
                             .bg(ui.hover.hsla())
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_muted.hsla())
                             .child("Undone")
                             .into_any_element()
@@ -541,11 +542,13 @@ impl ActivityView {
                                 .id(("activity-file", id as usize * 10_000 + i))
                                 .px(px(6.))
                                 .py(px(2.))
-                                .rounded(metrics::RADIUS)
-                                .text_size(metrics::TEXT_SM)
+                                .rounded(metrics::radius())
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_muted.hsla())
                                 .when(can_open, |d| {
                                     d.cursor_pointer()
+                                        .tab_index(0)
+                                        .focus(lector_ui::a11y::ring_focus(cx))
                                         .hover(|s| s.bg(ui.hover.hsla()))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.open_file(&entry, rel.clone(), window, cx)
@@ -557,7 +560,7 @@ impl ActivityView {
                             el.child(
                                 div()
                                     .px(px(6.))
-                                    .text_size(metrics::TEXT_XS)
+                                    .text_size(metrics::text_xs())
                                     .text_color(ui.text_faint.hsla())
                                     .child("No before/after recorded for this operation"),
                             )
@@ -593,14 +596,14 @@ impl Render for ActivityView {
                     .bg(ui.surface.hsla())
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui.text.hsla())
                             .child("Activity"),
                     )
                     .child(
                         div()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_faint.hsla())
                             .child("Everything Lector wrote to your files or repository"),
                     )
@@ -625,7 +628,7 @@ impl Render for ActivityView {
                         el.child(
                             div()
                                 .p(px(24.))
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_faint.hsla())
                                 .child(if self.loaded {
                                     "Nothing yet. Stage, discard or commit something and it shows up here, with an Undo button when it can be undone."

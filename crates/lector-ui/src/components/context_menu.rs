@@ -3,8 +3,9 @@
 
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, Action, App, Corner, DismissEvent, Entity, EventEmitter, FocusHandle,
+    div, prelude::*, Action, App, Corner, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable, MouseButton, Pixels, Point, SharedString, Window,
 };
 
@@ -298,7 +299,7 @@ impl Render for ContextMenu {
                     .px(px(10.))
                     .pt(px(6.))
                     .pb(px(2.))
-                    .text_size(metrics::TEXT_XS)
+                    .text_size(metrics::text_xs())
                     .text_color(ui.text_faint.hsla())
                     .child(title.clone())
                     .into_any_element(),
@@ -356,8 +357,8 @@ impl ContextMenu {
             .h(px(26.))
             .px(px(8.))
             .gap(px(8.))
-            .rounded(metrics::RADIUS)
-            .text_size(metrics::TEXT)
+            .rounded(metrics::radius())
+            .text_size(metrics::text())
             .text_color(fg)
             .when(selected, |el| el.bg(ui.active.hsla()))
             .when(!disabled, |el| {
@@ -391,7 +392,7 @@ impl ContextMenu {
                 el.child(
                     div()
                         .pl(px(16.))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(kb),
                 )

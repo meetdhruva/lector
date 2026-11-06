@@ -1,0 +1,16 @@
+[
+  {"id": "d0", "individual_note": true, "notes": [{"id": 1, "body": "General note", "system": false, "author": {"username": "linus"}, "created_at": "2026-11-02T09:00:00Z"}]},
+  {"id": "d1", "individual_note": false, "notes": [
+    {"id": 10, "body": "Is this thread-safe?", "system": false, "resolvable": true, "resolved": false,
+     "author": {"username": "linus"}, "created_at": "2026-11-02T10:00:00Z",
+     "position": {"position_type": "text", "new_path": "src/auth.rs", "old_path": "src/auth.rs", "new_line": 2, "old_line": null}},
+    {"id": 11, "body": "Yes, behind a mutex.", "system": false, "resolvable": true, "resolved": false,
+     "author": {"username": "grace"}, "created_at": "2026-11-02T11:00:00Z"}
+  ]},
+  {"id": "d2", "individual_note": false, "notes": [
+    {"id": 12, "body": "Why remove this?", "system": false, "resolvable": true, "resolved": true,
+     "author": {"username": "ada"}, "created_at": "2026-11-02T12:00:00Z",
+     "position": {"position_type": "text", "new_path": "src/auth.rs", "old_path": "src/auth.rs", "new_line": null, "old_line": 2}}
+  ]},
+  {"id": "d3", "individual_note": true, "notes": [{"id": 13, "body": "added 1 commit", "system": true, "author": {"username": "grace"}, "created_at": "2026-11-02T13:00:00Z"}]}
+]

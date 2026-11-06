@@ -494,6 +494,7 @@ followed (like the walker), so a link to `/` or a symlink loop cannot make the w
 ### lector-config
 ```rust
 pub struct Settings { /* serde(default) everywhere; see crate docs */ }
+// v0.4 additions: `ui: UiSettings { scale, reduce_motion }` (`[ui]`), see "Accessibility" below.
 pub fn load_settings() -> (Settings, Vec<String> /*warnings*/);   // defaults ← user settings.toml ← project .lector/settings.toml
 pub fn default_settings_toml() -> &'static str;   // documented, commented default file
 pub struct KeyBinding { pub keys: String /* "cmd-p" / "ctrl-shift-f" (gpui syntax) */, pub action: String, pub context: Option<String> }
@@ -1431,8 +1432,10 @@ impl AgentSession {
     pub fn cancel(&self); pub fn turns(&self) -> Vec<Turn>; pub fn subscribe(&self, cb) -> Subscription;
     pub fn answer_permission(&self, req: PermissionRequestId, choice: PermissionChoice);
 }
-pub struct Turn { pub id: TurnId, pub prompt: String, pub before: ShadowSnapshot, pub after: Option<ShadowSnapshot>,
-                  pub messages: Vec<AgentMessage>, pub tool_calls: Vec<ToolCall>, pub plan: Vec<PlanEntry>, pub state: TurnState }
+pub struct Turn { pub id: TurnId, pub prompt: String, pub before: Option<ShadowSnapshot> /* None: checkpoints off / no repo */,
+                  pub after: Option<ShadowSnapshot>, pub messages: Vec<AgentMessage>, pub tool_calls: Vec<ToolCall>,
+                  pub plan: Vec<PlanEntry>, pub state: TurnState, /* + context, permissions, timeline, changed_files,
+                  written, journal_id, undone, started, finished */ }
 ```
 * Every turn is bracketed by `ShadowRepo::snapshot_worktree` checkpoints; the turn's changes are a
   `Changeset::Snapshots { from, to }` reviewable in the existing diff/review views; "Undo turn" restores
@@ -1442,6 +1445,96 @@ pub struct Turn { pub id: TurnId, pub prompt: String, pub before: ShadowSnapshot
   are shown to the user (allow once / always for this session / reject).
 * Feedback loop: review comments (below) on a turn's changes → "Send to agent" builds a prompt with
   file/line anchors and the comment text.
+
+**lector-agent as implemented (Agent AGENT).**
+* *Protocol* (`rpc`, `session`): ACP v1 implemented directly on `serde_json` — newline-delimited JSON-RPC 2.0, one
+  reader thread per agent process, requests block their caller (`Connection::request(method, params, timeout)` /
+  `start_request` → `PendingReply::wait`), agent→client requests each run on their own thread (a permission prompt
+  blocks only itself), notifications are delivered in order. Malformed lines are counted and skipped, answers to
+  unknown ids ignored, unknown methods answered `-32601`. No async runtime (the `agent-client-protocol` crate needs an
+  executor). `initialize` advertises `fs.readTextFile/writeTextFile = true`, `terminal = false`; `session/new { cwd:
+  project root, mcpServers: [] }` (an `-32000` with `authMethods` → `authenticate` with the first method, retried
+  once); `session/prompt` sends the text block first, then the context (`PromptContext::{File, Range}` as embedded
+  `resource` blocks when the agent reports `promptCapabilities.embeddedContext`, else fenced text; files over 256 KiB
+  as `resource_link`; `Diff`/`Comments` as text). `session/update`: `agent_message_chunk` / `agent_thought_chunk` /
+  `user_message_chunk` (merged per run), `tool_call` / `tool_call_update` (title, kind, status, locations (1-based →
+  0-based), `diff` / `content` / `terminal` content), `plan` (replaces the plan); others ignored. `Turn::timeline`
+  keeps the arrival order of messages, tool calls and permission requests.
+* *Session* (`AgentSession::{start, start_with(.., SessionOptions { checkpoints, auto_allow_reads, request_timeout:
+  60 s, turn_idle_timeout: 15 min, cancel_grace: 10 s }), prompt, cancel, turns, turn, last_turn,
+  pending_permissions, answer_permission, wait_turn, restart, stop, undo_turn(id, force, Source), turn_changeset,
+  subscribe → AgentEvent::{StatusChanged, TurnStarted, TurnUpdated, TurnFinished, PermissionRequested,
+  PermissionResolved}, status → SessionStatus::{Starting, Ready, Busy(turn), Crashed(msg), Stopped}}`). One turn at a
+  time (`AgentError::Busy`). The turn thread takes the "before" checkpoint, sends the prompt and waits in 100 ms slices:
+  a `stopReason` ends it (`cancelled` or a pending cancel → `Cancelled`), an exited process → `Failed` with the last
+  stderr lines (40 kept) and the session `Crashed` (`restart()` spawns a new process and ACP session, history kept),
+  a cancel not confirmed within `cancel_grace` or no traffic for `turn_idle_timeout` ends the turn too. Cancel sends
+  `session/cancel` and answers pending permission requests `cancelled`.
+* *Files*: `fs/read_text_file` serves the open document's text (unsaved edits included) or the file on disk
+  (`line`/`limit` honoured); `fs/write_text_file` goes through the open `DocHandle` (`replace_all` + `save`, no hooks /
+  cleanup; refused when the tab is locked read-only or the file changed on disk) or `lector_fs::write_atomic` for files
+  that are not open (parents created). Both only inside the project root (`paths::resolve_in_root`: `..`, absolute
+  paths elsewhere, symlinked directories leading out and `.git/` are refused with an error to the agent). Each write
+  is journaled as `agent.write_file` (`Source::Agent`, args `{session, turn, path}`); when the turn has no checkpoint the
+  file is backed up first (`snapshot_paths`) and the entry is undoable on its own.
+* *Permissions*: `session/request_permission` becomes a `PermissionRequest` in the turn (and `pending_permissions()`);
+  `AllowAlways` remembers the tool kind for the session; `auto_allow_reads` answers `read` requests whose locations are
+  inside the project. `PermissionChoice` maps to the agent's option of kind `allow_once` / `allow_always` /
+  `reject_once` (fallbacks: the other allow kind; reject without a reject option = `cancelled`).
+* *Checkpoints and undo*: `snapshot_worktree` before and after each turn (also after failed / cancelled turns);
+  `changed_files` = `ShadowRepo::changes_between`. A turn that changed files appends one journal entry `agent.turn`
+  (`UndoRecord::RestoreFiles { shadow: before, paths: changed, after: fingerprints }`), so `undo_turn` is
+  `Journal::undo(entry, Check|Force)`: `UndoError::Changed` → `AgentError::UndoConflict { paths }` (the UI offers
+  "Restore anyway"); the undo is itself undoable (redo from the Activity Log), `Turn::undone` follows the journal, and
+  "Undo last operation" picks the turn entry (newest).
+* *`Changeset::Snapshots { from, to }`* (lector-git, as implemented): `Repo::changes` finds the shadow repository
+  holding `from` among the shadows opened in this process (`ShadowRepo::open` registers them; `ShadowRepo::known_for
+  (repo)`), sides are shadow blobs; `Repo::load(Side::Blob)` falls back to the known shadows when the user's object
+  store lacks the blob, so `review::load_changeset*` / `load_file_diff*` and the review/diff tabs work unchanged
+  (read-only: no hunk actions). Review key `snapshots:<from>..<to>` (`changeset_key` / `parse_changeset_key`); title =
+  the "after" snapshot's note ("Agent turn 3: …", `ShadowRepo::known_note`).
+* *Manager and provenance*: `AgentManager::of(&core)` (AppCore extension; `sessions`, `session_for(root)` = newest of
+  the project, `start` / `start_with` (stops the project's previous session), `stop_all`, `subscribe`). It registers a
+  `ProvenanceProvider` ("agent", `PRIORITY_AGENT`): for working-tree queries, the newest not-undone turn whose diff
+  (before → after, `lector_diff`) added or changed the line and whose line is still as the turn left it (after →
+  current text through `remap::LineMap`, Exact/Moved) explains it: title "<agent> turn N: <prompt>", detail = prompt.
+* *Config*: `available_configs(&AgentSettings)` = the user's `[[agent.servers]]`, then `gemini --experimental-acp`,
+  `claude-code-acp`, `codex-acp` when found on `PATH` (`PATHEXT` on Windows) and not configured already. Servers are
+  read from the **user's** settings only (`load_settings()`): a project's `.lector/settings.toml` cannot add commands.
+  Settings `[agent] checkpoints = true, auto_allow_reads = true, servers = [{ name, command, args, env }]`.
+* *Commands* (`lector_agent::commands::register(&core)`, called by `lector_ui_agent::init`; CLI/MCP front-ends call it
+  too): `agent.list_configs {}`, `agent.start {name?}`, `agent.prompt {text, files?, wait?, timeout_s?}` (with `wait`:
+  the turn as JSON + `UiRequest::OpenChangeset`), `agent.cancel {}` (`ui_action` `agent::Cancel`), `agent.turns
+  {limit?, turn?}`, `agent.undo_turn {turn?, force?}` (destructive), `agent.answer_permission {id, choice:
+  allow_once|allow_always|reject}`, `agent.send_comments {text?, changeset?, wait?, timeout_s?}` (open
+  `CommentStore` threads of the review key — default: focused changeset, else the last turn — as `Thread::to_prompt`,
+  plus the typed text). Start/prompt/undo/answer/send are `writes = true` (MCP needs `--allow-writes`).
+* Tests: unit (rpc framing and malformed input, timeline building, PATH discovery, path containment, option picking)
+  and `tests/acp.rs` against `tests/fake_acp_agent.py` (a scriptable ACP agent: `say`, `think`, `plan`, `write`,
+  `read`, `ask`, `slow`, `crash`, `garbage`, `stop`): streaming, writes through open documents, refusals outside the
+  project / in `.git`, permissions (once / always / reject / automatic reads), cancel (streaming and during a
+  permission prompt), crash + restart, start failures, context blocks (embedded / inline), checkpoints + changeset +
+  review load + undo + redo, undo conflicts + force, commands, provenance.
+
+**lector-ui-agent (v0.5; Agent panel).** `lector_ui_agent::init(cx)` (after `lector_ui_git::init`) registers the
+commands and, per workspace with a folder, an `AgentPanel` in `SidebarPanel::Agent` (activity-bar icon `Sparkles`).
+Header: agent picker (menu when several agents), status dot, restart (after a crash), new session. Conversation per
+turn: "TURN n" + state, the prompt with its context labels, the timeline (Markdown answers via `markdown::parse` cached
+per message length, collapsible thoughts, tool-call cards with kind icon / status / clickable locations / a mini diff of
+the first 8 changed lines / text output, inline permission prompts — Allow once / Always / Reject — or their answer),
+the plan checklist, "Working… Stop", errors (Restart agent), and a footer "N files changed · Review · Undo turn" with the
+changed files (click opens); an undo conflict shows the edited files with "Restore anyway" / "Keep my edits". Prompt
+box (`TextArea`, key context `AgentComposer`) with context chips: active file (`@file`), selection (`Range`), current
+diff (`git.show_diff` of the active file, else the working tree), feedback. Session events are coalesced (30 ms) into
+one refresh; the view sticks to the bottom while the user has not scrolled up. Actions (`lector_ui::actions::agent`):
+`TogglePanel` (`cmd/ctrl-alt-i`), `NewSession`, `Cancel` (`escape` in `AgentPanel`), `ReviewLastTurn`
+(`cmd/ctrl-alt-r`; `lector_ui_git::review_tab::open_review` with the turn's `Changeset::Snapshots`), `UndoLastTurn`
+(`cmd/ctrl-shift-alt-z`), `SendFeedback` (`cmd/ctrl-alt-f`: the selection of the active file / diff / review code view
+with its line numbers, plus the open review comments of the focused changeset, as a feedback chip; the panel opens with
+the prompt box focused), `SendPrompt` (`cmd/ctrl-enter` in `AgentComposer`). Menu: View → Agent. Agents are stopped
+on quit.
+Seams added for it: `SidebarPanel::Agent` (lector-ui), `Workspace::ensure_sidebar_width(px, cx)` (the panel widens
+the sidebar to 400 px when shown).
 
 **lector-app review comments (v0.6, Agent FORGE).** `lector_app::comments::{CommentStore, Comment,
 Thread, Anchor}` in the Db: threads anchored to (path, line, line text + context, changeset/blob id),
@@ -1466,11 +1559,222 @@ PR head/base commits are fetched into the **shadow repo** (never the user's repo
 `Changeset::Range` there; inline comments come from `review_threads` and drafts from `CommentStore`.
 Submitting a review is an explicit user action, irreversible → confirmation dialog.
 
+**v0.6 review comments and pull requests — as implemented (Agent FORGE).**
+* **`lector_app::comments`** (`CommentStore::{new(Db), for_core(&AppCore) /* extension slot */, threads(repo,
+  &ThreadFilter { changeset, path, states, drafts_only, origin }), thread, add(NewThread), reply, add_remote_comment,
+  edit_comment, set_resolved, mark_published, delete, delete_comment, find_remote, remember_text, reanchor_path,
+  sync_changeset(&Repo, key, &Changeset), subscribe(cb) -> Subscription}`). `Thread { id, repo, anchor, original,
+  state: Open|Resolved|Outdated, origin: Local|Github|Gitlab, remote_id, comments: Vec<Comment { id, author, body,
+  created, updated, draft, remote_id }>, matched: AnchorMatch::{Original, Exact, Moved, Fuzzy, Lost}, confidence }`
+  (+ `location()`, `summary()`, `to_prompt()`, `draft_count()`); `Anchor { path, side: Old|New, line, end_line,
+  text, context_before/after (3 lines), changeset /* review key */, blob, content /* FNV hash of the revision */ }`.
+  Review keys are changeset keys (`worktree`, `branch:main...feature`, …) or `pr:<host>/<path>#<n>` (stable across
+  force-pushes and rebases). Stored as JSON in the Db `comments` table under `t\0<repo>\0<id>`
+  (`Db::{next_comment_id, put_comment_thread, comment_thread, comment_threads}`); v0.4 single comments are migrated to
+  threads on first read. Anchored file texts are remembered in the Db cache (`comments/text/<hash>`) so later
+  revisions can be diffed against them.
+* **Re-anchoring** (`reanchor_anchor(&Anchor, old_text?, new_text, min_confidence)`): with the old text, a line diff +
+  move detection (`lector_diff::remap::LineMap`) gives `Exact` / `Moved`; rewritten or unknown → `remap::reanchor_with`
+  (hint = mapped position) → `Exact` (identical line + context) or `Fuzzy` with its confidence; below 0.6 → `Lost`: the
+  thread becomes `Outdated`, keeps its `original` anchor/snippet and retries from it on later revisions (re-attaches
+  when the code comes back). Threads already on a revision (same content hash) are skipped.
+* **Commands** (registered by `register_builtin`, `writes = false`: they only write Lector's db): `comments.list
+  {changeset?, path?, state?, drafts_only?, all_changesets?}` (re-anchors the focused changeset first), `comments.add
+  {path, line, end_line?, side?, body, changeset?, draft?, author?}`, `comments.reply {thread, body, draft?}`,
+  `comments.resolve {thread, resolved?}`, `comments.delete {thread, comment?}`, `comments.export {changeset?, format?:
+  markdown|json, include_resolved?}`. "Send to agent" in the review tab invokes `agent.send_comments {changeset,
+  threads: [ids]}` when lector-agent registers it (otherwise the button is disabled with the reason).
+* **`lector-forge`** (`ureq` 3 with rustls + the platform verifier, proxies from `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`,
+  no proxy for loopback; `keyring` 3 with native backends): `detect` / `detect_with(url, &ForgeHosts { github, gitlab,
+  api_urls })` → `ForgeRemote { kind, host, path, owner, name, api_base, web_base, remote_url }` (https, ssh, scp-like,
+  git://; github.com → `api.github.com`, GHE → `/api/v3` + `/api/graphql`, GitLab → `/api/v4`; `github.*` /
+  `gitlab.*` hosts are recognised too). `auth_token` = env (`GITHUB_TOKEN`, `GH_TOKEN`; GHE also
+  `GH_ENTERPRISE_TOKEN`; `GITLAB_TOKEN`) → `gh auth token --hostname` / `glab auth status -t` → keychain (service
+  `lector-forge`, account = host; `store_token` / `delete_token`); `Token`'s `Debug` is redacted and tokens are never
+  logged. `connect(&remote, token) -> Box<dyn Forge>`; trait as above plus `remote()`, `viewer()`,
+  `resolve_thread(n, thread, resolved)`, `fetch_refspecs(&pr)` (`+refs/pull/N/head` or `+refs/merge-requests/N/head`
+  and the base branch into `refs/lector/pr/N/{head,base}`). GitHub: REST for pulls (filters: `Mine` = author is
+  `/user`, `ReviewRequested` = in `requested_reviewers`), files, combined status (checks), `POST …/reviews`
+  (event, body, inline comments with `line`/`side`/`start_line`, `commit_id`); GraphQL only for review threads
+  (resolution state), replies and (un)resolving. GitLab: merge requests (`author_username` / `reviewer_username`
+  filters), `/diffs` (fallback `/changes`), diff discussions (system / general notes skipped), review = one
+  discussion per inline comment (text position with base/start/head sha) + summary note + `approve`; "request
+  changes" is reported as unsupported in `SubmittedReview::notes`. Lines are 0-based in the API. `ForgeError::
+  {Unauthorized { help }, RateLimited { reset }, NotFound, Http { status, message }, Network, Decode, Unsupported}`;
+  pagination follows `Link: rel="next"` (≤ 10 pages). `git_auth_header(kind, &token)` (Basic, for git fetch),
+  `review_key`, `parse_review_key`. `lector_forge::mock::MockServer` (std `TcpListener`, routes from
+  `routes.json` + recorded JSON) backs the tests (`crates/lector-forge/tests/forge.rs`) and `cargo run -p
+  lector-forge --example mock_forge -- <dir> <port>` for offline demos.
+* **Shadow fetch** (`lector_git::ShadowRepo::{fetch(url, refspecs), fetch_with(.., &FetchOptions { http_header }),
+  resolve(rev), merge_base(a, b)}`): `git fetch --no-tags --no-write-fetch-head --no-auto-gc` into the shadow with
+  hermetic config, `fetch.unpackLimit=1` (objects stay packed, never freshening the alternates), `BatchMode` ssh,
+  the auth header passed through `GIT_CONFIG_*` env (not argv) and redacted from errors; destinations must be under
+  `refs/lector/` outside the snapshot namespace; URLs/refspecs starting with `-` are refused. A bare shadow can be
+  opened with `Repo::discover(shadow.git_dir())` (alternates make the user's objects visible). Test: the user's `.git`
+  is byte- and mtime-identical after fetches and refusals, and the PR head is not in the user's object store.
+* **UI** (lector-ui-git): `diff_view/comments.rs` — a "+" gutter icon on the hovered line (`CodeView` gutter icons +
+  `HoverMoved`), `review::AddComment` (selection → range comment), a modal `CommentComposer` (TextArea, markdown,
+  Ctrl/Cmd+Enter), threads rendered between rows: `DisplayRow::Gap` rows reserve the height (estimated from the text)
+  and a `RowWidget` draws the card (author, time, markdown body, Reply / Resolve / Delete, Pending / Outdated /
+  Resolved / Re-anchored n% / GitHub badges, collapse; folds containing a thread open), scrollbar marks,
+  `review::NextComment` / `PrevComment`. `DiffView::set_review_context(ReviewContext { key, repo /* shadow */, drafts,
+  pr })`. `review_tab/comments.rs` — Files | Comments switch, the comments list (jump, "Copy as Markdown", "Send to
+  agent"), pull-request header with "Submit review (n)". `pull_requests.rs` — `PrSession::open` (details, fetch into
+  the shadow unless head and base are already reachable there, merge base, `Changeset::Range` read from the shadow
+  `Repo`), `sync_threads` (remote threads → `CommentStore`, origin github/gitlab, anchored at head / merge base),
+  `submit` (draft replies to remote threads are posted as replies; draft threads become one review's inline
+  comments; published drafts are replaced by the host's threads), the **Pull Requests** sidebar panel
+  (`SidebarPanel::PullRequests`; filters review requested / mine / all), `SubmitReviewDialog` (Comment / Approve /
+  Request changes, summary, draft count) followed by a confirmation, and `review::SignIn` help. Actions
+  `review::{AddComment (c in diffs), NextComment (alt-shift-n), PrevComment (alt-shift-p), ShowPullRequests
+  (ctrl/cmd-alt-p), SubmitReview (ctrl/cmd-alt-enter), SignIn}`; menu Git › Review. `CodeView::text_width()` (new)
+  sizes the cards.
+* **Settings `[forge]`**: `github_hosts`, `gitlab_hosts`, `api_urls` (host → API base), `default_filter`
+  (`review_requested`). Ignored (with a warning) in a project's `.lector/settings.toml`, so a repository cannot send
+  your token to another server.
+
 **CLI and MCP (v0.5, Agent CLI).** Subcommands of the `lector` binary drive `AppCore` headlessly:
 `lector status`, `lector changes [--json]`, `lector diff <changeset> [--json]`, `lector commands`,
 `lector run <command-id> [--args JSON]`, `lector mcp` (Model Context Protocol server over stdio:
 registry commands are MCP tools with their JSON schemas; read commands always available, write
 commands only with `--allow-writes`, each journaled). No tokio: JSON-RPC handled directly.
+
+### CLI and MCP (v0.5) as implemented
+
+Two UI-free crates, layered `lector (bin) → lector-cli → lector-mcp → lector-app`; neither depends on GPUI or tokio.
+
+* **`lector-mcp`** — `McpServer::new(AppCore, Option<Project>, ServerOptions { allow_writes, name, version })`,
+  `serve(BufRead, Write + Send)` (the stdio loop; also what the tests drive with in-memory pipes), `handle(&Value) ->
+  Option<Value>` (one message), `tool_name(command_id)` (`git.list_changes` → `git_list_changes`; any character outside
+  `[A-Za-z0-9_-]` becomes `_`), `document_uri(rel_path)`, `LATEST_PROTOCOL_VERSION` / `SUPPORTED_PROTOCOL_VERSIONS`.
+* **`lector-cli`** — library (`run`, `run_args`, `is_cli_invocation`, `launch_gui`, `parse_changeset`, `SUBCOMMANDS`) plus the
+  console binary `lector-cli`. The `lector` binary calls `lector_cli::is_cli_invocation(args)` as the very first thing in
+  `main` (first argument, after an optional leading `--color <when>`, is a subcommand name) and runs the CLI before any GUI
+  code is touched; everything else is the GUI exactly as before (`lector ./status` opens a folder named `status`).
+  The extra binary exists for Windows, where release builds of `lector.exe` have no console: see "Command line on Windows" in
+  `docs/RELEASING.md` (installed as `lector-cli.exe` and `lector.com`; the latter, given a path instead of a subcommand, starts
+  the GUI next to it). It avoids `AttachConsole`, so the workspace has no new `unsafe`.
+  `lector_cli::session::open_core()` is where the headless registry is assembled (built-in commands come with `AppCore::open`;
+  commands of other crates that should exist without a window are registered there). Language servers are disabled.
+* **Subcommands**: `status [PATH]` (gix only, no core or database: ~10 ms), `changes [--staged | --unstaged | --branch BASE |
+  --range A..B] [--no-risk] [-C DIR]`, `diff <changeset> [--file P] [--moved] [-U N]`, `commands [--category C]`,
+  `run <id> [--args JSON | @file | -] [--allow-writes]`, `activity [-n N] [--all]`, `undo <id> [--force]`,
+  `mcp [PATH] [--allow-writes]`; global `--color auto|always|never` (auto = stdout is a TTY, `NO_COLOR` empty/unset, `TERM`
+  not `dumb`); every command except `mcp` has `--json`. Exit codes 0 ok, 1 error (message `lector: error: ...` on stderr),
+  2 usage (clap). A closed stdout (`| head`) exits 0. Diagnostics go to stderr only when `RUST_LOG` is set.
+  Changesets: review keys (`worktree`, `staged`, `unstaged`, `untracked`, `commit:<rev>`, `range:<a>..<b>`,
+  `branch:<base>...<branch>`), `A...B` (merge base), `A..B`, or one revision (that commit against its first parent).
+  `run` refuses a command with `CommandSpec::writes` unless `--allow-writes` (nothing runs, nothing is journaled); `undo`
+  is itself the explicit action and needs no flag. `Source::Cli` / `Source::Mcp` is what the journal records; `Journal::undo`
+  now records the caller's `Source` (it used to say `ui`).
+* **`--json` formats (schema 1).** Every document is an object with `"schema": 1` (bumped only for a breaking change; fields
+  are added, never renamed or removed). Paths are repository-relative, lines 0-based, ranges `[start, end)`; floats are
+  rounded to 3 decimals.
+  ```text
+  status    {root, branch|null, detached, head|null, head_short|null, upstream|null, ahead, behind,
+             operation: null | {kind: merge|rebase|cherry-pick|revert|am, description, interactive, step: [n, total]|null},
+             counts: {staged, unstaged, untracked, conflicted}, clean}
+  changes   {changeset, title, files: [{path, old_path?, kind: added|modified|deleted|renamed|copied|typechange,
+              added?, removed?, binary?, viewed?, risk?: {score, level: low|medium|high,
+              reasons: [{kind, weight, message, line?, dampening?}]}}],      // riskiest first; by path with --no-risk
+             totals: {files, added, removed, high, medium, low}, risk_skipped?}  // > 500 files or --no-risk
+  diff      {changeset, title, files: [<git.show_diff file object: path, kind, added, removed, hunks: [{header, old, new,
+              lines: [" ctx" | "-old" | "+new"]}] | binary | image | too_large>, moved?: [{old, new, reindented}]],
+             moves?: [{from: {path, lines}, to: {path, lines}, reindented}]}  // moved/moves only with --moved
+  commands  {commands: [CommandSpec::to_json(): id, title, category, args (JSON Schema), writes?, destructive?, undoable?, ui_action?]}
+  run       {ok, command, summary, data, paths, journal_id?, undoable?}      // with --json; else summary + pretty data
+  activity  {entries: [{id, time (RFC 3339 UTC), command, source: ui|cli|mcp|agent|internal, summary, repo, paths, args,
+              undoable, undone, undo_of?, undone_by?}]}                       // newest first, current repository unless --all
+  undo      {undone: <id>, entry: <the entry the undo recorded>}
+  ```
+  `risk.reasons[].kind` is the snake_case `lector_workspace::risk::RiskKind` (`public_api_changed`, `panic_added`, ...).
+  Moved blocks come from `lector_diff::moves` (within a file: `detect_moved`; between files of the changeset:
+  `detect_moved_across`, computed over the whole changeset even with `--file`). In human diffs moved removed/added lines
+  start with `<` / `>` instead of `-` / `+` and each file lists "moved within file / to / from".
+* **MCP server.** stdio transport (UTF-8 JSON-RPC 2.0, one message per line; JSON-RPC batches are accepted), implemented
+  directly with `serde_json`. Only protocol messages go to stdout. Methods: `initialize` (echoes a supported
+  `protocolVersion`, else the latest; `serverInfo`, `instructions`, capabilities `tools` + `resources`, no `listChanged` /
+  `subscribe`), `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`,
+  empty `prompts/list`, `logging/setLevel`; notifications `notifications/initialized` and `notifications/cancelled`
+  (others ignored). Errors: `-32700` parse, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params /
+  unknown tool, `-32002` resource not found.
+  *Tools* are rebuilt from the registry on every `tools/list` (commands registered later appear): `name`, `title`,
+  `description`, `inputSchema` = `CommandSpec::args_schema`, `annotations { title, readOnlyHint, openWorldHint: false }` plus
+  `destructiveHint` / `idempotentHint: false` for writes. Commands with `writes` are omitted and refused unless
+  `ServerOptions::allow_writes`; a call to one anyway returns `isError: true` naming `--allow-writes` (nothing runs, nothing is
+  journaled). `tools/call` result: `content: [{type: text, text: "<summary>\n<compact JSON data>"}]` (the data is repeated
+  in the text for clients that ignore `structuredContent`), `structuredContent` = `Outcome::data` (non-objects wrapped as
+  `{result}`), `isError`, and for writes `_meta.lector { command, undoable, journalId }`. Invalid arguments, unavailable
+  commands and failing commands are tool errors (`isError: true`, the message), not protocol errors; a panic inside a command
+  is caught and reported the same way. Calls run on one worker thread in arrival order (writes never race, `ping` and
+  `resources/*` answer meanwhile); `notifications/cancelled` skips a queued call or drops the response of a running one (it
+  cannot interrupt a running command). All writes are invoked through `CommandRegistry::invoke` with `Source::Mcp`, so the
+  journal records origin `mcp`.
+  *Resources*: `lector://changeset/<key>` (JSON of `git.show_diff`; `worktree`, `staged`, `unstaged` are listed) and
+  `lector://document/<percent-encoded project-relative path>` (text of the live buffer, so unsaved edits of documents opened
+  by tools are visible; listed for the documents open in the store). Documents are only served from inside the project root
+  after resolving symlinks. Tools are not restricted that way (`document.read` takes absolute paths, as in the app).
+* Tests: `crates/lector-mcp/tests/protocol.rs` (handshake and version negotiation, JSON-RPC errors, dynamic and
+  write-filtered `tools/list`, structured results, write refusal without `--allow-writes` and journaling with it, resources
+  incl. symlink and `..` escapes, batches, cancellation, ordering); `crates/lector-cli/tests/suite` (JSON formats, human
+  output, exit codes, colors, risk ordering, moved blocks, `run` / `activity` / `undo` round trips, a real `lector mcp`
+  process over pipes) runs against both `lector-cli` and the real `lector` binary (`crates/lector/tests/cli.rs`; no display
+  is set, so a GUI start would fail), all on hermetic git fixtures with `LECTOR_DATA_DIR` / `LECTOR_CONFIG_DIR` in temp dirs.
+  Startup (debug build, 20 runs): `lector status` 16 ms median through the GUI binary, 9 ms through `lector-cli`; `changes` ~55 ms.
+
+### Review UX (v0.4; Agent REVIEWUX) — as implemented
+Makes reviewing faster and calmer on top of the v0.4 algorithms. Everything here is read-only; the only state is
+the user's "reviewed" marks and "last looked" fingerprint in the Db (`kv`), never the repository.
+* **`[review]` settings** (`lector-config`): `risk_order` (true), `detect_moved` (true), `structural` (false);
+  actions `diff::ToggleMovedCode` (`{m}-alt-m`), `diff::ToggleStructural` (`{m}-alt-t`), `review::NextUnreviewed`
+  (`]` and `alt-shift-j`), `review::ToggleHunkReviewed` (`r`). Plain-letter keys (`n p v r ]`) are bound under
+  `DiffView && !TextInput`, so they never fire in text inputs (keymap test `plain_keys_are_review_only_…`).
+* **`lector_app::review_queue`** (pure, UI-free): `analyze(&[Arc<FileDiff>], &AnalysisOptions) -> ChangesetAnalysis
+  { order: Vec<QueueEntry { index, report: RiskReport, group: Attention | LowRisk }>, moves: Vec<FileMoves>,
+  hunks: Vec<Vec<HunkFingerprint>> }` (risk from `lector_workspace::risk::rank_files`; generated / lock files and
+  score <= 0.05 form the low-risk group, placed last). Moves: `intra_file_moves(&FileDiff)` (what a single file can
+  know) and `analyze_moves(&[files])` (adds cross-file moves via `lector_diff::detect_moved_across`); a
+  `MoveSpan { rows, other_path, other_lines, same_file, reindented }` per block on each end (`FileMoves { removed,
+  added }`). Hunk marks: `hunk_fingerprints` (sha256 of the hunk's removed + added lines, plus an `Anchor`),
+  `match_marks(current, stored, new_text)` (hash match, identical hunks disambiguated with `remap::reanchor_with`),
+  `HunkReviewStore::{load, save, reviewed, store_reviewed}` (Db key `review.hunks/<repo>/<changeset>/<path>`), so only
+  hunks whose content changed lose their mark across revisions and rebases. Progress: `FileProgress`, `totals` ->
+  "7 of 12 files · 18 of 40 hunks reviewed", `next_unreviewed(progress, order, from) -> Position` (wraps, current file
+  last). A file is done when viewed or all hunks reviewed (two-way sync with the "viewed" checkbox).
+* **`lector_app::provenance`** (contract above, implemented): `LineQuery { repo, path, line, rev }`,
+  `ProvenanceProvider` (`name`, `explain`), `ProvenanceRegistry::{with_builtin, register(priority, provider),
+  unregister, names, explain_all, explain}` on the core (`AppCore::provenance()`), built-ins `commit` (blame +
+  commit message, priority 10) and `uncommitted` (50; lines not yet committed); an agent provider registers with
+  priority 100. Blame results are cached per (repo, path, rev, HEAD, mtime). `explanation_markdown(&[LineProvenance])`
+  renders the hover card. Hover on a changed line shows it in code views (`FileView::show_hover`, saved buffers only)
+  and in diffs (new-side changed rows; `DiffView` popover).
+* **`lector-ui-git`**:
+  * `review_model::ReviewModel` (one per window, `GitStore::review_model`): the risk analysis of the whole working
+    tree (debounced 600 ms after the last git change, up to 400 files; `risk_of(path)`, `working()`), and the "new
+    changes since you last looked" state (`hint() -> (uncommitted, new)`: a fingerprint of status + mtimes + sizes
+    against the fingerprint stored when a working-tree review tab was last open; `mark_seen`). Events:
+    `ReviewModelEvent::{Analysis, Hint}` (separate entity, so `GitStoreEvent` subscribers do not reload).
+    `analyze_changes(repo, languages, changes, diff_options, detect_moved) -> ChangesAnalysis` (keyed by path).
+  * Review tab (`review_tab/queue.rs`): list in risk order with a High / Med badge and the top reason instead of the
+    directory, a collapsed "Low-risk & generated" group, per-file "2/5" hunk counters, the progress sentence and bar,
+    `]` / `alt-shift-j` across files (the diff handles "next unreviewed hunk in this file" first and emits
+    `DiffViewEvent::NextUnreviewed` when the file is done), the first file of the queue selected when it loads, the
+    changeset's moves (with cross-file moves) handed to the diff. The Changes panel orders each section by risk
+    and has the same badge, reason and collapsed group (working-tree mode only, `review.risk_order`).
+  * `DiffView` review layer (`diff_view/review_layer.rs`): moved lines are painted with a "moved" tint and dimmed text
+    (`DiffSource::with_moved`, `moved_blocks`), a stripe in the row-background layer `review.moved` and a clickable
+    "Moved from parser.rs:120" / "Moved to …" label (row widget, `GoToMove` event for other files; reindent-only moves
+    say "(reindented)"); `diff::ToggleMovedCode` / `ToggleStructural`; the structural diff
+    (`lector_workspace::structural`, `DiffSource::with_structural`) hides lines whose syntax did not change and marks
+    changed tokens, falling back to the line diff with a subtle notice under the header when the language, size or
+    complexity does not allow it; per-hunk "Reviewed" checkbox in the hunk toolbar (`r` also moves on to the next
+    unreviewed hunk); events `HunksReviewed(path, flags)`, `NextUnreviewed`, `GoToMove`.
+* **`lector-ui`** seams: `Workspace::set_review_hint(Option<ReviewHint { uncommitted, new_since_last, open_review }>)`
+  drives the welcome view row "Review your N uncommitted changes" (opens the review tab in risk order) and the
+  status-bar chip "New changes since you last looked: Review". `lector_lsp::install::{install_hint, Os}` is a data
+  table of install commands per server and operating system; the LSP status popover lists them (with a copy button)
+  for servers not on `PATH`, and a one-time subtle banner (once per server, Db keys `ui/lsp-install-banner/…`, with
+  "Copy" and "Don't show again") offers the command for the active file's language. Lector never runs the commands.
 
 ### lector-ui (extension seams)
 ```rust
@@ -1615,6 +1919,36 @@ Notes (as implemented, lector-ui integration):
   axis, files at their scroll rows, sidebar visibility/width/panel. Pane item views and the sidebar render through
   `AnyView::cached` so a scrolling view does not re-render its siblings.
 * Not yet applied from settings: `show_whitespace`, `scroll_beyond_last_line`.
+
+### Accessibility (v0.4, `lector-ui`, `lector-theme`, `lector-config`) — as implemented
+User-facing description and known gaps: `docs/ACCESSIBILITY.md`. GPUI 0.2.2 has no AccessKit, so this is keyboard,
+focus, scale, motion and contrast work only.
+* **Settings** (`lector-config`): `Settings.ui: UiSettings { scale: f32 (default 1.0), reduce_motion: Option<bool> }`
+  (`[ui]`); `UiSettings::clamped_scale()` clamps to 0.75..=2.0 (NaN → 1.0). `reduce_motion = None` follows the OS.
+* **Theme** (`lector-theme`): `UiColors.focus_ring` in every built-in theme; tests assert >= 3:1 against the surfaces a
+  control sits on (7:1 in the high-contrast themes), and the status colors are tested as text (4.5:1) and as tints under
+  text (agent panel, comments, activity log, merge editor, risk badges).
+* **Scale** (`lector_ui::scale`): the scale is process-wide (`scale()`, `set_scale`, `apply_from_settings`,
+  `set_runtime_scale(scale, cx)` which also updates the `AppSettings` global). Views call `scale::px(n)` (every view file
+  shadows `gpui::px` with it) and `metrics::*()` functions; `Workspace` sets the window rem size per frame
+  (`scale::sync_window`). `apply_settings` re-applies it on every settings reload. Code font size is separate.
+* **Reduced motion** (`lector_ui::a11y`): `reduce_motion(cx)` = `ui.reduce_motion`, else `os_reduce_motion()` (read once on
+  a background thread by `start_os_detection`: `LECTOR_REDUCE_MOTION`, `defaults` on macOS, `gsettings` on GNOME), else
+  false. Asked by the caret blink, smooth scrolling, toast slide-in and spinner.
+* **Focus ring** (`lector_ui::a11y`): `ring_width()` (2 px, 3 px at scale >= 1.6), `focus_ring_style`, `ring_focus(cx)` for
+  `.focus(..)`, `focusable(el, cx)`, `region_ring`, `ring_overlay`, `outset_ring`. Controls with their own handle show an
+  inset border; containers draw an overlay while `contains_focused`.
+* **Keyboard model** (`lector_ui::views::workspace::regions`): `workspace::` actions `FocusNextRegion` / `FocusPrevRegion`
+  (F6 / Shift-F6: title bar, activity bar, sidebar panel, each pane, status bar; hidden regions skipped; `Region`,
+  `Workspace::regions`, `focused_region`, `focus_region`), `FocusNextControl` / `FocusPrevControl` (Tab / Shift-Tab; they
+  wrap inside a modal via `ModalLayer::modal_container`), `ShowContextMenu` (Shift-F10, Menu), `UiZoomIn` / `UiZoomOut`
+  / `UiZoomReset` (`cmd/ctrl-alt-=`, `-`, `0`), `ToggleReduceMotion` (View menu). Key context `ListPanel` (up / down /
+  enter → `picker::SelectPrev` / `SelectNext` / `Confirm`) is used by History, Branches and References; `TreeView`,
+  `ChangesPanel` and `Picker` keep theirs. Panel focus handles are tab stops (`FocusHandle::tab_stop(true)`); clickable
+  divs get `.tab_index(0).focus(a11y::ring_focus(cx))`.
+* **Not color-only**: unified and split diff line numbers end in `+` / `-` (`DiffSource::line_number_label`); file
+  status has a letter, risk badges a word, diagnostics an icon, toggles a check/square glyph.
+* Keybindings viewer lists every command, bound or not ("Unbound").
 
 ### Editing (v0.3, `lector-ui`; v0.4: over the headless document store)
 
@@ -1812,6 +2146,9 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
   Cut, Copy, ShowCharacterPalette. Key contexts: `Workspace`, `CodeView`, `DiffView`, `Picker`,
   `TextInput`, `ContextMenu`, `TreeView`, `TextArea` (+ `TextInput`), `ChangesPanel` (file list),
   `CommitEditor` (commit composer), `ConfirmDialog`.
+* v0.5 agent sessions (`agent::`, handled by `lector-ui-agent`): TogglePanel (`cmd-alt-i`), NewSession, Cancel
+  (`escape` in `AgentPanel`), ReviewLastTurn (`cmd-alt-r`), UndoLastTurn (`cmd-shift-alt-z`), SendFeedback
+  (`cmd-alt-f`), SendPrompt (`cmd-enter` in `AgentComposer`; menu-exempt). Menu: View → Agent.
 * v0.4 undo (`workspace::`): ShowActivity (View → Activity Log; the journal of every write Lector made, with Undo per
   entry), UndoLastOperation (`cmd/ctrl-alt-z`; Git → Undo Last Operation; undoes the newest undoable operation in the
   repository of the active window, backed up first and itself undoable).

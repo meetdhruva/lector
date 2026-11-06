@@ -3,8 +3,9 @@
 
 use std::ops::Range;
 
+use crate::scale::px;
 use gpui::{
-    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, CursorStyle,
+    div, fill, point, prelude::*, relative, size, App, Bounds, ClipboardItem, CursorStyle,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, GlobalElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
@@ -48,7 +49,8 @@ impl TextInput {
     /// Empty input with a placeholder.
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         TextInput {
-            focus_handle: cx.focus_handle(),
+            // A tab stop: Tab reaches the field, the ring and the caret show it has focus.
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: SharedString::default(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -596,9 +598,10 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .relative()
             .w_full()
             .key_context(contexts::TEXT_INPUT)
             .track_focus(&self.focus_handle(cx))
@@ -621,5 +624,9 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TextElement { input: cx.entity() })
+            .children(crate::a11y::outset_ring(
+                self.focus_handle.is_focused(window),
+                cx,
+            ))
     }
 }

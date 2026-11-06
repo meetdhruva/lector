@@ -101,6 +101,7 @@ pub fn apply_settings(cx: &mut App, settings: Settings, warnings: Vec<String>) {
     for w in &warnings {
         tracing::warn!("settings: {w}");
     }
+    crate::scale::apply_from_settings(&settings);
     let installed = cx.text_system().all_font_names();
     cx.set_global(editor_settings_from(&settings, &installed));
     cx.set_global(UiFont {

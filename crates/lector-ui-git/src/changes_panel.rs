@@ -7,10 +7,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, App, ClickEvent, ClipboardItem, Entity, FocusHandle, Focusable,
-    FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task,
-    Window,
+    div, prelude::*, App, ClickEvent, ClipboardItem, Entity, FocusHandle, Focusable, FontWeight,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
 };
+use lector_app::review_queue::QueueGroup;
 use lector_diff::DiffStats;
 use lector_git::{ChangeKind, Changeset, FileChange, Side};
 use lector_ui::actions::git as git_actions;
@@ -21,15 +21,18 @@ use lector_ui::components::list::{virtual_list, VirtualListState};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, IconButton, Tooltip};
 use lector_ui::icons::{FileIcon, Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
+use lector_ui::scale::px;
 use lector_ui::views::WorkspaceEvent;
 use lector_ui::{ActiveTheme, ColorExt};
 use lector_workspace::review::{self, ChangesetView, ReviewFile};
+use lector_workspace::risk::RiskLevel;
 
 use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};
 use crate::diff_view::{open_diff, settings_diff_options, DiffTarget, ViewedTarget};
 use crate::operation_banner::OperationBanner;
 use crate::ref_picker::{pick_ref, ref_choices};
+use crate::review_model::{ChangesAnalysis, FileRisk, ReviewModelEvent};
 use crate::staging::{run_op, unstage_paths_for, GitOp};
 use crate::store::{GitStore, GitStoreEvent};
 use crate::util::{kind_color, kind_letter, split_path};
@@ -91,6 +94,8 @@ struct Content {
 enum Row {
     Header(Section, usize),
     File(usize, usize),
+    /// Header of the collapsed "Low-risk & generated" group of a section (file count).
+    LowHeader(usize),
     Empty,
 }
 
@@ -101,6 +106,12 @@ pub struct ChangesPanel {
     content: Option<Arc<Content>>,
     rows: Rc<Vec<Row>>,
     collapsed: HashSet<Section>,
+    /// Risk of the working-tree files (v0.4 review queue), once analyzed.
+    risk: Option<Arc<ChangesAnalysis>>,
+    /// Order files by risk (setting `review.risk_order`).
+    risk_order: bool,
+    /// The "Low-risk & generated" group is collapsed.
+    low_collapsed: bool,
     selected: Option<(Section, String)>,
     list: VirtualListState,
     load_task: Option<Task<()>>,
@@ -138,6 +149,18 @@ impl ChangesPanel {
                 }
             }));
         }
+        let model = store.read(cx).review_model.clone();
+        subs.push(
+            cx.subscribe(&model, |this, model, event: &ReviewModelEvent, cx| {
+                if *event == ReviewModelEvent::Analysis {
+                    this.risk = model.read(cx).working().cloned();
+                    this.rebuild_rows();
+                    cx.notify();
+                }
+            }),
+        );
+        let risk = model.read(cx).working().cloned();
+        let risk_order = store.read(cx).settings(cx).review.risk_order;
         let composer = cx.new(|cx| CommitComposer::new(store.clone(), cx));
         subs.push(
             cx.subscribe(&composer, |this, _, _: &CommitComposerEvent, cx| {
@@ -155,6 +178,9 @@ impl ChangesPanel {
             content: None,
             rows: Rc::new(Vec::new()),
             collapsed: HashSet::new(),
+            risk,
+            risk_order,
+            low_collapsed: true,
             selected: None,
             list: VirtualListState::new(),
             load_task: None,
@@ -166,7 +192,7 @@ impl ChangesPanel {
             composer,
             banner,
             menu: ContextMenuState::default(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             _subscriptions: subs,
         };
         panel.reload(cx);
@@ -279,6 +305,9 @@ impl ChangesPanel {
                     Ok(content) => {
                         this.error = None;
                         this.content = Some(Arc::new(content));
+                        let store = this.store.read(cx);
+                        this.risk_order = store.settings(cx).review.risk_order;
+                        this.risk = store.review_model.read(cx).working().cloned();
                         this.rebuild_rows();
                         this.restore_selection();
                         if this.mode == ChangesMode::WorkingTree {
@@ -308,7 +337,14 @@ impl ChangesPanel {
                     rows.push(Row::Header(*section, si));
                 }
                 if !self.collapsed.contains(section) {
-                    rows.extend((0..view.files.len()).map(|fi| Row::File(si, fi)));
+                    let (attention, low) = self.queue_split(*section, view);
+                    rows.extend(attention.into_iter().map(|fi| Row::File(si, fi)));
+                    if !low.is_empty() {
+                        rows.push(Row::LowHeader(low.len()));
+                        if !self.low_collapsed {
+                            rows.extend(low.into_iter().map(|fi| Row::File(si, fi)));
+                        }
+                    }
                 }
             }
             if rows.is_empty() {
@@ -316,6 +352,35 @@ impl ChangesPanel {
             }
         }
         self.rows = Rc::new(rows);
+    }
+
+    /// The files of a section: those that need attention by descending risk, then the
+    /// low-risk and generated ones (only in the working-tree list, with `review.risk_order`).
+    fn queue_split(&self, section: Section, view: &ChangesetView) -> (Vec<usize>, Vec<usize>) {
+        let all: Vec<usize> = (0..view.files.len()).collect();
+        let analysis = match (&self.risk, self.mode == ChangesMode::WorkingTree) {
+            (Some(a), true) if self.risk_order && section != Section::Conflicts => a,
+            _ => return (all, Vec::new()),
+        };
+        let (mut attention, low): (Vec<usize>, Vec<usize>) = all.into_iter().partition(|&fi| {
+            analysis
+                .get(view.files[fi].path())
+                .is_none_or(|f| f.risk.group != QueueGroup::LowRisk)
+        });
+        let score = |fi: &usize| {
+            analysis
+                .get(view.files[*fi].path())
+                .map_or(0.0, |f| f.risk.score)
+        };
+        attention.sort_by(|a, b| score(b).total_cmp(&score(a)));
+        (attention, low)
+    }
+
+    fn file_risk(&self, file: &ReviewFile) -> Option<&FileRisk> {
+        if self.mode != ChangesMode::WorkingTree || !self.risk_order {
+            return None;
+        }
+        self.risk.as_ref()?.get(file.path()).map(|f| &f.risk)
     }
 
     fn file(&self, si: usize, fi: usize) -> Option<(Section, &ChangesetView, &ReviewFile)> {
@@ -1080,7 +1145,7 @@ impl ChangesPanel {
                 h_flex()
                     .id(("changes-header", ix))
                     .w_full()
-                    .h(metrics::ROW_HEIGHT)
+                    .h(metrics::row_height())
                     .pl(px(6.))
                     .pr(px(10.))
                     .gap(px(4.))
@@ -1098,7 +1163,7 @@ impl ChangesPanel {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(if section == Section::Conflicts {
                                 theme.git.conflicted.hsla()
@@ -1114,7 +1179,7 @@ impl ChangesPanel {
                             .px(px(6.))
                             .rounded(px(8.))
                             .bg(ui.hover.hsla())
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_muted.hsla())
                             .child(count.to_string()),
                     )
@@ -1137,6 +1202,18 @@ impl ChangesPanel {
                     (Some(o), Some(n)) if o != n => format!("← {o}"),
                     _ => dir.to_string(),
                 };
+                // Risky files show why instead of where (the path is in the tooltip).
+                let risk = self.file_risk(file).cloned();
+                let reason = risk
+                    .as_ref()
+                    .filter(|r| r.level != RiskLevel::Low)
+                    .and_then(|r| r.reason.clone());
+                let badge = risk.as_ref().and_then(|r| match r.level {
+                    RiskLevel::High => Some(("High", theme.ui.error.hsla())),
+                    RiskLevel::Medium => Some(("Med", theme.git.modified.hsla())),
+                    RiskLevel::Low => None,
+                });
+                let dir_or_reason = reason.clone().unwrap_or(dir);
                 let selected = self.selected.as_ref() == Some(&(section, path.clone()));
                 let kind = if section == Section::Conflicts {
                     None
@@ -1170,7 +1247,7 @@ impl ChangesPanel {
                     .group("changes-row")
                     .relative()
                     .w_full()
-                    .h(metrics::ROW_HEIGHT)
+                    .h(metrics::row_height())
                     .pl(px(22.))
                     .pr(px(10.))
                     .gap(px(6.))
@@ -1203,7 +1280,7 @@ impl ChangesPanel {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(metrics::TEXT)
+                                    .text_size(metrics::text())
                                     .text_color(if deleted {
                                         ui.text_muted.hsla()
                                     } else {
@@ -1217,11 +1294,28 @@ impl ChangesPanel {
                                     .min_w_0()
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .text_size(metrics::TEXT_SM)
-                                    .text_color(ui.text_faint.hsla())
-                                    .child(dir),
+                                    .text_size(metrics::text_sm())
+                                    .text_color(if reason.is_some() {
+                                        ui.text_muted.hsla()
+                                    } else {
+                                        ui.text_faint.hsla()
+                                    })
+                                    .child(dir_or_reason),
                             ),
                     )
+                    .when_some(badge, |el, (label, color)| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .px(px(5.))
+                                .rounded(px(3.))
+                                .text_size(metrics::text_xs())
+                                .font_weight(FontWeight::MEDIUM)
+                                .bg(color.opacity(0.14))
+                                .text_color(color)
+                                .child(label),
+                        )
+                    })
                     .when_some(stats.filter(|s| s.added + s.removed > 0), |el, s| {
                         el.child(
                             h_flex()
@@ -1230,7 +1324,7 @@ impl ChangesPanel {
                                 .when(has_actions, |el| {
                                     el.group_hover("changes-row", |s| s.invisible())
                                 })
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .when(s.added > 0, |el| {
                                     el.child(
                                         div()
@@ -1251,7 +1345,7 @@ impl ChangesPanel {
                         el.child(
                             div()
                                 .flex_none()
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .text_color(ui.text_faint.hsla())
                                 .child("bin"),
                         )
@@ -1267,7 +1361,7 @@ impl ChangesPanel {
                         div()
                             .flex_none()
                             .w(px(12.))
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(letter_color)
                             .child(letter),
@@ -1285,12 +1379,52 @@ impl ChangesPanel {
                     )
                     .into_any_element()
             }
+            Some(Row::LowHeader(count)) => {
+                let collapsed = self.low_collapsed;
+                h_flex()
+                    .id(("changes-low-header", ix))
+                    .w_full()
+                    .h(metrics::row_height())
+                    .pl(px(14.))
+                    .pr(px(10.))
+                    .gap(px(4.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(ui.hover.hsla()))
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::XSmall)
+                        .color(ui.text_faint.hsla()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(metrics::text_xs())
+                            .text_color(ui.text_faint.hsla())
+                            .child("Low-risk & generated"),
+                    )
+                    .child(
+                        div()
+                            .text_size(metrics::text_xs())
+                            .text_color(ui.text_faint.hsla())
+                            .child(count.to_string()),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.low_collapsed = !this.low_collapsed;
+                        this.rebuild_rows();
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
             Some(Row::Empty) => v_flex()
                 .w_full()
-                .h(metrics::ROW_HEIGHT * 3.)
+                .h(metrics::row_height() * 3.)
                 .items_center()
                 .justify_center()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_faint.hsla())
                 .child(match self.mode {
                     ChangesMode::WorkingTree => "Working tree clean",
@@ -1376,7 +1510,7 @@ impl Render for ChangesPanel {
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_ellipsis()
-                                            .text_size(metrics::TEXT_SM)
+                                            .text_size(metrics::text_sm())
                                             .child(label),
                                     )
                                     .child(
@@ -1406,7 +1540,7 @@ impl Render for ChangesPanel {
                         h_flex()
                             .gap(px(8.))
                             .pl(px(2.))
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .child(div().text_color(ui.text_muted.hsla()).child(format!(
                                 "{count} file{}",
                                 if count == 1 { "" } else { "s" }
@@ -1436,7 +1570,7 @@ impl Render for ChangesPanel {
                         .items_start()
                         .gap(px(6.))
                         .p(px(8.))
-                        .rounded(metrics::RADIUS)
+                        .rounded(metrics::radius())
                         .border_1()
                         .border_color(ui.error.hsla().opacity(0.7))
                         .bg(ui.error.hsla().opacity(0.08))
@@ -1452,7 +1586,7 @@ impl Render for ChangesPanel {
                                 .min_w_0()
                                 .max_h(px(120.))
                                 .overflow_y_scroll()
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .text_color(ui.text.hsla())
                                 .child(e),
                         )
@@ -1471,7 +1605,7 @@ impl Render for ChangesPanel {
                 el.child(
                     div()
                         .p(px(12.))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(e),
                 )
@@ -1480,7 +1614,7 @@ impl Render for ChangesPanel {
                 el.child(
                     div()
                         .p(px(12.))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child("Loading…"),
                 )
@@ -1520,6 +1654,18 @@ impl Render for ChangesPanel {
                     .on_action(cx.listener(|this, _: &git_actions::Commit, window, cx| {
                         this.composer.update(cx, |c, cx| c.commit(window, cx));
                     }))
+                    .on_action(
+                        cx.listener(|this, _: &ws_actions::ShowContextMenu, window, cx| {
+                            let Some(ix) = this.selected_row_index() else {
+                                cx.propagate();
+                                return;
+                            };
+                            if let Some(Row::File(si, fi)) = this.rows.get(ix).cloned() {
+                                let position = this.list.row_anchor(ix, metrics::row_height());
+                                this.deploy_menu(si, fi, position, window, cx);
+                            }
+                        }),
+                    )
                     .flex_1()
                     .min_h_0()
                     .pt(px(4.))

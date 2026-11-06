@@ -1,0 +1,32 @@
+{
+ "number": 12,
+ "title": "Parse widget manifests lazily",
+ "body": "Speeds up startup.",
+ "state": "open",
+ "draft": false,
+ "user": {
+  "login": "grace"
+ },
+ "html_url": "https://github.com/acme/widgets/pull/12",
+ "created_at": "2026-10-30T09:00:00Z",
+ "updated_at": "2026-11-05T16:20:00Z",
+ "merged_at": null,
+ "head": {
+  "ref": "lazy-manifests",
+  "sha": "1111111111111111111111111111111111111111"
+ },
+ "base": {
+  "ref": "main",
+  "sha": "2222222222222222222222222222222222222222"
+ },
+ "requested_reviewers": [
+  {
+   "login": "ada"
+  }
+ ],
+ "labels": [
+  {
+   "name": "performance"
+  }
+ ]
+}

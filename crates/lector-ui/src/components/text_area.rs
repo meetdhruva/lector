@@ -12,12 +12,13 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use crate::scale::px;
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
-    ContentMask, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, div, fill, point, prelude::*, relative, size, App, Bounds, ClipboardItem, ContentMask,
+    CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, SharedString, Style,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -196,7 +197,7 @@ impl TextArea {
     /// An empty text area with a placeholder (3 to 12 visible lines).
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         TextArea {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: String::new(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -1217,9 +1218,10 @@ impl Element for TextAreaElement {
 }
 
 impl Render for TextArea {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .relative()
             .w_full()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle(cx))
@@ -1264,6 +1266,10 @@ impl Render for TextArea {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TextAreaElement { area: cx.entity() })
+            .children(crate::a11y::outset_ring(
+                self.focus_handle.is_focused(window),
+                cx,
+            ))
     }
 }
 

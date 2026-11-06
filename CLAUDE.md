@@ -11,6 +11,10 @@ Read `docs/ARCHITECTURE.md` first: it defines crate boundaries and public API co
   Lector's own state lives in `lector_config::paths::data_dir()` / `config_dir()`.
 - Core crates (`crates/lector-*` except `lector-ui`) must not depend on GPUI, a window
   system, or tokio. Keep dependencies minimal; each crate should be reusable on its own.
+- Headless CLI/MCP: `lector <subcommand>` is dispatched by `lector_cli::is_cli_invocation` as the first
+  thing in `main`, before any GUI code. `lector-cli` and `lector-mcp` must stay GUI-free (the console
+  binary `lector-cli` ships on Windows, see `docs/RELEASING.md`); stdout of `lector mcp` carries
+  protocol messages only, logs go to stderr. `--json` formats are stable (add fields, never rename).
 - Respect the layering in `docs/ARCHITECTURE.md`. Never add a dependency on a higher layer.
 - Public API changes to a contract in `docs/ARCHITECTURE.md` must update that doc.
 - No `unwrap()`/`expect()` on user data or I/O. `thiserror` in libraries, `anyhow` in the app.

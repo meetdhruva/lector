@@ -1,0 +1,26 @@
+[package]
+name = "lector-ui-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Agent panel for Lector: drive a coding agent and review each turn as a changeset."
+
+[dependencies]
+gpui = "0.2.2"
+lector-ui.workspace = true
+lector-ui-git.workspace = true
+lector-app.workspace = true
+lector-agent.workspace = true
+lector-workspace.workspace = true
+lector-git.workspace = true
+lector-diff.workspace = true
+lector-config.workspace = true
+futures = "0.3"
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }

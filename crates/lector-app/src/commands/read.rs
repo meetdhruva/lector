@@ -528,8 +528,18 @@ pub fn file_diff_json(
     let stats = diff.stats();
     v["added"] = json!(stats.added);
     v["removed"] = json!(stats.removed);
-    let old_n = diff.old.line_count();
-    let new_n = diff.new.line_count();
+    // A trailing newline leaves an empty last row that is not a line of the file: never
+    // print it as context.
+    let real_lines = |side: &lector_workspace::review::DiffSide| {
+        let n = side.line_count();
+        if n > 0 && side.line(n - 1).is_empty() {
+            n - 1
+        } else {
+            n
+        }
+    };
+    let old_n = real_lines(&diff.old);
+    let new_n = real_lines(&diff.new);
     let hunks: Vec<Value> = diff
         .diff
         .hunks
@@ -537,7 +547,7 @@ pub fn file_diff_json(
         .map(|h| {
             let before = context.min(h.old.start);
             let after_old = (h.old.end + context).min(old_n);
-            let after = after_old - h.old.end;
+            let after = after_old.saturating_sub(h.old.end);
             let mut lines = Vec::new();
             for r in h.old.start - before..h.old.start {
                 lines.push(format!(" {}", diff.old.line(r)));

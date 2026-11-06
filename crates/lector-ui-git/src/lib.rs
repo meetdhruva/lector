@@ -16,7 +16,9 @@ pub mod history_panel;
 pub mod inline_conflicts;
 pub mod merge_editor;
 pub mod operation_banner;
+pub mod pull_requests; // Agent FORGE (v0.6)
 pub mod ref_picker;
+pub mod review_model;
 pub mod review_tab;
 pub mod staging;
 pub mod store;
@@ -118,6 +120,11 @@ fn init_command_hooks(cx: &mut App) {
     });
 }
 
+/// The action behind "Review your N uncommitted changes".
+fn review_working_tree_action() -> Box<dyn gpui::Action> {
+    Box::new(ReviewWorkingTree)
+}
+
 /// Registers the git views with every new workspace window.
 pub fn init(cx: &mut App) {
     init_command_hooks(cx);
@@ -138,6 +145,7 @@ pub fn init(cx: &mut App) {
         let changes = cx.new(|cx| ChangesPanel::new(store.clone(), cx));
         let history = cx.new(|cx| HistoryPanel::new(store.clone(), window, cx));
         let branches = cx.new(|cx| BranchesPanel::new(store.clone(), cx));
+        let prs = cx.new(|cx| pull_requests::PullRequestsPanel::new(store.clone(), cx));
         let inline = cx.new(|_| InlineConflicts::new(store.clone()));
         store.update(cx, |s, _| {
             s.views = Some(GitViews {
@@ -163,6 +171,7 @@ pub fn init(cx: &mut App) {
             sb.set_panel_view(SidebarPanel::Changes, changes.clone().into(), cx);
             sb.set_panel_view(SidebarPanel::History, history.into(), cx);
             sb.set_panel_view(SidebarPanel::Branches, branches.into(), cx);
+            sb.set_panel_view(SidebarPanel::PullRequests, prs.into(), cx);
         });
         // Branch + ahead/behind in the status bar.
         cx.subscribe(&store, |ws, store, _: &GitStoreEvent, cx| {
@@ -183,12 +192,54 @@ pub fn init(cx: &mut App) {
         })
         .detach();
 
+        // "Review your N uncommitted changes" (welcome view) and the "new changes" chip.
+        let model = store.read(cx).review_model.clone();
+        cx.subscribe(
+            &model,
+            |ws, model, event: &review_model::ReviewModelEvent, cx| {
+                if *event != review_model::ReviewModelEvent::Hint {
+                    return;
+                }
+                let (uncommitted, new_since_last) = model.read(cx).hint();
+                ws.set_review_hint(
+                    (uncommitted > 0).then_some(lector_ui::views::ReviewHint {
+                        uncommitted,
+                        new_since_last,
+                        open_review: review_working_tree_action,
+                    }),
+                    cx,
+                );
+            },
+        )
+        .detach();
+
         activity::register(ws, &store);
         let s = store.clone();
         ws.register_tab_restorer(move |kind, _window, cx| restore_tab(&s, kind, cx));
         // The workspace restores its session before extensions are
         // registered, so git tabs from the session are reopened here.
         restore_git_tabs(ws, &store, window, cx);
+        // v0.6: pull requests and review comments.
+        ws.register_action(
+            |ws, _: &lector_ui::actions::review::ShowPullRequests, window, cx| {
+                ws.show_panel(SidebarPanel::PullRequests, window, cx)
+            },
+        );
+        let s = store.clone();
+        ws.register_action(
+            move |_, _: &lector_ui::actions::review::SignIn, window, cx| {
+                let s = s.clone();
+                window.defer(cx, move |window, cx| {
+                    pull_requests::show_sign_in_help(&s, window, cx)
+                });
+            },
+        );
+        ws.register_action(|ws, _: &lector_ui::actions::review::SubmitReview, _, cx| {
+            ws.show_toast(
+                "Open a pull request review (Pull Requests panel) to submit a review",
+                cx,
+            )
+        });
         let s = store.clone();
         ws.register_action(move |ws, _: &editor::ToggleBlame, window, cx| {
             blame::toggle_blame(ws, &s, window, cx);

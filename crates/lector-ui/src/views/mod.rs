@@ -22,4 +22,4 @@ pub mod welcome;
 pub mod window_controls;
 pub mod workspace;
 
-pub use workspace::{Workspace, WorkspaceEvent, WorkspaceRoot};
+pub use workspace::{ReviewHint, Workspace, WorkspaceEvent, WorkspaceRoot};

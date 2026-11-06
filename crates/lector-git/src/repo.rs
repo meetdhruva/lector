@@ -173,7 +173,11 @@ impl Repo {
             Side::None => Ok(None),
             Side::Blob(oid) => {
                 let repo = self.local();
-                load_object(&repo, oid.to_gix())
+                match load_object(&repo, oid.to_gix())? {
+                    Some(bytes) => Ok(Some(bytes)),
+                    // Agent checkpoints (`Changeset::Snapshots`) live in the shadow repo.
+                    None => crate::shadow::load_from_known_shadows(self.workdir(), side),
+                }
             }
             Side::Index(path) => {
                 let repo = self.local();

@@ -1,9 +1,10 @@
 //! Resizable split panes (horizontal or vertical) with draggable dividers,
 //! and a single resize handle for fixed-size panels (sidebar).
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, relative, AnyElement, App, Axis, CursorStyle, DragMoveEvent, Entity,
-    EntityId, Pixels, Window,
+    div, prelude::*, relative, AnyElement, App, Axis, CursorStyle, DragMoveEvent, Entity, EntityId,
+    Pixels, Window,
 };
 
 use crate::theme::{ActiveTheme, ColorExt};

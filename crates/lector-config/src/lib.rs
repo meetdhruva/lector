@@ -20,7 +20,8 @@ pub use session::{
     session_key, Axis, PaneState, Session, SessionStore, TabKind, TabState, WindowBounds,
 };
 pub use settings::{
-    default_settings_toml, load_settings, load_settings_for, AutoSave, DiffLayout, DiffSettings,
-    EditorSettings, FileSettings, GitSettings, LspSettings, ServerOverride, SessionSettings,
-    Settings, ShowWhitespace, ThemeMode, ThemeSettings,
+    default_settings_toml, load_settings, load_settings_for, AgentServer, AgentSettings, AutoSave,
+    DiffLayout, DiffSettings, EditorSettings, FileSettings, ForgeSettings, GitSettings,
+    LspSettings, ReviewSettings, ServerOverride, SessionSettings, Settings, ShowWhitespace,
+    ThemeMode, ThemeSettings, UiSettings,
 };

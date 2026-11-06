@@ -3,8 +3,9 @@
 
 use std::path::PathBuf;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyView, App, Context, Entity, FocusHandle, Focusable, SharedString,
+    div, prelude::*, AnyView, App, Context, Entity, FocusHandle, Focusable, SharedString,
     WeakEntity, Window,
 };
 
@@ -127,7 +128,7 @@ impl Render for ProblemsView {
                     .child(div().text_color(ui.text.hsla()).child(name))
                     .child(
                         div()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_faint.hsla())
                             .child(dir),
                     )
@@ -136,7 +137,7 @@ impl Render for ProblemsView {
                             .px(px(6.))
                             .rounded(px(8.))
                             .bg(ui.hover.hsla())
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_muted.hsla())
                             .child(rows.len().to_string()),
                     )
@@ -187,10 +188,12 @@ impl Render for ProblemsView {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_faint.hsla())
                                 .child(format!("{origin}  [Ln {}, Col {}]", line + 1, col + 1)),
                         )
+                        .tab_index(0)
+                        .focus(crate::a11y::ring_focus(cx))
                         .on_click(move |_, window, cx| {
                             let target = target.clone();
                             let _ = weak.update(cx, |ws, cx| {
@@ -207,7 +210,7 @@ impl Render for ProblemsView {
             .size_full()
             .overflow_y_scroll()
             .bg(ui.background.hsla())
-            .text_size(metrics::TEXT)
+            .text_size(metrics::text())
             .py(px(4.))
             .children(children)
     }
@@ -304,7 +307,7 @@ pub fn status_item(ws: &Workspace, cx: &App) -> Option<gpui::AnyElement> {
             .h(px(20.))
             .px(px(6.))
             .gap(px(8.))
-            .rounded(metrics::RADIUS)
+            .rounded(metrics::radius())
             .cursor_pointer()
             .text_color(fg)
             .hover(|s| s.bg(ui.hover.hsla()))

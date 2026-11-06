@@ -10,9 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use gpui::SharedString;
+use lector_app::review_queue::{FileMoves, MoveSpan};
 use lector_diff::{RowKind, Segment};
+use lector_theme::{Color, TextStyle};
 use lector_ui::code_view::{CodeSource, DecorationColor, HighlightSpan, RowDecoration, SpanStyle};
 use lector_workspace::review::{FileDiff, LineSpan};
+use lector_workspace::structural::{Mark, StructuralDiff};
 
 static NEXT_VERSION: AtomicU64 = AtomicU64::new(1 << 40);
 
@@ -34,6 +37,9 @@ pub enum DisplayRow {
     Row(usize),
     /// Folded run of unchanged rows (indices into the same vector).
     Fold(Range<usize>),
+    /// Blank row reserving space for an inline comment thread (index of the
+    /// thread's gap, see `comments_ui`).
+    Gap(usize),
 }
 
 /// Builds display rows from folded segments; folds whose start is in
@@ -73,6 +79,7 @@ pub fn hunk_display_starts(diff: &FileDiff, rows: &[DisplayRow], unified: bool) 
                 }
             }
             DisplayRow::Fold(_) => None,
+            DisplayRow::Gap(_) => continue,
         };
         if hunk.is_some() && hunk != last {
             out.push(i as u32);
@@ -112,6 +119,112 @@ impl DiffMeta {
     }
 }
 
+/// Colors of the review overlays, resolved from the theme by the view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayColors {
+    /// Background of moved lines.
+    pub moved_bg: Color,
+    /// Text color of moved lines (dimmed).
+    pub moved_text: Color,
+    /// Background of structurally moved words.
+    pub moved_word: Color,
+}
+
+/// Moved code of one file and how to paint it.
+#[derive(Clone, Debug)]
+pub struct MovedOverlay {
+    /// Moved spans (old side: removed, new side: added).
+    pub moves: Arc<FileMoves>,
+    /// Colors.
+    pub colors: OverlayColors,
+}
+
+/// A moved block as displayed: display rows of one column and where it went / came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovedBlockRows {
+    /// Display rows of this column covered by the block.
+    pub rows: Range<u32>,
+    /// The span (rows in file coordinates).
+    pub span: MoveSpan,
+    /// The block is on the old side ("Moved to ...") rather than the new side.
+    pub removed_side: bool,
+}
+
+impl MovedBlockRows {
+    /// "Moved from parser.rs:120" / "Moved to parser.rs:40".
+    pub fn label(&self) -> String {
+        let dir = if self.removed_side { "to" } else { "from" };
+        let tail = if self.span.reindented {
+            " (reindented)"
+        } else {
+            ""
+        };
+        format!("Moved {dir} {}{tail}", self.span.target_label())
+    }
+}
+
+/// Syntax-aware change marks per line and side (from [`StructuralDiff`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StructuralMarks {
+    old: HashMap<u32, Vec<(Range<usize>, Mark)>>,
+    new: HashMap<u32, Vec<(Range<usize>, Mark)>>,
+}
+
+impl StructuralMarks {
+    /// Splits the byte ranges of `diff` into per-line ranges of `old` and `new`.
+    pub fn from_diff(
+        old: Option<&lector_text::Text>,
+        new: Option<&lector_text::Text>,
+        diff: &StructuralDiff,
+    ) -> Self {
+        StructuralMarks {
+            old: split_by_line(old, &diff.old),
+            new: split_by_line(new, &diff.new),
+        }
+    }
+
+    /// Marked byte ranges of `line` on the old or new side.
+    pub fn line(&self, old: bool, line: u32) -> &[(Range<usize>, Mark)] {
+        let map = if old { &self.old } else { &self.new };
+        map.get(&line).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// No line has a mark (the trees are identical).
+    pub fn is_empty(&self) -> bool {
+        self.old.is_empty() && self.new.is_empty()
+    }
+}
+
+fn split_by_line(
+    text: Option<&lector_text::Text>,
+    marked: &[lector_workspace::structural::Marked],
+) -> HashMap<u32, Vec<(Range<usize>, Mark)>> {
+    let mut out: HashMap<u32, Vec<(Range<usize>, Mark)>> = HashMap::new();
+    let Some(text) = text else {
+        return out;
+    };
+    for m in marked {
+        let start = text.offset_to_point(m.range.start);
+        let end = text.offset_to_point(m.range.end);
+        for row in start.row..=end.row {
+            let from = if row == start.row {
+                start.column as usize
+            } else {
+                0
+            };
+            let to = if row == end.row {
+                end.column as usize
+            } else {
+                text.line_len(row) as usize
+            };
+            if from < to {
+                out.entry(row).or_default().push((from..to, m.mark));
+            }
+        }
+    }
+    out
+}
+
 const CHUNK: u32 = 64;
 
 /// Highlight spans per (old side?, row chunk).
@@ -127,6 +240,8 @@ pub struct DiffSource {
     version: u64,
     number_width: usize,
     highlight_cache: RefCell<HighlightCache>,
+    moved: Option<MovedOverlay>,
+    structural: Option<(Arc<StructuralMarks>, OverlayColors)>,
 }
 
 impl DiffSource {
@@ -151,7 +266,77 @@ impl DiffSource {
             version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),
             number_width,
             highlight_cache: RefCell::new(HashMap::new()),
+            moved: None,
+            structural: None,
         }
+    }
+
+    /// Shows moved lines dimmed with a "moved" tint (`None` turns it off).
+    pub fn with_moved(mut self, moved: Option<MovedOverlay>) -> Self {
+        self.moved = moved.filter(|m| !m.moves.is_empty());
+        self
+    }
+
+    /// Marks changes by syntax instead of by line: lines whose syntax did not change (pure
+    /// reformatting) show no change, changed tokens are highlighted, moved subtrees get the
+    /// "moved" color.
+    pub fn with_structural(
+        mut self,
+        marks: Option<Arc<StructuralMarks>>,
+        colors: OverlayColors,
+    ) -> Self {
+        self.structural = marks.map(|m| (m, colors));
+        self
+    }
+
+    /// The moved span covering display row `row` of this column.
+    fn moved_span_at(&self, row: u32) -> Option<&MoveSpan> {
+        let moved = self.moved.as_ref()?;
+        let (old, new, kind) = self.lines_at(row)?;
+        if kind == RowKind::Context {
+            return None;
+        }
+        let (is_old, line) = self.side_line(row)?;
+        let _ = (old, new);
+        if is_old {
+            moved.moves.removed_at(line)
+        } else {
+            moved.moves.added_at(line)
+        }
+    }
+
+    /// Blocks of moved code in this column, in display order.
+    pub fn moved_blocks(&self) -> Vec<MovedBlockRows> {
+        let mut out: Vec<MovedBlockRows> = Vec::new();
+        if self.moved.is_none() {
+            return out;
+        }
+        for row in 0..self.rows.len() as u32 {
+            let Some(span) = self.moved_span_at(row) else {
+                continue;
+            };
+            let removed_side = self.side_line(row).is_some_and(|(old, _)| old);
+            match out.last_mut() {
+                Some(last)
+                    if last.rows.end == row
+                        && last.span == *span
+                        && last.removed_side == removed_side =>
+                {
+                    last.rows.end = row + 1;
+                }
+                _ => out.push(MovedBlockRows {
+                    rows: row..row + 1,
+                    span: span.clone(),
+                    removed_side,
+                }),
+            }
+        }
+        out
+    }
+
+    /// Display row of old-side (or new-side) file line `line` in this column.
+    pub fn row_of_line(&self, old: bool, line: u32) -> Option<u32> {
+        (0..self.rows.len() as u32).find(|&r| self.side_line(r) == Some((old, line)))
     }
 
     /// The display rows.
@@ -172,7 +357,7 @@ impl DiffSource {
                     Some((r.old, r.new, r.kind))
                 }
             },
-            DisplayRow::Fold(_) => None,
+            DisplayRow::Fold(_) | DisplayRow::Gap(_) => None,
         }
     }
 
@@ -180,7 +365,7 @@ impl DiffSource {
     pub fn fold_at(&self, row: u32) -> Option<Range<usize>> {
         match self.rows.get(row as usize)? {
             DisplayRow::Fold(r) => Some(r.clone()),
-            DisplayRow::Row(_) => None,
+            DisplayRow::Row(_) | DisplayRow::Gap(_) => None,
         }
     }
 
@@ -265,6 +450,19 @@ impl CodeSource for DiffSource {
                 });
                 continue;
             }
+            if self.moved_span_at(row).is_some() {
+                let len = self.line(row).len();
+                if len > 0 {
+                    if let Some(moved) = &self.moved {
+                        out.push(HighlightSpan {
+                            row,
+                            range: 0..len,
+                            style: SpanStyle::Custom(TextStyle::color(moved.colors.moved_text)),
+                        });
+                    }
+                }
+                continue;
+            }
             if let Some((old, line)) = self.side_line(row) {
                 out.extend(
                     self.spans_for(old, line)
@@ -284,21 +482,47 @@ impl CodeSource for DiffSource {
         self.side_line(row).map(|(_, l)| l)
     }
 
+    /// Line numbers with a `+` / `-` sign after them, so added and removed lines never
+    /// rely on their color alone.
     fn line_number_label(&self, row: u32) -> Option<SharedString> {
-        if self.column != DiffColumn::Unified {
-            return None;
-        }
-        let (old, new, _) = self.lines_at(row)?;
+        let (old, new, kind) = self.lines_at(row)?;
         let w = self.number_width;
         let fmt = |n: Option<u32>| match n {
             Some(n) => format!("{:>w$}", n + 1),
             None => " ".repeat(w),
         };
-        Some(format!("{} {}", fmt(old), fmt(new)).into())
+        let sign = |added: bool, removed: bool| match (added, removed) {
+            (true, _) => '+',
+            (_, true) => '-',
+            _ => ' ',
+        };
+        Some(match self.column {
+            DiffColumn::Unified => {
+                let c = sign(kind == RowKind::Added, kind == RowKind::Removed);
+                format!("{} {} {c}", fmt(old), fmt(new)).into()
+            }
+            DiffColumn::Old => {
+                let c = sign(false, matches!(kind, RowKind::Removed | RowKind::Changed));
+                {
+                    old?;
+                    format!("{} {c}", fmt(old)).into()
+                }
+            }
+            DiffColumn::New => {
+                let c = sign(matches!(kind, RowKind::Added | RowKind::Changed), false);
+                {
+                    new?;
+                    format!("{} {c}", fmt(new)).into()
+                }
+            }
+        })
     }
 
     fn line_number_chars(&self) -> Option<usize> {
-        (self.column == DiffColumn::Unified).then_some(self.number_width * 2 + 1)
+        Some(match self.column {
+            DiffColumn::Unified => self.number_width * 2 + 3,
+            DiffColumn::Old | DiffColumn::New => self.number_width + 2,
+        })
     }
 
     fn row_decorations(&self, rows: Range<u32>) -> Vec<RowDecoration> {
@@ -324,6 +548,46 @@ impl CodeSource for DiffSource {
                 (DiffColumn::Unified, RowKind::Removed, _) => (DecorationColor::RemovedLine, true),
                 (DiffColumn::Unified, _, _) => (DecorationColor::AddedLine, false),
             };
+            if let Some(moved) = &self.moved {
+                if background != DecorationColor::Filler && self.moved_span_at(row).is_some() {
+                    out.push(RowDecoration {
+                        row,
+                        background: Some(DecorationColor::Custom(moved.colors.moved_bg)),
+                        ranges: Vec::new(),
+                    });
+                    continue;
+                }
+            }
+            if let (Some((marks, colors)), Some((side_old, line))) = (&self.structural, side) {
+                if background != DecorationColor::Filler {
+                    let line_marks = marks.line(side_old, line);
+                    if line_marks.is_empty() {
+                        continue; // the syntax did not change: reformatting only
+                    }
+                    let word = if is_old {
+                        DecorationColor::RemovedWord
+                    } else {
+                        DecorationColor::AddedWord
+                    };
+                    let line_len = self.line(row).len();
+                    let ranges = line_marks
+                        .iter()
+                        .map(|(r, mark)| {
+                            let color = match mark {
+                                Mark::Moved => DecorationColor::Custom(colors.moved_word),
+                                _ => word,
+                            };
+                            (r.start.min(line_len)..r.end.min(line_len), color)
+                        })
+                        .collect();
+                    out.push(RowDecoration {
+                        row,
+                        background: Some(background),
+                        ranges,
+                    });
+                    continue;
+                }
+            }
             let mut ranges = Vec::new();
             if self.word_diff && background != DecorationColor::Filler {
                 let inline = if is_old {
@@ -493,19 +757,136 @@ mod tests {
         assert!(all.iter().all(|r| matches!(r, DisplayRow::Row(_))));
     }
 
+    fn colors() -> OverlayColors {
+        OverlayColors {
+            moved_bg: Color::rgba(0, 0, 255, 25),
+            moved_text: Color::rgba(120, 120, 120, 255),
+            moved_word: Color::rgba(0, 0, 255, 80),
+        }
+    }
+
+    const BLOCK: &str = "fn helper(a: u32) -> u32 {\n    let b = a + 1;\n    b * 2\n}\n";
+
+    #[test]
+    fn moved_lines_are_dimmed_tinted_and_labelled() {
+        let filler: String = (0..12).map(|i| format!("// filler {i}\n")).collect();
+        let old = format!("{BLOCK}{filler}fn end() {{}}\n");
+        let new = format!("{filler}fn end() {{}}\n{BLOCK}");
+        let d = diff(&old, &new);
+        let moves = Arc::new(lector_app::review_queue::intra_file_moves(&d));
+        assert_eq!(moves.added.len(), 1, "one moved block");
+        let meta = Arc::new(DiffMeta::compute(&d));
+        let rows = Rc::new(display_rows(
+            &d.unified_segments(100),
+            &HashSet::new(),
+            false,
+        ));
+        let src = DiffSource::new(d, meta, rows, DiffColumn::Unified, true).with_moved(Some(
+            MovedOverlay {
+                moves,
+                colors: colors(),
+            },
+        ));
+        let blocks = src.moved_blocks();
+        assert_eq!(blocks.len(), 2, "removed side and added side: {blocks:?}");
+        let added = blocks
+            .iter()
+            .find(|b| !b.removed_side)
+            .expect("added block");
+        assert!(added.rows.len() >= 3, "{added:?}");
+        assert_eq!(added.label(), "Moved from a.rs:1");
+        let removed = blocks
+            .iter()
+            .find(|b| b.removed_side)
+            .expect("removed block");
+        assert!(removed.label().starts_with("Moved to a.rs:"));
+        // The moved rows get the tint instead of the added / removed color, and dimmed text.
+        let decos = src.row_decorations(added.rows.clone());
+        assert!(decos
+            .iter()
+            .all(|d| d.background == Some(DecorationColor::Custom(colors().moved_bg))));
+        let spans = src.highlights(added.rows.clone());
+        assert!(spans
+            .iter()
+            .all(|s| matches!(&s.style, SpanStyle::Custom(t) if t.color == colors().moved_text)));
+        // Without the overlay the same rows are plain additions.
+        let plain = DiffSource::new(
+            diff(&old, &new),
+            Arc::new(DiffMeta::compute(&diff(&old, &new))),
+            Rc::new(display_rows(
+                &diff(&old, &new).unified_segments(100),
+                &HashSet::new(),
+                false,
+            )),
+            DiffColumn::Unified,
+            true,
+        );
+        assert!(plain.moved_blocks().is_empty());
+        let plain_decos = plain.row_decorations(added.rows.clone());
+        assert!(plain_decos
+            .iter()
+            .all(|d| d.background == Some(DecorationColor::AddedLine)));
+        // Line lookup used by "go to the other end".
+        assert_eq!(src.row_of_line(true, 0), Some(removed.rows.start));
+    }
+
+    #[test]
+    fn structural_marks_hide_reformatting_and_mark_real_changes() {
+        let d = diff("let a = 1;\nlet b = 2;\n", "let a = 1;\nlet  b =\n    3;\n");
+        // Hand-made marks: only the `3` changed (line 2 of the new text, bytes 4..5).
+        let mut marks = StructuralMarks::default();
+        marks.old.insert(1, vec![(8..9, Mark::Changed)]);
+        marks.new.insert(2, vec![(4..5, Mark::Changed)]);
+        let meta = Arc::new(DiffMeta::compute(&d));
+        let rows = Rc::new(display_rows(
+            &d.unified_segments(100),
+            &HashSet::new(),
+            false,
+        ));
+        let src = DiffSource::new(d, meta, rows, DiffColumn::Unified, true)
+            .with_structural(Some(Arc::new(marks)), colors());
+        let decos = src.row_decorations(0..src.line_count());
+        let by_row = |row: u32| decos.iter().find(|d| d.row == row);
+        // Removed `let b = 2;` has a mark; the reflowed `let  b =` line has none and shows no change.
+        assert!(by_row(1).is_some_and(|d| !d.ranges.is_empty()));
+        assert!(
+            by_row(2).is_none(),
+            "reformatted line shows no change: {decos:?}"
+        );
+        assert!(by_row(3).is_some_and(|d| d.ranges == vec![(4..5, DecorationColor::AddedWord)]));
+    }
+
+    #[test]
+    fn structural_marks_split_ranges_by_line() {
+        let text = lector_text::Text::from("ab\ncd\nef\n");
+        let diff = StructuralDiff {
+            old: Vec::new(),
+            new: vec![lector_workspace::structural::Marked {
+                range: 1..8,
+                mark: Mark::Moved,
+            }],
+            states: 0,
+        };
+        let marks = StructuralMarks::from_diff(None, Some(&text), &diff);
+        assert_eq!(marks.line(false, 0), &[(1..2, Mark::Moved)]);
+        assert_eq!(marks.line(false, 1), &[(0..2, Mark::Moved)]);
+        assert_eq!(marks.line(false, 2), &[(0..2, Mark::Moved)]);
+        assert!(marks.line(true, 0).is_empty());
+    }
+
     #[test]
     fn unified_labels() {
         let d = diff("a\nb\nc\n", "a\nB\nc\n");
         let meta = Arc::new(DiffMeta::compute(&d));
         let rows = Rc::new(display_rows(&d.unified_segments(3), &HashSet::new(), false));
         let src = DiffSource::new(d, meta, rows, DiffColumn::Unified, true);
-        assert_eq!(src.line_number_chars(), Some(7));
+        assert_eq!(src.line_number_chars(), Some(9));
         let labels: Vec<String> = (0..src.line_count())
             .map(|r| src.line_number_label(r).unwrap().to_string())
             .collect();
-        assert_eq!(labels[0], "  1   1");
-        assert_eq!(labels[1], "  2    ");
-        assert_eq!(labels[2], "      2");
+        assert_eq!(labels[0], "  1   1  ");
+        assert_eq!(labels[1], "  2     -");
+        assert_eq!(labels[2], "      2 +");
         assert_eq!(src.line(1), "b");
         assert_eq!(src.line(2), "B");
     }

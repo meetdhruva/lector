@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, AnyView, App, ClickEvent, ClipboardItem, Entity, FocusHandle, Focusable,
+    div, prelude::*, AnyView, App, ClickEvent, ClipboardItem, Entity, FocusHandle, Focusable,
     FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task,
     Window,
 };
@@ -16,6 +16,7 @@ use lector_ui::components::list::{virtual_list, VirtualListState};
 use lector_ui::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
 use lector_ui::icons::{FileIcon, Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
+use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::{ActiveTheme, ColorExt};
 use lector_workspace::review::{self, changeset_key, ChangesetView};
@@ -23,6 +24,7 @@ use lector_workspace::review::{self, changeset_key, ChangesetView};
 use crate::diff_view::{
     settings_diff_options, stats_label, DiffTarget, DiffView, DiffViewEvent, ViewedTarget,
 };
+use crate::review_model::ReviewModelEvent;
 use crate::store::{GitStore, GitStoreEvent};
 use crate::util::{
     format_date, kind_color, kind_letter, now_secs, ref_colors, relative_time, split_path,
@@ -43,8 +45,22 @@ pub struct ReviewView {
     menu: ContextMenuState,
     list_width: Pixels,
     focus_handle: FocusHandle,
+    /// The pull request under review (v0.6), read from the shadow repository.
+    pr: Option<Arc<crate::pull_requests::PrSession>>,
+    /// Files or comments in the left column (v0.6).
+    list_mode: comments::ListMode,
+    /// Threads of this review, re-read at most every second while shown.
+    comment_cache: Option<(
+        std::time::Instant,
+        std::rc::Rc<Vec<lector_app::comments::Thread>>,
+    )>,
+    /// Risk order, reviewed hunks and progress (v0.4).
+    queue: queue::QueueState,
     _subscriptions: Vec<Subscription>,
 }
+
+mod comments;
+mod queue;
 
 impl Focusable for ReviewView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -64,12 +80,44 @@ impl ReviewView {
         with_commit_header: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_inner(store, changeset, with_commit_header, None, cx)
+    }
+
+    /// Review of a pull request (merge base → head, from the shadow repository).
+    pub fn new_pr(
+        store: Entity<GitStore>,
+        session: Arc<crate::pull_requests::PrSession>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_inner(store, session.changeset(), false, Some(session), cx)
+    }
+
+    fn new_inner(
+        store: Entity<GitStore>,
+        changeset: Changeset,
+        with_commit_header: bool,
+        pr: Option<Arc<crate::pull_requests::PrSession>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let diff = cx.new(|cx| DiffView::new(store.clone(), false, cx));
+        if let Some(session) = &pr {
+            let ctx = crate::diff_view::ReviewContext {
+                key: session.key.clone(),
+                repo: Some(session.shadow_repo.clone()),
+                drafts: true,
+                pr: Some(session.clone()),
+            };
+            diff.update(cx, |d, cx| d.set_review_context(Some(ctx), cx));
+        }
         let mut subs = vec![cx.subscribe(&diff, |this, _, event: &DiffViewEvent, cx| {
             if let DiffViewEvent::ViewedToggled(path, viewed) = event {
                 this.on_viewed_toggled(path, *viewed, cx);
             }
         })];
+        subs.push(cx.subscribe(&diff, |this, _, event: &DiffViewEvent, cx| {
+            this.queue_diff_event(event, cx)
+        }));
+        let risk_order = store.read(cx).settings(cx).review.risk_order;
         let worktree_like = match &changeset {
             Changeset::WorkingTree
             | Changeset::Staged
@@ -80,6 +128,15 @@ impl ReviewView {
         };
         if worktree_like {
             subs.push(cx.subscribe(&store, |this, _, _: &GitStoreEvent, cx| this.reload(cx)));
+            // Looking at the working-tree review counts as having seen the changes.
+            let model = store.read(cx).review_model.clone();
+            subs.push(
+                cx.subscribe(&model, |this, model, _: &ReviewModelEvent, cx| {
+                    if this.view.is_some() {
+                        model.update(cx, |m, cx| m.mark_seen(cx));
+                    }
+                }),
+            );
         }
         let mut this = ReviewView {
             store,
@@ -93,8 +150,12 @@ impl ReviewView {
             error: None,
             auto_advance: true,
             menu: ContextMenuState::default(),
-            list_width: px(300.),
+            list_width: px(330.),
             focus_handle: cx.focus_handle(),
+            pr,
+            list_mode: comments::ListMode::Files,
+            comment_cache: None,
+            queue: queue::QueueState::new(risk_order),
             _subscriptions: subs,
         };
         this.load(with_commit_header, cx);
@@ -102,6 +163,9 @@ impl ReviewView {
     }
 
     fn title(&self, cx: &App) -> SharedString {
+        if let Some(pr) = &self.pr {
+            return pr.title().into();
+        }
         if let Some(c) = &self.commit {
             return format!("{} {}", c.info.oid.short(), c.info.summary).into();
         }
@@ -118,7 +182,8 @@ impl ReviewView {
 
     fn load(&mut self, with_commit: bool, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
-        let Some(repo) = store.repo().cloned() else {
+        let pr_repo = self.pr.as_ref().map(|p| p.shadow_repo.clone());
+        let Some(repo) = pr_repo.or_else(|| store.repo().cloned()) else {
             self.error = Some("Not a git repository".into());
             return;
         };
@@ -161,6 +226,7 @@ impl ReviewView {
                             .min(view.files.len().saturating_sub(1));
                         this.view = Some(view);
                         this.error = None;
+                        this.queue_after_load(cx);
                         this.show_selected(cx);
                     }
                     Err(e) => this.error = Some(e.into()),
@@ -190,12 +256,13 @@ impl ReviewView {
                 d.set_target(target, viewed, cx);
             }
         });
-        self.list.reveal(self.selected);
+        self.queue_on_selected(cx);
         cx.notify();
     }
 
     fn select(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = ix;
+        self.queue_user_selected();
         self.show_selected(cx);
         let f = self.diff.focus_handle(cx);
         window.focus(&f);
@@ -209,7 +276,7 @@ impl ReviewView {
         if n == 0 {
             return;
         }
-        let ix = (self.selected as isize + delta).clamp(0, n - 1) as usize;
+        let ix = self.queue_neighbor(self.selected, delta, n as usize);
         if ix != self.selected {
             self.select(ix, window, cx);
         }
@@ -262,6 +329,7 @@ impl ReviewView {
             };
             self.diff.update(cx, |d, cx| d.set_viewed(Some(viewed), cx));
         }
+        self.queue_file_viewed(ix, new_state, cx);
         cx.notify();
     }
 
@@ -373,13 +441,13 @@ impl ReviewView {
             div()
                 .w(px(78.))
                 .flex_none()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_faint.hsla())
                 .child(t)
         };
         let value = || {
             div()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_muted.hsla())
         };
         let parents = info.parents.clone();
@@ -432,7 +500,7 @@ impl ReviewView {
                             .child(
                                 h_flex()
                                     .gap(px(6.))
-                                    .text_size(metrics::TEXT_SM)
+                                    .text_size(metrics::text_sm())
                                     .text_color(ui.text_muted.hsla())
                                     .child(
                                         div()
@@ -460,7 +528,7 @@ impl ReviewView {
                             .border_1()
                             .border_color(ui.border.hsla())
                             .font_family(lector_ui::assets::MONO_FONT)
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_muted.hsla())
                             .cursor_pointer()
                             .hover(|s| s.bg(ui.hover.hsla()))
@@ -488,7 +556,7 @@ impl ReviewView {
                         .pl(px(48.))
                         .max_h(px(140.))
                         .overflow_y_scroll()
-                        .text_size(metrics::TEXT)
+                        .text_size(metrics::text())
                         .text_color(ui.text.hsla())
                         .whitespace_normal()
                         .children(
@@ -531,7 +599,7 @@ impl ReviewView {
                                         div()
                                             .id(("parent", i))
                                             .font_family(lector_ui::assets::MONO_FONT)
-                                            .text_size(metrics::TEXT_SM)
+                                            .text_size(metrics::text_sm())
                                             .text_color(ui.text_accent.hsla())
                                             .cursor_pointer()
                                             .hover(|s| s.underline())
@@ -551,15 +619,11 @@ impl ReviewView {
     fn render_list_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let ui = &theme.ui;
-        let (viewed, total, stats) = match &self.view {
-            Some(v) => (v.viewed_count(), v.files.len(), v.total_stats()),
-            None => (0, 0, Default::default()),
+        let (total, stats) = match &self.view {
+            Some(v) => (v.files.len(), v.total_stats()),
+            None => (0, Default::default()),
         };
-        let frac = if total == 0 {
-            0.
-        } else {
-            viewed as f32 / total as f32
-        };
+        let (progress_label, frac, complete) = self.queue_progress();
         v_flex()
             .flex_none()
             .px(px(10.))
@@ -573,7 +637,7 @@ impl ReviewView {
                     .gap(px(6.))
                     .child(
                         div()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui.text.hsla())
                             .child(format!("{total} file{}", if total == 1 { "" } else { "s" })),
@@ -610,7 +674,7 @@ impl ReviewView {
                             .rounded(px(2.))
                             .bg(ui.hover.hsla())
                             .child(div().h_full().rounded(px(2.)).w(gpui::relative(frac)).bg(
-                                if viewed == total && total > 0 {
+                                if complete {
                                     theme.git.added.hsla()
                                 } else {
                                     ui.accent.hsla()
@@ -620,9 +684,9 @@ impl ReviewView {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_muted.hsla())
-                            .child(format!("{viewed} / {total} viewed")),
+                            .child(progress_label),
                     ),
             )
     }
@@ -639,10 +703,14 @@ impl ReviewView {
         let viewed = file.viewed;
         let can_view = !file.content_hash.is_empty();
         let accent = ui.accent.hsla();
+        let reason = self.risk_reason(ix);
+        let badge = self.risk_badge(ix, cx);
+        let counter = self.hunk_counter(ix);
+        let detail = reason.clone().unwrap_or_else(|| dir.to_string());
         h_flex()
             .id(("review-file", ix))
             .w_full()
-            .h(px(28.))
+            .h(px(queue::ROW_HEIGHT))
             .pl(px(6.))
             .pr(px(10.))
             .gap(px(6.))
@@ -685,7 +753,7 @@ impl ReviewView {
                     .whitespace_nowrap()
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .text_color(if viewed {
                                 ui.text_muted.hsla()
                             } else {
@@ -695,24 +763,38 @@ impl ReviewView {
                             .text_ellipsis()
                             .child(name.to_string()),
                     )
-                    .when(!dir.is_empty(), |el| {
+                    .when(!detail.is_empty(), |el| {
                         el.child(
                             div()
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .line_height(px(12.))
-                                .text_color(ui.text_faint.hsla())
+                                .text_color(if reason.is_some() {
+                                    ui.text_muted.hsla()
+                                } else {
+                                    ui.text_faint.hsla()
+                                })
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(dir.to_string()),
+                                .child(detail),
                         )
                     }),
             )
+            .children(badge)
+            .when_some(counter, |el, c| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(metrics::text_xs())
+                        .text_color(ui.text_faint.hsla())
+                        .child(c),
+                )
+            })
             .when_some(file.stats.filter(|s| s.added + s.removed > 0), |el, s| {
                 el.child(
                     h_flex()
                         .flex_none()
                         .gap(px(4.))
-                        .text_size(metrics::TEXT_XS)
+                        .text_size(metrics::text_xs())
                         .when(s.added > 0, |el| {
                             el.child(
                                 div()
@@ -733,7 +815,7 @@ impl ReviewView {
                 div()
                     .flex_none()
                     .w(px(12.))
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(kind_color(file.change.kind, cx))
                     .child(kind_letter(file.change.kind)),
@@ -768,7 +850,7 @@ pub fn ref_pill(name: &str, kind: RefKind, cx: &App) -> impl IntoElement {
         .bg(bg)
         .border_1()
         .border_color(fg.opacity(0.35))
-        .text_size(metrics::TEXT_XS)
+        .text_size(metrics::text_xs())
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
         .when_some(icon, |el, i| {
@@ -815,18 +897,26 @@ impl Render for ReviewView {
                         .border_r_1()
                         .border_color(ui.border.hsla())
                         .bg(ui.surface.hsla())
-                        .child(self.render_list_header(cx))
-                        .child(div().flex_1().min_h_0().pt(px(2.)).child(virtual_list(
-                            "review-files",
-                            count,
-                            &self.list,
-                            cx,
-                            move |range, _, cx| {
-                                entity.update(cx, |this, cx| {
-                                    range.map(|ix| this.render_file_row(ix, cx)).collect()
-                                })
-                            },
-                        ))),
+                        .children(self.render_pr_header(cx))
+                        .child(self.render_mode_tabs(cx))
+                        .when(self.list_mode == comments::ListMode::Comments, |el| {
+                            el.child(self.render_comments_list(cx))
+                        })
+                        .when(self.list_mode == comments::ListMode::Files, |el| {
+                            el.child(self.render_list_header(cx)).child(
+                                div().flex_1().min_h_0().pt(px(2.)).child(virtual_list(
+                                    "review-files",
+                                    self.queue_row_count(count),
+                                    &self.list,
+                                    cx,
+                                    move |range, _, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            range.map(|ix| this.render_queue_row(ix, cx)).collect()
+                                        })
+                                    },
+                                )),
+                            )
+                        }),
                 )
                 .child(div().flex_1().min_w_0().h_full().child(self.diff.clone()))
                 .into_any_element()
@@ -843,6 +933,25 @@ impl Render for ReviewView {
             .on_action(cx.listener(|this, _: &diff_actions::PrevFile, window, cx| {
                 this.step_file(-1, window, cx)
             }))
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::NextUnreviewed, _, cx| {
+                    this.queue_next_unreviewed(cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::SubmitReview, window, cx| {
+                    this.submit_review(window, cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::workspace::ShowContextMenu, window, cx| {
+                    let ix = this.selected;
+                    let position = this
+                        .list
+                        .row_anchor(this.queue_row_of_file(ix), px(queue::ROW_HEIGHT));
+                    this.deploy_file_menu(ix, position, window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &diff_actions::ToggleViewed, _, cx| {
                 let ix = this.selected;
                 this.toggle_viewed_at(ix, cx);
@@ -871,7 +980,7 @@ pub struct ReviewItem {
 impl PaneItem for ReviewItem {
     fn title(&self, cx: &App) -> SharedString {
         let t = self.view.read(cx).title(cx);
-        if self.is_commit {
+        if self.is_commit || self.view.read(cx).pr.is_some() {
             t
         } else {
             format!("Review: {t}").into()
@@ -896,6 +1005,9 @@ impl PaneItem for ReviewItem {
 
     fn tab_kind(&self, cx: &App) -> Option<lector_config::TabKind> {
         let v = self.view.read(cx);
+        if v.pr.is_some() {
+            return None; // pull requests are reopened from the panel
+        }
         Some(match (&v.changeset, self.is_commit) {
             (Changeset::Commit(oid), true) => lector_config::TabKind::Commit {
                 oid: oid.to_string(),
@@ -915,11 +1027,16 @@ impl PaneItem for ReviewItem {
     }
 
     fn clone_item(&self, _window: &mut Window, cx: &mut App) -> Option<Box<dyn PaneItem>> {
-        let (store, cs, commit) = {
+        let (store, cs, commit, pr) = {
             let v = self.view.read(cx);
-            (v.store.clone(), v.changeset.clone(), v.commit.is_some())
+            (
+                v.store.clone(),
+                v.changeset.clone(),
+                v.commit.is_some(),
+                v.pr.clone(),
+            )
         };
-        let view = cx.new(|cx| ReviewView::new(store, cs, commit, cx));
+        let view = cx.new(|cx| ReviewView::new_inner(store, cs, commit, pr, cx));
         Some(Box::new(ReviewItem {
             view,
             key: self.key.clone(),
@@ -1006,4 +1123,29 @@ pub fn open_commit_tab(
     cx: &mut App,
 ) {
     open_item(store, Changeset::Commit(oid), true, preview, window, cx);
+}
+
+/// Opens (or activates) the review tab of a pull request.
+pub fn open_pull_request(
+    store: &Entity<GitStore>,
+    session: Arc<crate::pull_requests::PrSession>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(ws) = store.read(cx).workspace.upgrade() else {
+        return;
+    };
+    let key: SharedString = format!("review:{}", session.key).into();
+    let pane = ws.read(cx).active_pane().clone();
+    if let Some(ix) = pane.read(cx).index_for_key(&key, cx) {
+        pane.update(cx, |p, cx| p.close_without_prompt(ix, window, cx));
+    }
+    let store = store.clone();
+    let view = cx.new(|cx| ReviewView::new_pr(store, session, cx));
+    let item = Box::new(ReviewItem {
+        view,
+        key,
+        is_commit: false,
+    });
+    ws.update(cx, |ws, cx| ws.add_item(item, false, window, cx));
 }

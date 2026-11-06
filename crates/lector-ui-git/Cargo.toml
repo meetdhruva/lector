@@ -23,6 +23,7 @@ lector-syntax.workspace = true
 lector-theme.workspace = true
 lector-icons.workspace = true
 lector-config.workspace = true
+lector-forge.workspace = true
 lector-fs.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

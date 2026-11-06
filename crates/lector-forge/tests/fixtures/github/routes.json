@@ -1,0 +1,11 @@
+[
+  {"method": "GET", "path": "/user", "file": "user.json"},
+  {"method": "GET", "path": "/repos/acme/widgets/pulls", "file": "pulls.json"},
+  {"method": "GET", "path": "/repos/acme/widgets/pulls/12", "file": "pull_12.json"},
+  {"method": "GET", "path": "/repos/acme/widgets/pulls/12/files", "file": "files_12.json"},
+  {"method": "GET", "path": "/repos/acme/widgets/commits/1111111111111111111111111111111111111111/status", "file": "status.json"},
+  {"method": "POST", "path": "/graphql", "body_contains": "reviewThreads", "file": "threads.json"},
+  {"method": "POST", "path": "/graphql", "body_contains": "addPullRequestReviewThreadReply", "file": "reply.json"},
+  {"method": "POST", "path": "/graphql", "body_contains": "resolveReviewThread", "body": "{\"data\":{\"resolveReviewThread\":{\"thread\":{\"id\":\"PRRT_1\",\"isResolved\":true}}}}"},
+  {"method": "POST", "path": "/repos/acme/widgets/pulls/12/reviews", "body": "{\"id\": 80, \"state\": \"APPROVED\"}"}
+]

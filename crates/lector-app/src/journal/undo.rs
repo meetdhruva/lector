@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use lector_git::{Repo, ShadowRepo};
 
 use super::{ActivityEntry, Journal, UndoRecord};
-use crate::commands::{CommandContext, Source};
+use crate::commands::CommandContext;
 
 /// How strictly [`Journal::undo`] checks that the files are still as the command left them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +179,7 @@ impl Journal {
                     undo,
                     undone: false,
                     args: serde_json::json!({ "entry": id }),
-                    source: Source::Ui,
+                    source: cx.source,
                     undo_of: Some(id),
                     undone_by: None,
                 })
@@ -336,8 +336,7 @@ impl Journal {
                 });
             }
             UndoRecord::Invoke { command, args } => {
-                let mut cx = cx.clone();
-                cx.source = Source::Ui;
+                let cx = cx.clone();
                 let project_repo = cx
                     .project
                     .as_ref()

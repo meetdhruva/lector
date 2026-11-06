@@ -15,9 +15,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, point, prelude::*, px, AnyElement, AnyView, App, ClickEvent, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Pixels, SharedString, Subscription,
-    Task, WeakEntity, Window,
+    div, point, prelude::*, AnyElement, AnyView, App, ClickEvent, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, Hsla, Pixels, SharedString, Subscription, Task, WeakEntity,
+    Window,
 };
 use lector_ui::actions::git as git_actions;
 use lector_ui::actions::workspace as ws_actions;
@@ -27,6 +27,7 @@ use lector_ui::code_view::{
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::editor::FileView;
 use lector_ui::icons::{FileIcon, Icon, IconName, IconSize};
+use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::{ActiveTheme, ColorExt};
 use lector_workspace::conflicts::{
@@ -787,7 +788,7 @@ impl MergeEditor {
                     .gap(px(6.))
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui.text.hsla())
                             .child(name.to_string()),
@@ -798,7 +799,7 @@ impl MergeEditor {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_faint.hsla())
                             .child(dir.to_string()),
                     ),
@@ -809,7 +810,7 @@ impl MergeEditor {
                         .flex_none()
                         .px(px(6.))
                         .rounded(px(4.))
-                        .text_size(metrics::TEXT_XS)
+                        .text_size(metrics::text_xs())
                         .bg(theme.git.conflicted.hsla().opacity(0.15))
                         .text_color(theme.git.conflicted.hsla())
                         .child(k.label()),
@@ -822,7 +823,7 @@ impl MergeEditor {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_muted.hsla())
                         .child(op),
                 )
@@ -835,7 +836,7 @@ impl MergeEditor {
                     .px(px(8.))
                     .gap(px(5.))
                     .rounded(px(11.))
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .bg(if done {
                         ui.success.hsla().opacity(0.14)
                     } else {
@@ -941,7 +942,7 @@ impl MergeEditor {
             .border_b_1()
             .border_color(ui.border_variant.hsla())
             .bg(ui.surface.hsla())
-            .text_size(metrics::TEXT_SM)
+            .text_size(metrics::text_sm())
             .child(div().size(px(8.)).rounded(px(4.)).bg(color))
             .child(
                 div()
@@ -1004,7 +1005,7 @@ impl MergeEditor {
                 .child(
                     div()
                         .max_w(px(520.))
-                        .text_size(metrics::TEXT)
+                        .text_size(metrics::text())
                         .text_color(ui.text_muted.hsla())
                         .child(message),
                 )
@@ -1125,7 +1126,7 @@ fn pane_actions(
             .bg(ui.elevated.hsla())
             .border_1()
             .border_color(ui.border_variant.hsla())
-            .text_size(metrics::TEXT_XS)
+            .text_size(metrics::text_xs())
             .text_color(ui.text_faint.hsla())
             .child(
                 Icon::new(IconName::Check)
@@ -1154,6 +1155,11 @@ fn pane_actions(
                 el.text_color(ui.text_muted.hsla())
                     .hover(|s| s.bg(ui.hover.hsla()).text_color(ui.text.hsla()))
             })
+            .tab_index(0)
+            .focus({
+                let ring = ui.focus_ring.hsla();
+                move |s| lector_ui::a11y::focus_ring_style(s, ring)
+            })
             .child(label)
             .on_click(move |_: &ClickEvent, _, cx| {
                 cx.stop_propagation();
@@ -1170,7 +1176,7 @@ fn pane_actions(
         .border_1()
         .border_color(ui.border.hsla())
         .shadow_sm()
-        .text_size(metrics::TEXT_XS);
+        .text_size(metrics::text_xs());
     match side {
         Side::Ours => bar
             .child(button(
@@ -1259,7 +1265,7 @@ impl Render for MergeEditor {
                         .bg(ui.error.hsla().opacity(0.08))
                         .border_b_1()
                         .border_color(ui.error.hsla().opacity(0.5))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text.hsla())
                         .child(
                             Icon::new(IconName::CircleX)
@@ -1288,7 +1294,7 @@ impl Render for MergeEditor {
                     .border_b_1()
                     .border_color(ui.border_variant.hsla())
                     .bg(ui.surface.hsla())
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .child(div().size(px(8.)).rounded(px(4.)).bg(ui.accent.hsla()))
                     .child(
                         div()
@@ -1307,7 +1313,7 @@ impl Render for MergeEditor {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_faint.hsla())
                             .child("Editable · Alt+1/2/3 accept · Alt+N/P navigate"),
                     ),

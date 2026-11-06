@@ -6,8 +6,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    div, img, prelude::*, px, AnyElement, App, FontStyle, FontWeight, InteractiveText, ObjectFit,
+    div, img, prelude::*, AnyElement, App, FontStyle, FontWeight, InteractiveText, ObjectFit,
     SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window,
 };
 use lector_syntax::{LanguageRegistry, Syntax};
@@ -879,8 +880,8 @@ fn render_block(block: &Block, ctx: &mut Ctx, cx: &mut App) -> AnyElement {
                         .overflow_x_scroll()
                         .px(px(12.))
                         .py(px(10.))
-                        .text_size(px(font_size))
-                        .line_height(px((font_size * 1.5).round()))
+                        .text_size(gpui::px(font_size))
+                        .line_height(gpui::px((font_size * 1.5).round()))
                         .whitespace_nowrap()
                         .child(StyledText::new(code_text).with_runs(runs)),
                 )

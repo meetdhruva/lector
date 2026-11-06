@@ -2,7 +2,8 @@
 //! and quit, auto-save on focus change, before-save hook registration and the
 //! status-bar edit indicators ("Modified", read-only lock).
 
-use gpui::{div, prelude::*, px, App, Div, Entity, Task, Window};
+use crate::scale::px;
+use gpui::{div, prelude::*, App, Div, Entity, Task, Window};
 
 use super::Workspace;
 use crate::actions::{editor, workspace::SaveAll};

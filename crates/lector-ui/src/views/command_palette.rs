@@ -5,9 +5,10 @@
 //! reason as tooltip), argument-free ones without an action get their own row
 //! and run through `commands_bridge::invoke`.
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, Action, AnyElement, App, DismissEvent, FocusHandle, SharedString,
-    WeakEntity, Window,
+    div, prelude::*, Action, AnyElement, App, DismissEvent, FocusHandle, SharedString, WeakEntity,
+    Window,
 };
 
 use crate::actions::{humanize_action_name, is_palette_hidden};

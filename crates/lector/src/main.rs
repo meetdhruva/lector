@@ -21,7 +21,9 @@ use lector_ui::{OpenRequest, ThemeMode};
 #[command(
     name = "lector",
     version,
-    about = "A fast, reading-first code viewer and git review tool."
+    about = "A fast, reading-first code viewer and git review tool.",
+    after_help = "Command line (no window): lector status | changes | diff | commands | run | activity | undo | mcp\n\
+                  Run `lector <subcommand> --help` for details. `lector mcp` is the Model Context Protocol server."
 )]
 struct Cli {
     /// Folder or file to open, optionally with a position: PATH[:LINE[:COL]].
@@ -197,7 +199,14 @@ fn load_themes(cli: &Cli) -> (ThemeRegistry, ThemeMode) {
     (registry, mode)
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    // Headless subcommands (`lector status`, `lector mcp`, ...) never touch the GUI: they are
+    // dispatched before anything else. A directory named like a subcommand can still be
+    // opened as `lector ./status`.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if lector_cli::is_cli_invocation(&args) {
+        return Ok(lector_cli::run_args(args));
+    }
     lector_ui::startup::mark_process_start();
     let cli = Cli::parse();
     logging::init();
@@ -266,6 +275,7 @@ fn main() -> anyhow::Result<()> {
         lector_ui::startup::log("app ready, project open");
         lector_ui::init(cx, registry, mode, (settings, warnings));
         lector_ui_git::init(cx);
+        lector_ui_agent::init(cx);
         lector_ui::startup::log("ui initialized");
         let opened = match request {
             Some(request) => lector_ui::open_workspace_window(cx, request),
@@ -277,7 +287,7 @@ fn main() -> anyhow::Result<()> {
         }
         lector_ui::startup::log("window opened");
     });
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

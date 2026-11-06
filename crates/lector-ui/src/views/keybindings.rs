@@ -6,8 +6,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyElement, AnyView, App, Entity, FocusHandle, Focusable, FontWeight,
+    div, prelude::*, AnyElement, AnyView, App, Entity, FocusHandle, Focusable, FontWeight,
     KeyBinding, Keystroke, SharedString, Subscription, Window,
 };
 
@@ -80,6 +81,25 @@ pub fn binding_rows(cx: &App) -> Vec<BindingRow> {
             strokes,
             haystack,
             command: !is_palette_hidden(action),
+        });
+    }
+    // Every command is listed, also the ones without a key: they show as "Unbound" and can be
+    // found by typing "unbound".
+    let bound: std::collections::HashSet<SharedString> =
+        rows.iter().map(|r: &BindingRow| r.action.clone()).collect();
+    for name in cx.all_action_names() {
+        if is_palette_hidden(name) || name.ends_with("::NoAction") || bound.contains(*name) {
+            continue;
+        }
+        let label: SharedString = humanize_action_name(name).into();
+        rows.push(BindingRow {
+            haystack: format!("{label} {name} unbound").to_lowercase(),
+            label,
+            action: (*name).into(),
+            keys: SharedString::default(),
+            context: SharedString::default(),
+            strokes: Vec::new(),
+            command: true,
         });
     }
     // User commands first, then UI plumbing (pickers, text inputs), by label.
@@ -171,7 +191,7 @@ impl KeybindingsView {
             recording: false,
             recorded: Vec::new(),
             list: VirtualListState::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             _subscriptions: subscriptions,
         };
         view.update_matches(cx);
@@ -251,11 +271,18 @@ impl KeybindingsView {
 
     fn render_row(row: &BindingRow, ix: usize, cx: &App) -> AnyElement {
         let ui = &cx.theme().ui;
-        let keys: Vec<AnyElement> = row
-            .keys
-            .split(' ')
-            .map(|k| keycap(SharedString::from(k.to_string()), cx).into_any_element())
-            .collect();
+        let keys: Vec<AnyElement> = if row.keys.is_empty() {
+            vec![div()
+                .text_size(metrics::text_sm())
+                .text_color(ui.text_faint.hsla())
+                .child("Unbound")
+                .into_any_element()]
+        } else {
+            row.keys
+                .split(' ')
+                .map(|k| keycap(SharedString::from(k.to_string()), cx).into_any_element())
+                .collect()
+        };
         h_flex()
             .id(("binding-row", ix))
             .w_full()
@@ -268,7 +295,7 @@ impl KeybindingsView {
             .child(
                 v_flex().flex_1().min_w_0().child(
                     div()
-                        .text_size(metrics::TEXT)
+                        .text_size(metrics::text())
                         .text_color(if row.command {
                             ui.text.hsla()
                         } else {
@@ -285,7 +312,7 @@ impl KeybindingsView {
                 div()
                     .w(px(200.))
                     .flex_none()
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .text_color(ui.text_faint.hsla())
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -300,7 +327,7 @@ impl KeybindingsView {
                 div()
                     .w(px(240.))
                     .flex_none()
-                    .text_size(metrics::TEXT_XS)
+                    .text_size(metrics::text_xs())
                     .font_family(crate::assets::MONO_FONT)
                     .text_color(ui.text_faint.hsla())
                     .overflow_hidden()
@@ -324,7 +351,7 @@ impl Render for KeybindingsView {
             div()
                 .when_some(w, |el, w| el.w(px(w)).flex_none())
                 .when(w.is_none(), |el| el.flex_1().min_w_0())
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(ui.text_faint.hsla())
                 .child(text.to_uppercase())
@@ -334,7 +361,7 @@ impl Render for KeybindingsView {
             .h(px(32.))
             .px(px(10.))
             .gap(px(8.))
-            .rounded(metrics::RADIUS)
+            .rounded(metrics::radius())
             .border_1()
             .border_color(if recording {
                 ui.accent.hsla()
@@ -354,7 +381,7 @@ impl Render for KeybindingsView {
             .child(
                 div()
                     .flex_1()
-                    .text_size(metrics::TEXT)
+                    .text_size(metrics::text())
                     .line_height(px(20.))
                     .map(|el| {
                         if recording {
@@ -404,7 +431,7 @@ impl Render for KeybindingsView {
                             )
                             .child(
                                 div()
-                                    .text_size(metrics::TEXT_SM)
+                                    .text_size(metrics::text_sm())
                                     .text_color(ui.text_faint.hsla())
                                     .child(format!("{count} of {} bindings", self.rows.len())),
                             )
@@ -471,7 +498,7 @@ impl Render for KeybindingsView {
                             )
                             .child(
                                 div()
-                                    .text_size(metrics::TEXT)
+                                    .text_size(metrics::text())
                                     .child("No matching key bindings"),
                             ),
                     )

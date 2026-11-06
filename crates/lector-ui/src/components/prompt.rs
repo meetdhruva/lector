@@ -5,10 +5,11 @@
 //! with [`install`] from `lector_ui::init` on those platforms only, so macOS
 //! and Windows keep their native dialogs and tests keep the test platform's.
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
-    KeyDownEvent, PromptButton, PromptHandle, PromptLevel, PromptResponse, RenderablePromptHandle,
-    SharedString, Window,
+    div, prelude::*, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    PromptButton, PromptHandle, PromptLevel, PromptResponse, RenderablePromptHandle, SharedString,
+    Window,
 };
 
 use super::{h_flex, metrics, v_flex, Button, ButtonStyle};
@@ -108,21 +109,21 @@ impl Render for ThemedPrompt {
                     .max_w_full()
                     .p(px(16.))
                     .gap(px(10.))
-                    .rounded(metrics::RADIUS_LG)
+                    .rounded(metrics::radius_lg())
                     .border_1()
                     .border_color(ui.border.hsla())
                     .bg(ui.elevated.hsla())
                     .shadow_lg()
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(title_color)
                             .child(self.message.clone()),
                     )
                     .children(self.detail.clone().map(|d| {
                         div()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_muted.hsla())
                             .child(d)
                     }))

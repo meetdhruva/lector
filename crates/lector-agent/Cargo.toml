@@ -10,9 +10,11 @@ description = "Agent sessions for Lector: Agent Client Protocol client, per-turn
 
 [dependencies]
 lector-app.workspace = true
-lector-git.workspace = true
+lector-git = { workspace = true, features = ["serde"] }
 lector-workspace.workspace = true
 lector-config.workspace = true
+lector-diff.workspace = true
+lector-fs.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

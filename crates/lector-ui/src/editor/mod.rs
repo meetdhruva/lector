@@ -24,10 +24,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::scale::px;
 use gpui::{
-    anchored, deferred, div, prelude::*, px, AnyElement, AnyView, App, Corner, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, Pixels, Point, PromptLevel, SharedString,
-    Subscription, Task, WeakEntity, Window,
+    anchored, deferred, div, prelude::*, AnyElement, AnyView, App, Corner, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, Pixels, Point, PromptLevel, SharedString, Subscription,
+    Task, WeakEntity, Window,
 };
 use lector_fs::{FileKind, ImageFormat};
 use lector_syntax::{OutlineItem, SymbolKind};
@@ -734,6 +735,35 @@ impl FileView {
 
     // Hover.
 
+    /// The provenance query for `row` when the line is a change against `HEAD` in a saved buffer.
+    pub(crate) fn provenance_query(
+        &self,
+        row: u32,
+        cx: &App,
+    ) -> Option<lector_app::provenance::LineQuery> {
+        if self.is_dirty(cx) {
+            return None; // line numbers no longer match the file on disk
+        }
+        let changed = self
+            .code_view
+            .read(cx)
+            .source()
+            .gutter_marks(row..row + 1)
+            .iter()
+            .any(|m| m.kind != crate::code_view::GutterMarkKind::Deleted);
+        if !changed {
+            return None;
+        }
+        let repo = self.project.repo()?;
+        let rel = self.project.relative_path(&self.path)?;
+        Some(lector_app::provenance::LineQuery {
+            repo: repo.workdir().to_path_buf(),
+            path: self.project.repo_path(&rel),
+            line: row,
+            rev: None,
+        })
+    }
+
     fn show_hover(&mut self, target: HoverTarget, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(doc) = self.live_document(cx).cloned() else {
             return;
@@ -745,15 +775,19 @@ impl FileView {
         ));
         // LSP diagnostics at the pointer are shown above the hover docs.
         let diagnostics = crate::lsp::diagnostics::hover_markdown(&self.path, offset, cx);
+        // "Why did this line change?" (commit message, agent prompt) below them, for changed lines.
+        let why = self.provenance_query(target.pos.row, cx);
         let word = match doc.word_at(offset) {
             Some((word, _)) => word,
             None if diagnostics.is_some() => offset..offset + 1,
+            None if why.is_some() => text.line_range(target.pos.row),
             None => return,
         };
         if self.hover.as_ref().is_some_and(|h| h.word == word) {
             return;
         }
         let project = self.project.clone();
+        let core = crate::commands_bridge::core(cx);
         let word_start = text.offset_to_point(word.start);
         let position = self
             .code_view
@@ -769,12 +803,18 @@ impl FileView {
                         .flatten()
                         .map(|md| md.trim().to_string())
                         .filter(|md| !md.is_empty());
-                    let md = match (diagnostics, md) {
-                        (Some(d), Some(md)) => format!("{d}\n\n---\n\n{md}"),
-                        (Some(d), None) => d,
-                        (None, Some(md)) => md,
-                        (None, None) => return None,
-                    };
+                    let why = why
+                        .map(|q| core.provenance().explain_all(&q))
+                        .map(|items| lector_app::provenance::explanation_markdown(&items))
+                        .filter(|md| !md.is_empty());
+                    let md = [diagnostics, md, why]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("\n\n---\n\n");
+                    if md.is_empty() {
+                        return None;
+                    }
                     Some(Arc::new(markdown::parse(&md)))
                 })
                 .await;
@@ -915,7 +955,7 @@ impl FileView {
                 .bg(warn.opacity(0.12))
                 .border_b_1()
                 .border_color(warn.opacity(0.45))
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text.hsla())
                 .child(
                     Icon::new(IconName::AlertTriangle)
@@ -982,7 +1022,7 @@ impl FileView {
                 .bg(warn.opacity(0.12))
                 .border_b_1()
                 .border_color(warn.opacity(0.45))
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text.hsla())
                 .child(
                     Icon::new(IconName::AlertTriangle)
@@ -1056,7 +1096,7 @@ impl FileView {
             .gap(px(4.))
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(metrics::TEXT_SM)
+            .text_size(metrics::text_sm())
             .text_color(ui.text_muted.hsla())
             .bg(ui.background.hsla())
             .border_b_1()
@@ -1082,6 +1122,8 @@ impl FileView {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(ui.hover.hsla()).text_color(ui.text.hsla()))
+                    .tab_index(0)
+                    .focus(crate::a11y::ring_focus(cx))
                     .when(last && symbols.is_empty(), |el| {
                         el.text_color(ui.text.hsla())
                     })
@@ -1110,6 +1152,8 @@ impl FileView {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(ui.hover.hsla()).text_color(ui.text.hsla()))
+                    .tab_index(0)
+                    .focus(crate::a11y::ring_focus(cx))
                     .when(last, |el| el.text_color(ui.text.hsla()))
                     .on_click(move |_, window, cx| {
                         let item = item_for_click.clone();
@@ -1159,7 +1203,7 @@ impl FileView {
                 .bg(ui.surface.hsla())
                 .border_b_1()
                 .border_color(ui.border_variant.hsla())
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_muted.hsla())
                 .child(
                     Icon::new(IconName::Info)
@@ -1208,9 +1252,9 @@ impl FileView {
                             .bg(ui.elevated.hsla())
                             .border_1()
                             .border_color(ui.border.hsla())
-                            .rounded(metrics::RADIUS_LG)
+                            .rounded(metrics::radius_lg())
                             .shadow_lg()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .text_color(ui.text.hsla())
                             .on_hover(move |hovered, _, cx| {
                                 let hovered = *hovered;
@@ -1251,9 +1295,11 @@ impl FileView {
                 .rounded(px(5.))
                 .border_1()
                 .border_color(ui.border.hsla())
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .cursor_pointer()
                 .hover(|s| s.bg(ui.hover.hsla()))
+                .tab_index(0)
+                .focus(crate::a11y::ring_focus(cx))
                 .on_click(move |_, _, _| crate::os::reveal_in_file_manager(&path))
                 .child(crate::os::REVEAL_LABEL),
         )
@@ -1338,7 +1384,7 @@ pub fn centered_panel(
         )
         .child(
             div()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_muted.hsla())
                 .child(detail),
         )

@@ -774,3 +774,91 @@ fn bare_repositories_are_refused() {
     let repo = Repo::discover(dir.path()).unwrap();
     assert!(ShadowRepo::open(data.path(), &repo).is_err());
 }
+
+#[test]
+fn fetch_pull_request_into_shadow_leaves_user_repo_untouched() {
+    use lector_git::shadow::FetchOptions;
+    // "Upstream" with a pull request ref.
+    let up = Fx::new();
+    up.write("src/lib.rs", "fn a() {}\n");
+    up.commit_all("base");
+    up.git(&["checkout", "-q", "-b", "feature"]);
+    up.write("src/lib.rs", "fn a() { 42 }\nfn b() {}\n");
+    up.commit_all("feature");
+    let head = up.git(&["rev-parse", "HEAD"]).trim().to_string();
+    up.git(&["update-ref", "refs/pull/7/head", "HEAD"]);
+    up.git(&["checkout", "-q", "main"]);
+    let base = up.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let url = up.path().to_string_lossy().into_owned();
+
+    // The user's clone knows main only.
+    let fx = Fx::new();
+    fx.git(&["fetch", "-q", &url, "main:refs/remotes/origin/main"]);
+    fx.write("local.txt", "dirty\n");
+    let shadow = fx.shadow();
+    let before = fx.dot_git();
+
+    shadow
+        .fetch(
+            &url,
+            &[
+                "+refs/pull/7/head:refs/lector/pr/7/head",
+                "+refs/heads/main:refs/lector/pr/7/base",
+            ],
+        )
+        .unwrap();
+    fx.assert_git_untouched(&before, "fetch");
+    assert_eq!(
+        shadow
+            .resolve("refs/lector/pr/7/head")
+            .unwrap()
+            .map(|o| o.to_string()),
+        Some(head.clone())
+    );
+    assert_eq!(
+        shadow
+            .merge_base(&head, "refs/lector/pr/7/base")
+            .unwrap()
+            .map(|o| o.to_string()),
+        Some(base.clone())
+    );
+    // Commits exist only in the shadow.
+    let in_user = Command::new("git")
+        .args(["cat-file", "-e", &format!("{head}^{{commit}}")])
+        .current_dir(fx.path())
+        .output()
+        .unwrap();
+    assert!(
+        !in_user.status.success(),
+        "PR head leaked into the user repo"
+    );
+    // The shadow can be read as a repository for review (alternates included).
+    let shadow_repo = Repo::discover(shadow.git_dir()).unwrap();
+    let text = shadow_repo.file_at(&head, "src/lib.rs").unwrap().unwrap();
+    assert_eq!(text, b"fn a() { 42 }\nfn b() {}\n");
+
+    // Fetching again (nothing new) is fine and still leaves the user repo alone.
+    let opts = FetchOptions {
+        http_header: Some("Authorization: Basic c2VjcmV0".into()),
+    };
+    assert!(!format!("{opts:?}").contains("c2VjcmV0"));
+    shadow
+        .fetch_with(&url, &["+refs/pull/7/head:refs/lector/pr/7/head"], &opts)
+        .unwrap();
+    fx.assert_git_untouched(&before, "second fetch");
+
+    // Refspecs must stay inside refs/lector/ and out of the snapshot namespace.
+    for bad in [
+        "refs/pull/7/head:refs/heads/main",
+        "refs/pull/7/head",
+        "+refs/pull/7/head:refs/lector/snapshots/x",
+        "--upload-pack=evil:refs/lector/x",
+    ] {
+        assert!(shadow.fetch(&url, &[bad]).is_err(), "{bad}");
+    }
+    assert!(shadow
+        .fetch("--upload-pack=x", &["a:refs/lector/a"])
+        .is_err());
+    assert!(shadow.resolve("refs/lector/pr/8/head").unwrap().is_none());
+    fx.assert_git_untouched(&before, "refusals");
+}

@@ -6,9 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Corner, Div, Entity, Focusable, MouseButton,
-    MouseMoveEvent, Pixels, Point, Window, WindowControlArea,
+    div, prelude::*, AnyElement, App, Corner, Div, Entity, Focusable, MouseButton, MouseMoveEvent,
+    Pixels, Point, Window, WindowControlArea,
 };
 use lector_workspace::Project;
 
@@ -95,7 +96,12 @@ impl Workspace {
             return view.clone();
         }
         let root = self.has_folder.then(|| self.root.clone());
-        let view = cx.new(|cx| WelcomeView::new(root, cx));
+        let hint = self.review_hint.clone();
+        let view = cx.new(|cx| {
+            let mut view = WelcomeView::new(root, cx);
+            view.set_review_hint(hint, cx);
+            view
+        });
         let sub = cx.subscribe_in(
             &view,
             window,
@@ -497,9 +503,12 @@ impl Workspace {
         let windows = cfg!(target_os = "windows");
         let linux_like = !mac && !windows;
         let width = window.viewport_size().width;
-        let compact_palette = width < px(980.);
+        // Thresholds are in unscaled pixels, with a little room for text that grows faster than
+        // the padding around it at large UI scales.
+        let logical_width = f32::from(width) / crate::scale::scale();
+        let compact_palette = logical_width < 1000.;
         if !mac {
-            let compact_menu = width < px(1060.);
+            let compact_menu = logical_width < 1100.;
             self.app_menu
                 .update(cx, |m, cx| m.set_compact(compact_menu, cx));
         }
@@ -533,6 +542,11 @@ impl Workspace {
                     el.child(
                         h_flex()
                             .id("branch-pill")
+                            .tab_index(0)
+                            .focus({
+                                let ring = crate::a11y::ring_color(cx);
+                                move |s| crate::a11y::focus_ring_style(s, ring)
+                            })
                             .occlude()
                             .flex_none()
                             .gap(px(4.))
@@ -542,7 +556,7 @@ impl Workspace {
                             .bg(ui.hover.hsla())
                             .border_1()
                             .border_color(ui.border_variant.hsla())
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_muted.hsla())
                             .cursor_pointer()
                             .hover(|s| s.bg(ui.active.hsla()))
@@ -583,6 +597,11 @@ impl Workspace {
         } else {
             h_flex()
                 .id("palette-trigger")
+                .tab_index(0)
+                .focus({
+                    let ring = crate::a11y::ring_color(cx);
+                    move |s| crate::a11y::focus_ring_style(s, ring)
+                })
                 .occlude()
                 .flex_shrink()
                 .w(px(420.))
@@ -594,7 +613,7 @@ impl Workspace {
                 .bg(ui.input_bg.hsla())
                 .border_1()
                 .border_color(ui.border.hsla())
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_faint.hsla())
                 .cursor_pointer()
                 .hover(|s| s.border_color(ui.text_faint.hsla()))
@@ -614,7 +633,7 @@ impl Workspace {
                         "Search commands…"
                     },
                 ))
-                .child(div().text_size(metrics::TEXT_XS).child(palette_key))
+                .child(div().text_size(metrics::text_xs()).child(palette_key))
                 .into_any_element()
         };
 
@@ -668,7 +687,8 @@ impl Workspace {
 
         h_flex()
             .id("title-bar")
-            .h(metrics::TITLE_BAR_HEIGHT)
+            .track_focus(&self.title_focus)
+            .h(metrics::title_bar_height())
             .flex_none()
             .w_full()
             .gap(px(8.))
@@ -681,7 +701,7 @@ impl Workspace {
             .bg(ui.title_bar_bg.hsla())
             .border_b_1()
             .border_color(ui.border.hsla())
-            .text_size(metrics::TEXT)
+            .text_size(metrics::text())
             .when(windows, |el| {
                 el.window_control_area(WindowControlArea::Drag)
             })

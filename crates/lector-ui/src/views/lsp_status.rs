@@ -1,16 +1,17 @@
 //! The language server popover opened from the status bar: every server of
 //! the project with its state, and a shortcut to the settings.
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, DismissEvent, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    div, prelude::*, App, DismissEvent, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
     SharedString, Window,
 };
 use lector_lsp::{ServerCapabilities, ServerState, ServerStatus};
 
 use crate::actions::workspace::{OpenLogFile, OpenSettings};
 use crate::components::popover::surface;
-use crate::components::{h_flex, metrics, v_flex, Button};
-use crate::icons::IconName;
+use crate::components::{h_flex, metrics, v_flex, Button, IconButton, Tooltip};
+use crate::icons::{IconName, IconSize};
 use crate::theme::{ActiveTheme, ColorExt};
 
 /// Popover listing language servers.
@@ -65,6 +66,55 @@ pub fn capability_summary(c: &ServerCapabilities) -> String {
     .join(" · ")
 }
 
+/// "Install with …" rows (command and copy button) of a server that is not on `PATH`.
+fn install_rows(server: &str, ui: &lector_theme::UiColors, cx: &App) -> Vec<gpui::AnyElement> {
+    let _ = cx;
+    let Some(hint) = lector_lsp::install::install_hint(server) else {
+        return Vec::new();
+    };
+    hint.options_for(lector_lsp::install::Os::current())
+        .into_iter()
+        .enumerate()
+        .map(|(ix, option)| {
+            let command = option.command;
+            let id: SharedString = format!("lsp-install-{server}-{ix}").into();
+            h_flex()
+                .pl(px(16.))
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(metrics::text_xs())
+                        .text_color(ui.text_faint.hsla())
+                        .child(format!("Install {}:", option.label)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family("monospace")
+                        .text_size(metrics::text_xs())
+                        .text_color(ui.text.hsla())
+                        .child(command),
+                )
+                .child(
+                    IconButton::new(id, IconName::Copy)
+                        .icon_size(IconSize::XSmall)
+                        .tooltip(Tooltip::text("Copy the command"))
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                command.to_string(),
+                            ))
+                        }),
+                )
+                .into_any_element()
+        })
+        .collect()
+}
+
 fn state_label(state: &ServerState, cx: &App) -> (SharedString, Hsla) {
     let theme = cx.theme();
     match state {
@@ -100,7 +150,7 @@ impl Render for LspStatusPopover {
                         div()
                             .w(px(150.))
                             .flex_none()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .text_color(ui.text.hsla())
                             .child(s.name.clone()),
                     )
@@ -108,21 +158,27 @@ impl Render for LspStatusPopover {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_muted.hsla())
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(label),
                     );
-                v_flex().child(row).when_some(caps, |el, caps| {
-                    el.child(
-                        div()
-                            .pl(px(16.))
-                            .text_size(metrics::TEXT_XS)
-                            .text_color(ui.text_faint.hsla())
-                            .child(caps),
-                    )
-                })
+                let install = matches!(s.state, ServerState::NotInstalled)
+                    .then(|| install_rows(&s.name, &ui, cx))
+                    .filter(|rows| !rows.is_empty());
+                v_flex()
+                    .child(row)
+                    .children(install.into_iter().flatten())
+                    .when_some(caps, |el, caps| {
+                        el.child(
+                            div()
+                                .pl(px(16.))
+                                .text_size(metrics::text_xs())
+                                .text_color(ui.text_faint.hsla())
+                                .child(caps),
+                        )
+                    })
             })
             .collect();
         let message: Option<&str> = if !self.enabled {
@@ -148,7 +204,7 @@ impl Render for LspStatusPopover {
                     .gap(px(6.))
                     .child(
                         div()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui.text_faint.hsla())
                             .child("LANGUAGE SERVERS"),
@@ -157,7 +213,7 @@ impl Render for LspStatusPopover {
                     .when_some(message, |el, m| {
                         el.child(
                             div()
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_muted.hsla())
                                 .child(m),
                         )

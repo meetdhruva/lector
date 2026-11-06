@@ -67,6 +67,16 @@ pub mod workspace {
             // v0.4: undo instead of confirm.
             ShowActivity,
             UndoLastOperation,
+            // v0.4 accessibility: keyboard-only operation, interface zoom, motion.
+            FocusNextRegion,
+            FocusPrevRegion,
+            FocusNextControl,
+            FocusPrevControl,
+            ShowContextMenu,
+            UiZoomIn,
+            UiZoomOut,
+            UiZoomReset,
+            ToggleReduceMotion,
         ]
     );
 }
@@ -220,6 +230,59 @@ pub mod diff {
             ToggleIgnoreWhitespace,
             ExpandAllContext,
             OpenInEditor,
+            // v0.4 review UX.
+            ToggleMovedCode,
+            ToggleStructural,
+        ]
+    );
+}
+
+/// `review::*` actions (v0.4 review queue, read-only contexts).
+pub mod review {
+    use gpui::actions;
+    actions!(
+        review,
+        [
+            /// Jump to the next unreviewed hunk across files (risk order).
+            NextUnreviewed,
+            /// Mark the hunk at the cursor reviewed / unreviewed.
+            ToggleHunkReviewed,
+            /// Comment on the line or selection at the cursor (v0.6).
+            AddComment,
+            /// Jump to the next comment thread.
+            NextComment,
+            /// Jump to the previous comment thread.
+            PrevComment,
+            /// Show the Pull Requests panel.
+            ShowPullRequests,
+            /// Submit the pending pull-request review (asks first).
+            SubmitReview,
+            /// Explain how to give Lector a GitHub / GitLab token.
+            SignIn,
+        ]
+    );
+}
+
+/// `agent::*` actions (v0.5 agent sessions; handled by `lector-ui-agent`).
+pub mod agent {
+    use gpui::actions;
+    actions!(
+        agent,
+        [
+            /// Show or hide the Agent panel.
+            TogglePanel,
+            /// Start a new agent session (pick the agent).
+            NewSession,
+            /// Stop the agent's current turn.
+            Cancel,
+            /// Open the last turn's changes in a review tab.
+            ReviewLastTurn,
+            /// Restore the files the last turn changed (undoable).
+            UndoLastTurn,
+            /// Send the selection (and open review comments) to the agent as feedback.
+            SendFeedback,
+            /// Send the prompt typed in the Agent panel.
+            SendPrompt,
         ]
     );
 }
@@ -318,7 +381,8 @@ pub fn humanize_action_name(name: &str) -> String {
         }
         out.push(c);
     }
-    out
+    // "Ui Zoom In" reads as a typo; "UI" is the word.
+    out.replace(": Ui ", ": UI ")
 }
 
 #[cfg(test)]

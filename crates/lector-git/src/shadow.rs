@@ -122,6 +122,24 @@ pub struct IndexRecord {
     pub stage: u8,
 }
 
+/// Options of [`ShadowRepo::fetch_with`].
+#[derive(Clone, Default)]
+pub struct FetchOptions {
+    /// Extra HTTP header for git (`Authorization: Basic ...`); never logged.
+    pub http_header: Option<String>,
+}
+
+impl std::fmt::Debug for FetchOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchOptions")
+            .field(
+                "http_header",
+                &self.http_header.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 /// How [`ShadowRepo::prune_with`] trims the shadow repository.
 #[derive(Clone, Copy, Debug)]
 pub struct PruneOptions {
@@ -199,6 +217,53 @@ fn objects_dir(repo: &Repo) -> PathBuf {
     common.join("objects")
 }
 
+/// Shadow repositories opened in this process: (canonical workdir, shadow), newest last.
+static KNOWN_SHADOWS: std::sync::RwLock<Vec<(PathBuf, ShadowRepo)>> =
+    std::sync::RwLock::new(Vec::new());
+
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn remember_shadow(shadow: &ShadowRepo) {
+    let key = canonical(&shadow.workdir);
+    let mut known = KNOWN_SHADOWS.write().unwrap_or_else(|e| e.into_inner());
+    known.retain(|(_, s)| s.git_dir != shadow.git_dir);
+    known.push((key, shadow.clone()));
+}
+
+fn known_shadows(workdir: &Path) -> Vec<ShadowRepo> {
+    let key = canonical(workdir);
+    let known = KNOWN_SHADOWS.read().unwrap_or_else(|e| e.into_inner());
+    known
+        .iter()
+        .rev()
+        .filter(|(w, _)| *w == key)
+        .map(|(_, s)| s.clone())
+        .collect()
+}
+
+/// The known shadow repository of `workdir` that contains the snapshot commit `commit`.
+pub(crate) fn known_shadow_with(workdir: &Path, commit: Oid) -> Option<ShadowRepo> {
+    known_shadows(workdir).into_iter().find(|s| {
+        s.contains(&ShadowSnapshot {
+            commit,
+            time: 0,
+            note: String::new(),
+        })
+    })
+}
+
+/// [`Repo::load`]'s fallback for blobs that are not in the user's repository.
+pub(crate) fn load_from_known_shadows(workdir: &Path, side: &Side) -> Result<Option<Vec<u8>>> {
+    for shadow in known_shadows(workdir) {
+        if let Ok(Some(bytes)) = shadow.load(side) {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
 impl ShadowRepo {
     /// Where the shadow repository of `workdir` lives under `data_dir`.
     pub fn path_for(data_dir: &Path, workdir: &Path) -> PathBuf {
@@ -220,7 +285,30 @@ impl ShadowRepo {
         let shadow = ShadowRepo { git_dir, workdir };
         let user_objects = objects_dir(repo);
         shadow.ensure_initialized(&user_objects)?;
+        remember_shadow(&shadow);
         Ok(shadow)
+    }
+
+    /// The note (commit subject) of the snapshot commit `commit`, if it is in this shadow.
+    pub fn note_of(&self, commit: Oid) -> Option<String> {
+        let mut c = self.shadow_git();
+        c.args(["log", "-1", "--format=%s"])
+            .arg(commit.to_string())
+            .arg("--");
+        let out = exec(c, "git log", None).ok()?;
+        let note = String::from_utf8_lossy(&out).trim().to_owned();
+        (!note.is_empty()).then_some(note)
+    }
+
+    /// The note of a snapshot commit found in any known shadow repository of `repo`.
+    pub fn known_note(repo: &Repo, commit: Oid) -> Option<String> {
+        known_shadow_with(repo.workdir(), commit).and_then(|s| s.note_of(commit))
+    }
+
+    /// Shadow repositories of `repo` opened by this process (newest first), e.g. to read
+    /// a [`crate::Changeset::Snapshots`]. Empty until [`ShadowRepo::open`] ran once.
+    pub fn known_for(repo: &Repo) -> Vec<ShadowRepo> {
+        known_shadows(repo.workdir())
     }
 
     /// The shadow repository's git directory.
@@ -1430,6 +1518,118 @@ impl ShadowRepo {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_OPTIONAL_LOCKS");
         exec(cmd, "git update-index", Some(&input)).map(drop)
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Fetching pull requests (v0.6, Agent FORGE)
+    // -----------------------------------------------------------------------------------------
+
+    /// Fetches `refspecs` from `url` into the shadow repository (never into the user's
+    /// repository). Destinations must be under `refs/lector/` (and not the snapshot
+    /// namespace). Objects the user's repository already has are not downloaded again
+    /// (alternates); received objects stay packed in the shadow.
+    pub fn fetch(&self, url: &str, refspecs: &[&str]) -> Result<()> {
+        self.fetch_with(url, refspecs, &FetchOptions::default())
+    }
+
+    /// [`ShadowRepo::fetch`] with options (an HTTP `Authorization` header for private
+    /// repositories, passed through the environment so it never shows in `ps`).
+    pub fn fetch_with(&self, url: &str, refspecs: &[&str], opts: &FetchOptions) -> Result<()> {
+        if url.is_empty() || url.starts_with('-') {
+            return Err(Error::Git(format!("invalid fetch URL {url:?}")));
+        }
+        if refspecs.is_empty() {
+            return Err(Error::Git("nothing to fetch".into()));
+        }
+        for spec in refspecs {
+            let spec = spec.strip_prefix('+').unwrap_or(spec);
+            let dst = spec.split_once(':').map(|(_, d)| d).unwrap_or("");
+            if spec.starts_with('-')
+                || !dst.starts_with("refs/lector/")
+                || dst.starts_with("refs/lector/snapshots")
+            {
+                return Err(Error::Git(format!(
+                    "refspec {spec:?} must store into refs/lector/ (not snapshots)"
+                )));
+            }
+        }
+        let _lock = self.lock()?;
+        let mut cmd = self.shadow_git();
+        cmd.args([
+            // Keep what arrives packed: unpacking would go through unpack-objects,
+            // which freshens objects that also exist in the alternates.
+            "-c",
+            "fetch.unpackLimit=1",
+            "-c",
+            "transfer.unpackLimit=1",
+            "-c",
+            "fetch.writeCommitGraph=false",
+            "-c",
+            "fetch.recurseSubmodules=false",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--no-auto-gc",
+            "--no-auto-maintenance",
+            "--no-recurse-submodules",
+        ])
+        .arg(url)
+        .args(refspecs);
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+            cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+        }
+        if let Some(header) = &opts.http_header {
+            cmd.env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env("GIT_CONFIG_VALUE_0", header);
+        }
+        exec(cmd, "git fetch", None).map_err(|e| match (&opts.http_header, e) {
+            // Never echo the header back in an error.
+            (
+                Some(h),
+                Error::GitCommand {
+                    command,
+                    status,
+                    stderr,
+                },
+            ) => Error::GitCommand {
+                command,
+                status,
+                stderr: stderr.replace(h.as_str(), "<redacted>"),
+            },
+            (_, e) => e,
+        })?;
+        Ok(())
+    }
+
+    /// Resolves a ref or commit-ish of the shadow (which also sees the user's objects).
+    pub fn resolve(&self, rev: &str) -> Result<Option<Oid>> {
+        if rev.starts_with('-') {
+            return Ok(None);
+        }
+        let mut cmd = self.shadow_git();
+        cmd.args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("{rev}^{{commit}}"));
+        match exec(cmd, "git rev-parse", None) {
+            Ok(out) => Ok(String::from_utf8_lossy(&out).trim().parse().ok()),
+            Err(Error::GitCommand { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The merge base of two commits of the shadow.
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<Oid>> {
+        if a.starts_with('-') || b.starts_with('-') {
+            return Ok(None);
+        }
+        let mut cmd = self.shadow_git();
+        cmd.args(["merge-base", a, b]);
+        match exec(cmd, "git merge-base", None) {
+            Ok(out) => Ok(String::from_utf8_lossy(&out).trim().parse().ok()),
+            Err(Error::GitCommand { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     // -----------------------------------------------------------------------------------------

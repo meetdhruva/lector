@@ -1,5 +1,6 @@
 //! Reusable, themed widgets.
 
+pub mod anchor;
 pub mod button;
 pub mod context_menu;
 pub mod list;
@@ -21,7 +22,8 @@ pub use modal::ModalLayer;
 pub use picker::{Picker, PickerDelegate};
 pub use tooltip::Tooltip;
 
-use gpui::{div, px, Action, App, Div, KeyBinding, Pixels, SharedString, Styled};
+use crate::scale::px;
+use gpui::{div, Action, App, Div, KeyBinding, Pixels, SharedString, Styled};
 
 /// Horizontal flex row, items centered vertically.
 pub fn h_flex() -> Div {
@@ -34,27 +36,67 @@ pub fn v_flex() -> Div {
 }
 
 /// Spacing and typography tokens shared by all widgets.
+///
+/// Use the functions: they follow the interface scale (`ui.scale`, see [`crate::scale`]).
+/// The upper-case constants are the unscaled base values, kept for code that must not scale.
 pub mod metrics {
     use super::*;
 
     /// Default UI text size.
-    pub const TEXT: Pixels = px(13.);
+    pub const TEXT: Pixels = gpui::px(13.);
     /// Small UI text (secondary labels, status bar).
-    pub const TEXT_SM: Pixels = px(12.);
+    pub const TEXT_SM: Pixels = gpui::px(12.);
     /// Extra-small UI text (badges, section headers).
-    pub const TEXT_XS: Pixels = px(11.);
+    pub const TEXT_XS: Pixels = gpui::px(11.);
     /// Corner radius of controls.
-    pub const RADIUS: Pixels = px(5.);
+    pub const RADIUS: Pixels = gpui::px(5.);
     /// Corner radius of floating surfaces.
-    pub const RADIUS_LG: Pixels = px(8.);
+    pub const RADIUS_LG: Pixels = gpui::px(8.);
     /// Height of list rows.
-    pub const ROW_HEIGHT: Pixels = px(24.);
+    pub const ROW_HEIGHT: Pixels = gpui::px(24.);
     /// Height of the tab bar.
-    pub const TAB_BAR_HEIGHT: Pixels = px(34.);
+    pub const TAB_BAR_HEIGHT: Pixels = gpui::px(34.);
     /// Height of the title bar.
-    pub const TITLE_BAR_HEIGHT: Pixels = px(38.);
+    pub const TITLE_BAR_HEIGHT: Pixels = gpui::px(38.);
     /// Height of the status bar.
-    pub const STATUS_BAR_HEIGHT: Pixels = px(26.);
+    pub const STATUS_BAR_HEIGHT: Pixels = gpui::px(26.);
+
+    /// Default UI text size at the current interface scale.
+    pub fn text() -> Pixels {
+        px(13.)
+    }
+    /// Small UI text at the current interface scale.
+    pub fn text_sm() -> Pixels {
+        px(12.)
+    }
+    /// Extra-small UI text at the current interface scale.
+    pub fn text_xs() -> Pixels {
+        px(11.)
+    }
+    /// Corner radius of controls at the current interface scale.
+    pub fn radius() -> Pixels {
+        px(5.)
+    }
+    /// Corner radius of floating surfaces at the current interface scale.
+    pub fn radius_lg() -> Pixels {
+        px(8.)
+    }
+    /// Height of list rows at the current interface scale.
+    pub fn row_height() -> Pixels {
+        px(24.)
+    }
+    /// Height of the tab bar at the current interface scale.
+    pub fn tab_bar_height() -> Pixels {
+        px(34.)
+    }
+    /// Height of the title bar at the current interface scale.
+    pub fn title_bar_height() -> Pixels {
+        px(38.)
+    }
+    /// Height of the status bar at the current interface scale.
+    pub fn status_bar_height() -> Pixels {
+        px(26.)
+    }
 }
 
 /// Formats a key binding for display: `⌘⇧P` on macOS, `Ctrl+Shift+P` elsewhere.

@@ -1,8 +1,9 @@
 //! Go-to-line modal: `LINE[:COL]`, previewing the target as you type.
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Subscription, Window,
+    div, prelude::*, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
+    Window,
 };
 
 use crate::actions::picker::{Cancel, Confirm};
@@ -155,7 +156,7 @@ impl Render for GoToLine {
                         div()
                             .px(px(14.))
                             .py(px(9.))
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_muted.hsla())
                             .child(hint),
                     ),

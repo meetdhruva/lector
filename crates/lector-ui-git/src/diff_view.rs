@@ -8,9 +8,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    div, img, prelude::*, px, AnyView, App, ClickEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, ImageSource, MouseButton, MouseDownEvent, Pixels, SharedString,
-    Subscription, Task, WeakEntity, Window,
+    div, img, prelude::*, AnyView, App, ClickEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, ImageSource, MouseButton, MouseDownEvent, Pixels, SharedString, Subscription,
+    Task, WeakEntity, Window,
 };
 use lector_config::DiffLayout;
 use lector_diff::{DiffOptions, DiffStats, Whitespace};
@@ -23,6 +23,7 @@ use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
 use lector_ui::icons::{FileIcon, Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
+use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
@@ -31,7 +32,7 @@ use lector_workspace::review::{
 };
 
 use crate::confirm::{confirm, ConfirmSpec};
-use crate::diff_source::{display_rows, hunk_display_starts, DiffColumn, DiffMeta, DiffSource};
+use crate::diff_source::{hunk_display_starts, DiffColumn, DiffMeta, DiffSource};
 use crate::staging::{run_op, unstage_paths_for, GitOp};
 use crate::store::{GitStore, GitStoreEvent};
 use crate::util::{format_size, kind_color, kind_label, split_path};
@@ -76,6 +77,19 @@ pub enum DiffViewEvent {
     ViewedToggled(String, bool),
     /// The diff finished loading.
     Loaded,
+    /// Reviewed hunks of a file changed (path, reviewed flag per hunk).
+    HunksReviewed(String, Vec<bool>),
+    /// `review::NextUnreviewed` and this file has no unreviewed hunk after the cursor.
+    NextUnreviewed,
+    /// The user followed a "Moved from ..." label into another file.
+    GoToMove {
+        /// Repository path of the other file.
+        path: String,
+        /// 0-based line there.
+        line: u32,
+        /// The line is on the old side of that file's diff.
+        old_side: bool,
+    },
 }
 
 /// Effective layout.
@@ -94,7 +108,17 @@ struct LoadedDiff {
     diff: Arc<FileDiff>,
     meta: Arc<DiffMeta>,
     images: Option<ImagePair>,
+    /// Moved code, structural marks and hunk fingerprints (v0.4 review layer).
+    extras: review_layer::Extras,
+    /// Review comment threads of this file (re-anchored to this revision).
+    threads: Vec<lector_app::comments::Thread>,
 }
+
+mod comments;
+pub(crate) use comments::display_author;
+pub use comments::{CommentComposer, ReviewContext};
+mod review_layer;
+pub use review_layer::overlay_colors;
 
 /// The diff view entity.
 pub struct DiffView {
@@ -124,6 +148,12 @@ pub struct DiffView {
     op_task: Option<Task<()>>,
     menu: ContextMenuState,
     focus_handle: FocusHandle,
+    /// Moved code, structural diff, reviewed hunks and provenance (v0.4 review layer).
+    review: review_layer::ReviewState,
+    /// Review key / PR context of comments (v0.6).
+    review_ctx: Option<Rc<ReviewContext>>,
+    /// Inline comment threads (v0.6).
+    comments: comments::DiffComments,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -198,8 +228,12 @@ impl DiffView {
             subscriptions.push(cx.subscribe(view, move |this, view, event, cx| {
                 this.on_code_view_event(column, &view, event, cx)
             }));
+            Self::wire_comment_gutter(view, column, cx.entity().downgrade(), cx);
+            Self::wire_provenance_hover(view, column, cx.entity().downgrade(), cx);
         }
+        let review = review_layer::ReviewState::new(&store.read(cx).settings(cx).review);
         DiffView {
+            review,
             store,
             target: None,
             title_override: None,
@@ -224,6 +258,8 @@ impl DiffView {
             op_task: None,
             menu: ContextMenuState::default(),
             focus_handle: cx.focus_handle(),
+            review_ctx: None,
+            comments: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -260,7 +296,10 @@ impl DiffView {
 
     /// Updates the viewed state without reloading.
     pub fn set_viewed(&mut self, viewed: Option<ViewedTarget>, cx: &mut Context<Self>) {
+        let was = self.viewed.as_ref().map(|v| v.file.viewed);
+        let now = viewed.as_ref().map(|v| v.file.viewed);
         self.viewed = viewed;
+        self.follow_viewed_change(was, now, cx);
         cx.notify();
     }
 
@@ -291,11 +330,17 @@ impl DiffView {
             return;
         };
         let opts = self.options();
+        let (want_moves, want_structural) = (self.review.show_moved, self.review.structural);
         self.loading = true;
+        let repo_override = self.review_ctx.as_ref().and_then(|c| c.repo.clone());
+        let comment_query = self.comment_query(cx);
         let work = cx.background_spawn(async move {
-            let repo = project
-                .repo()
-                .ok_or_else(|| "Not a git repository".to_string())?;
+            let repo = match &repo_override {
+                Some(r) => r,
+                None => project
+                    .repo()
+                    .ok_or_else(|| "Not a git repository".to_string())?,
+            };
             let languages = project.languages().clone();
             let diff = match &target {
                 DiffTarget::Change(change) => {
@@ -318,10 +363,16 @@ impl DiffView {
                 }),
                 _ => None,
             };
+            let threads = comment_query
+                .map(|q| comments::load_threads(&q, &diff))
+                .unwrap_or_default();
+            let extras = review_layer::Extras::compute(&diff, want_moves, want_structural);
             Ok::<_, String>(LoadedDiff {
                 diff: Arc::new(diff),
                 meta: Arc::new(meta),
                 images,
+                extras,
+                threads,
             })
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
@@ -329,13 +380,18 @@ impl DiffView {
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(loaded) => {
+                    Ok(mut loaded) => {
                         this.error = None;
+                        this.set_threads(std::mem::take(&mut loaded.threads));
+                        let extras = loaded.extras.clone();
                         this.loaded = Some(loaded);
+                        this.apply_extras(extras, cx);
+                        this.note_comment_width(cx);
                         this.rebuild(cx);
                         if let Some(k) = this.pending_hunk.take() {
                             this.select_hunk(k, cx);
                         }
+                        this.take_pending_line(cx);
                         cx.emit(DiffViewEvent::Loaded);
                     }
                     Err(e) => this.error = Some(e.into()),
@@ -356,36 +412,28 @@ impl DiffView {
         let diff = loaded.diff.clone();
         let loaded_diff = diff.clone();
         let meta = loaded.meta.clone();
-        let split = Rc::new(display_rows(
-            &diff.split_segments(context),
-            &self.expanded,
-            self.expand_all,
+        let lh = Self::line_height(cx);
+        let split =
+            Rc::new(self.rows_with_comments(&diff, &diff.split_segments(context), false, lh));
+        let unified =
+            Rc::new(self.rows_with_comments(&diff, &diff.unified_segments(context), true, lh));
+        let old = Rc::new(self.review_source(
+            DiffSource::new(
+                diff.clone(),
+                meta.clone(),
+                split.clone(),
+                DiffColumn::Old,
+                word,
+            ),
+            cx,
         ));
-        let unified = Rc::new(display_rows(
-            &diff.unified_segments(context),
-            &self.expanded,
-            self.expand_all,
+        let new = Rc::new(self.review_source(
+            DiffSource::new(diff.clone(), meta.clone(), split, DiffColumn::New, word),
+            cx,
         ));
-        let old = Rc::new(DiffSource::new(
-            diff.clone(),
-            meta.clone(),
-            split.clone(),
-            DiffColumn::Old,
-            word,
-        ));
-        let new = Rc::new(DiffSource::new(
-            diff.clone(),
-            meta.clone(),
-            split,
-            DiffColumn::New,
-            word,
-        ));
-        let uni = Rc::new(DiffSource::new(
-            diff,
-            meta,
-            unified,
-            DiffColumn::Unified,
-            word,
+        let uni = Rc::new(self.review_source(
+            DiffSource::new(diff, meta, unified, DiffColumn::Unified, word),
+            cx,
         ));
         let path = self.absolute_path(cx);
         for (view, src) in [
@@ -405,6 +453,8 @@ impl DiffView {
             Rc::new(hunk_display_starts(&loaded_diff, uni.rows(), true)),
         );
         self.sources = Some((old, new, uni));
+        self.update_comment_layers(cx);
+        self.apply_review_layers(cx);
         cx.notify();
     }
 
@@ -446,6 +496,7 @@ impl DiffView {
         event: &CodeViewEvent,
         cx: &mut Context<Self>,
     ) {
+        self.review_code_event(event, cx);
         match event {
             CodeViewEvent::Scrolled if column != DiffColumn::Unified => {
                 if !self.hunk_actions().is_empty() {
@@ -466,6 +517,7 @@ impl DiffView {
                     cx.notify();
                 }
             }
+            CodeViewEvent::HoverMoved(Some(pos)) => self.comment_hover(column, pos.row, cx),
             CodeViewEvent::SelectionChanged => {
                 let sel = view.read(cx).selection();
                 if !sel.is_empty() {
@@ -629,7 +681,7 @@ impl DiffView {
         let ix = match src.rows().get(row) {
             Some(crate::diff_source::DisplayRow::Row(ix)) => *ix,
             Some(crate::diff_source::DisplayRow::Fold(r)) => r.start,
-            None => 0,
+            Some(crate::diff_source::DisplayRow::Gap(_)) | None => 0,
         };
         Some(if unified {
             loaded.diff.new_line_near_unified_row(ix)
@@ -656,26 +708,12 @@ impl DiffView {
 
     /// Toggles "viewed" (standalone views persist it themselves).
     pub fn toggle_viewed(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = &mut self.viewed else {
+        let Some(target) = &self.viewed else {
             return;
         };
         let new_state = !target.file.viewed;
-        let store = self.store.read(cx);
-        if let Some(repo) = store.repo() {
-            let root = repo.workdir().to_path_buf();
-            if let Err(e) = review::set_viewed_with(
-                &store.review,
-                &root,
-                &target.key,
-                &mut target.file,
-                new_state,
-            ) {
-                tracing::warn!("could not save viewed state: {e}");
-            }
-        }
-        let path = target.file.path().to_string();
-        cx.emit(DiffViewEvent::ViewedToggled(path, new_state));
-        cx.notify();
+        // Every hunk follows the file (marking a file viewed reviews all its hunks).
+        self.set_viewed_state(new_state, true, cx);
     }
 
     // Staging (v0.2).
@@ -972,7 +1010,8 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let actions = self.hunk_actions();
-        if actions.is_empty() {
+        let reviewable = self.hunk_review_enabled();
+        if actions.is_empty() && !reviewable {
             return Vec::new();
         }
         let theme = cx.theme().clone();
@@ -1009,7 +1048,10 @@ impl DiffView {
                 })
                 .bg(ui.elevated.hsla())
                 .shadow_sm()
-                .text_size(metrics::TEXT_XS);
+                .text_size(metrics::text_xs());
+            if reviewable {
+                bar = bar.child(self.reviewed_chip(k, cx));
+            }
             for action in actions {
                 let (label, icon, tip): (&str, IconName, &str) = match action {
                     HunkAction::Stage => ("Stage", IconName::Plus, "Stage Hunk (s)"),
@@ -1039,6 +1081,8 @@ impl DiffView {
                                 .color(ui.text_muted.hsla()),
                         )
                         .child(label)
+                        .tab_index(0)
+                        .focus(lector_ui::a11y::ring_focus(cx))
                         .tooltip(Tooltip::text(tip))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
@@ -1089,6 +1133,7 @@ impl DiffView {
         let viewed = self.viewed.as_ref().map(|v| v.file.viewed);
         let hunks = self.hunk_starts().len();
         let split = layout == Layout::Split;
+        let review_controls = self.render_review_controls(cx);
         let seg =
             |id: &'static str, label: &'static str, icon: IconName, selected: bool, l: Layout| {
                 let accent = ui.text.hsla();
@@ -1099,7 +1144,7 @@ impl DiffView {
                     .px(px(8.))
                     .gap(px(5.))
                     .rounded(px(4.))
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .cursor_pointer()
                     .text_color(if selected { accent } else { faint })
                     .when(selected, |el| el.bg(ui.tab_active_bg.hsla()).shadow_sm())
@@ -1109,6 +1154,8 @@ impl DiffView {
                     } else {
                         faint
                     }))
+                    .tab_index(0)
+                    .focus(lector_ui::a11y::ring_focus(cx))
                     .child(label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.set_layout(l, window, cx)
@@ -1139,7 +1186,7 @@ impl DiffView {
                     .when(!dir.is_empty(), |el| {
                         el.child(
                             div()
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_faint.hsla())
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -1155,7 +1202,7 @@ impl DiffView {
                         .px(px(6.))
                         .py(px(1.))
                         .rounded(px(4.))
-                        .text_size(metrics::TEXT_XS)
+                        .text_size(metrics::text_xs())
                         .font_weight(FontWeight::MEDIUM)
                         .bg(color.opacity(0.14))
                         .text_color(color)
@@ -1167,7 +1214,7 @@ impl DiffView {
             .when(self.loading, |el| {
                 el.child(
                     div()
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child("Loading…"),
                 )
@@ -1178,7 +1225,7 @@ impl DiffView {
                         .gap(px(2.))
                         .child(
                             div()
-                                .text_size(metrics::TEXT_XS)
+                                .text_size(metrics::text_xs())
                                 .text_color(ui.text_faint.hsla())
                                 .mr(px(2.))
                                 .child(format!(
@@ -1207,6 +1254,7 @@ impl DiffView {
                         ),
                 )
             })
+            .children(review_controls)
             .child(
                 IconButton::new(
                     "expand-all",
@@ -1298,7 +1346,7 @@ impl DiffView {
                 .when_some(detail, |el, d| {
                     el.child(
                         div()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_faint.hsla())
                             .child(d),
                     )
@@ -1362,7 +1410,7 @@ impl DiffView {
                         .p(px(16.))
                         .child(
                             div()
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_muted.hsla())
                                 .child(match &image {
                                     Some(_) => format!("{label} · {}", format_size(size)),
@@ -1457,7 +1505,7 @@ pub fn stats_label(s: DiffStats, theme: &lector_theme::Theme) -> impl IntoElemen
     h_flex()
         .flex_none()
         .gap(px(6.))
-        .text_size(metrics::TEXT_SM)
+        .text_size(metrics::text_sm())
         .font_weight(FontWeight::MEDIUM)
         .child(
             div()
@@ -1489,7 +1537,7 @@ pub fn viewed_checkbox(id: &'static str, viewed: bool, cx: &App) -> gpui::Statef
             ui.border.hsla()
         })
         .when(viewed, |el| el.bg(accent.opacity(0.12)))
-        .text_size(metrics::TEXT_SM)
+        .text_size(metrics::text_sm())
         .text_color(if viewed {
             ui.text.hsla()
         } else {
@@ -1515,6 +1563,7 @@ pub fn viewed_checkbox(id: &'static str, viewed: bool, cx: &App) -> gpui::Statef
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.relayout_comments_if_resized(window, cx);
         // Focused while there was nothing to show (loading, "No changes"): hand
         // the focus to the code view once the diff appears.
         if self.focus_handle.is_focused(window) && self.shows_code_views() {
@@ -1540,6 +1589,25 @@ impl Render for DiffView {
                     this.toggle_layout(window, cx)
                 }),
             )
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::AddComment, window, cx| {
+                    this.add_comment_at_cursor(window, cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::NextComment, window, cx| {
+                    if !this.go_to_comment(1, window, cx) {
+                        cx.propagate();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::PrevComment, window, cx| {
+                    if !this.go_to_comment(-1, window, cx) {
+                        cx.propagate();
+                    }
+                },
+            ))
             .on_action(cx.listener(|this, _: &diff_actions::NextHunk, _, cx| {
                 if !this.go_to_hunk(1, cx) {
                     cx.propagate();
@@ -1565,6 +1633,26 @@ impl Render for DiffView {
                     this.open_in_editor(window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &diff_actions::ToggleMovedCode, _, cx| {
+                    this.toggle_moved_code(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &diff_actions::ToggleStructural, _, cx| {
+                    this.toggle_structural(cx)
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::ToggleHunkReviewed, _, cx| {
+                    this.toggle_hunk_reviewed_at_cursor(cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::review::NextUnreviewed, _, cx| {
+                    this.next_unreviewed_action(cx)
+                },
+            ))
             .on_action(cx.listener(|this, _: &diff_actions::ToggleViewed, _, cx| {
                 if this.viewed.is_some() {
                     this.toggle_viewed(cx)
@@ -1627,6 +1715,7 @@ impl Render for DiffView {
                 }),
             )
             .child(self.render_header(layout, cx))
+            .children(self.render_structural_notice(cx))
             .when_some(self.op_error.clone(), |el, e| {
                 el.child(
                     h_flex()
@@ -1649,7 +1738,7 @@ impl Render for DiffView {
                                 .flex_1()
                                 .max_h(px(120.))
                                 .overflow_y_scroll()
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text.hsla())
                                 .child(e),
                         )
@@ -1683,6 +1772,7 @@ impl Render for DiffView {
                     .children(toolbars),
             )
             .children(self.menu.render())
+            .children(self.render_provenance(window, cx))
     }
 }
 

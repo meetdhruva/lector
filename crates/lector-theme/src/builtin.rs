@@ -227,6 +227,9 @@ fn build(p: &Palette) -> Theme {
         border: c(p.border),
         border_variant: c(p.border_variant),
         border_focused: accent,
+        // Default themes ring in the accent; high-contrast themes use the text color
+        // (white / black) so the ring also reads against accent-filled controls.
+        focus_ring: if hc { text } else { accent },
         text,
         text_muted: c(p.muted),
         text_faint: c(p.faint),
@@ -573,5 +576,119 @@ mod tests {
             }
         }
         finish();
+    }
+
+    /// Every surface a focusable control can sit on (WCAG 1.4.11 non-text contrast, 3:1).
+    fn surfaces(theme: &Theme) -> Vec<(&'static str, Color)> {
+        let ui = &theme.ui;
+        vec![
+            ("background", ui.background),
+            ("surface", ui.surface),
+            ("elevated", ui.elevated),
+            ("panel", ui.panel),
+            ("tab_bar_bg", ui.tab_bar_bg),
+            ("status_bar_bg", ui.status_bar_bg),
+            ("title_bar_bg", ui.title_bar_bg),
+            ("input_bg", ui.input_bg),
+            ("tooltip_bg", ui.tooltip_bg),
+            ("active row", ui.active.over(ui.surface)),
+            ("hover row", ui.hover.over(ui.surface)),
+            ("selection", ui.selection.over(ui.background)),
+        ]
+    }
+
+    #[test]
+    fn focus_ring_has_non_text_contrast_on_every_surface() {
+        for theme in builtin_themes()
+            .into_iter()
+            .flat_map(|t| [t.clone(), t.with_colorblind_diff()])
+        {
+            let hc = theme.name.contains("High Contrast");
+            // High-contrast themes aim for AAA-like 7:1 for the ring too.
+            let min = if hc { 7.0 } else { 3.0 };
+            for (what, surface) in surfaces(&theme) {
+                assert_contrast(
+                    &theme.name,
+                    &format!("focus ring on {what}"),
+                    theme.ui.focus_ring,
+                    surface,
+                    min,
+                );
+            }
+            assert_eq!(theme.ui.focus_ring.a, 255, "the ring is opaque");
+        }
+        finish();
+    }
+
+    /// Status colors carry text (badges, banners, diagnostics) and tinted fills, so they must
+    /// read as text on the surfaces, and the foreground must stay readable on their tints
+    /// (merge editor regions, risk and status badges, activity log, agent panel).
+    #[test]
+    fn status_colors_are_readable_text_and_tints() {
+        for theme in builtin_themes() {
+            let hc = theme.name.contains("High Contrast");
+            let min = if hc { 7.0 } else { 4.5 };
+            let ui = &theme.ui;
+            let status = [
+                ("error", ui.error),
+                ("warning", ui.warning),
+                ("success", ui.success),
+                ("info", ui.info),
+                ("link", ui.link),
+                ("conflicted", theme.git.conflicted),
+            ];
+            for (what, color) in status {
+                for (on, bg) in [
+                    ("background", ui.background),
+                    ("surface", ui.surface),
+                    ("elevated", ui.elevated),
+                ] {
+                    assert_contrast(&theme.name, &format!("{what} on {on}"), color, bg, 4.5);
+                }
+                for alpha in [0.08, 0.15, 0.26] {
+                    let tint = color.with_alpha(alpha).over(ui.surface);
+                    assert_contrast(
+                        &theme.name,
+                        &format!("text on {what} tint {alpha}"),
+                        ui.text,
+                        tint,
+                        min,
+                    );
+                    if alpha <= 0.15 {
+                        assert_contrast(
+                            &theme.name,
+                            &format!("text_muted on {what} tint {alpha}"),
+                            ui.text_muted,
+                            tint,
+                            4.5,
+                        );
+                    }
+                }
+            }
+        }
+        finish();
+    }
+
+    /// Meaning is never carried by color alone in the UI, but the colors must still be
+    /// distinct from each other for users who do see them: ours/theirs, added/removed.
+    #[test]
+    fn paired_status_colors_differ_in_lightness_or_hue() {
+        for theme in builtin_themes()
+            .into_iter()
+            .flat_map(|t| [t.clone(), t.with_colorblind_diff()])
+        {
+            let d = &theme.diff;
+            let ratio = d.added_text.contrast_ratio(d.removed_text);
+            let lum_apart = ratio > 1.15 || (1.0 / ratio) > 1.15;
+            let hue_apart = (d.added_text.r as i32 - d.removed_text.r as i32).abs()
+                + (d.added_text.g as i32 - d.removed_text.g as i32).abs()
+                + (d.added_text.b as i32 - d.removed_text.b as i32).abs()
+                > 150;
+            assert!(
+                lum_apart || hue_apart,
+                "{}: added and removed text colors are too similar",
+                theme.name
+            );
+        }
     }
 }

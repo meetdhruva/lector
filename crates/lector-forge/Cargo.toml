@@ -9,12 +9,14 @@ authors.workspace = true
 description = "Code host adapters for Lector (GitHub, GitLab): pull requests, review threads, reviews."
 
 [dependencies]
-lector-git.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# Blocking HTTP: rustls, system roots via the platform verifier, proxies from the environment.
+ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
+# OS keychain (macOS Keychain, Windows Credential Manager, Linux kernel keyutils).
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 
 [dev-dependencies]
 tempfile.workspace = true

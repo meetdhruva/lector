@@ -13,9 +13,8 @@
 //!   `LECTOR_WINDOW_CONTROLS=1` forces them (window managers without
 //!   decorations, headless screenshots).
 
-use gpui::{
-    div, prelude::*, px, rgb, AnyElement, App, Decorations, Hsla, Window, WindowControlArea,
-};
+use crate::scale::px;
+use gpui::{div, prelude::*, rgb, AnyElement, App, Decorations, Hsla, Window, WindowControlArea};
 
 use crate::actions::workspace::CloseWindow;
 use crate::components::{h_flex, metrics, Tooltip};
@@ -186,7 +185,7 @@ fn windows_controls(window: &mut Window, cx: &mut App) -> AnyElement {
             .items_center()
             .justify_center()
             .w(px(46.))
-            .h(metrics::TITLE_BAR_HEIGHT)
+            .h(metrics::title_bar_height())
             .font_family(font)
             .text_size(px(10.))
             .text_color(fg)
@@ -203,7 +202,7 @@ fn windows_controls(window: &mut Window, cx: &mut App) -> AnyElement {
     h_flex()
         .id("window-controls")
         .flex_none()
-        .h(metrics::TITLE_BAR_HEIGHT)
+        .h(metrics::title_bar_height())
         .ml(px(6.))
         .child(button("win-minimize", "\u{e921}", WindowControlArea::Min))
         .child(button(

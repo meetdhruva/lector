@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    prelude::*, px, App, Axis, ClipboardItem, Entity, Focusable, SharedString, Subscription, Task,
+    prelude::*, App, Axis, ClipboardItem, Entity, Focusable, SharedString, Subscription, Task,
     Window,
 };
 use lector_config::{PaneState, Session, TabKind, TabState};
@@ -458,6 +458,13 @@ impl Workspace {
     fn start_lsp_status(&mut self, cx: &mut gpui::Context<Self>) {
         self.integ.tasks.push(cx.spawn(async move |this, cx| loop {
             let alive = this.update(cx, |this, cx| {
+                let missing = this
+                    .relevant_lsp_servers(cx)
+                    .into_iter()
+                    .find(|s| matches!(s.state, ServerState::NotInstalled));
+                if let Some(missing) = missing {
+                    this.offer_lsp_install(&missing.name, cx);
+                }
                 let status = this.compute_lsp_status(cx);
                 if status != this.integ.lsp_status {
                     this.integ.lsp_status = status;
@@ -473,14 +480,17 @@ impl Workspace {
         }));
     }
 
-    fn compute_lsp_status(&self, cx: &App) -> Option<(SharedString, SharedString)> {
-        let lsp = self.project.lsp()?;
+    /// The servers of the active file's language (all servers when no file is active).
+    fn relevant_lsp_servers(&self, cx: &App) -> Vec<lector_lsp::ServerStatus> {
+        let Some(lsp) = self.project.lsp() else {
+            return Vec::new();
+        };
         let statuses = lsp.status();
         let active = self.active_file_view(cx);
         let language = active
             .as_ref()
             .and_then(|v| v.read(cx).document(cx).and_then(|d| d.language().cloned()));
-        let relevant: Vec<_> = match &language {
+        match &language {
             Some(lang) => {
                 let servers: Vec<String> = lector_lsp::builtin_servers()
                     .into_iter()
@@ -488,13 +498,16 @@ impl Workspace {
                     .map(|c| c.name)
                     .collect();
                 statuses
-                    .iter()
+                    .into_iter()
                     .filter(|s| servers.contains(&s.name))
-                    .cloned()
                     .collect()
             }
-            None => statuses.clone(),
-        };
+            None => statuses,
+        }
+    }
+
+    fn compute_lsp_status(&self, cx: &App) -> Option<(SharedString, SharedString)> {
+        let relevant = self.relevant_lsp_servers(cx);
         let status = relevant.first()?;
         let (label, tip) = match &status.state {
             ServerState::Running => (
@@ -1554,7 +1567,7 @@ impl Workspace {
         };
         self.sidebar_visible = session.sidebar_visible;
         if session.sidebar_width >= 120. {
-            self.sidebar_width = px(session.sidebar_width.min(900.));
+            self.sidebar_width = gpui::px(session.sidebar_width.min(900.));
         }
         if let Some(panel) = SidebarPanel::ALL
             .iter()

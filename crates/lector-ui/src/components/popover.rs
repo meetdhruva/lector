@@ -1,7 +1,8 @@
 //! Floating surfaces anchored to a point (popovers, context menus).
 
+use crate::scale::px;
 use gpui::{
-    anchored, deferred, div, prelude::*, px, App, Corner, DismissEvent, Div, Entity, Focusable,
+    anchored, deferred, div, prelude::*, App, Corner, DismissEvent, Div, Entity, Focusable,
     ManagedView, Pixels, Point, Subscription, Window,
 };
 
@@ -15,7 +16,7 @@ pub fn surface(cx: &App) -> Div {
         .bg(ui.elevated.hsla())
         .border_1()
         .border_color(ui.border.hsla())
-        .rounded(metrics::RADIUS_LG)
+        .rounded(metrics::radius_lg())
         .shadow_lg()
         .overflow_hidden()
 }

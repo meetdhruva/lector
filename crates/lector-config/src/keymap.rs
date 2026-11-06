@@ -93,6 +93,7 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
         add(w, "ctrl-shift-w".into(), "workspace::CloseWindow");
         add(w, "f11".into(), "workspace::ToggleFullScreen");
         add(w, "alt-f".into(), "workspace::ShowAppMenu");
+        add(w, "f10".into(), "workspace::ShowAppMenu");
     } else {
         add(w, "cmd-ctrl-f".into(), "workspace::ToggleFullScreen");
         add(w, "cmd-m".into(), "workspace::Minimize");
@@ -207,16 +208,49 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(c, "shift-f8".into(), "editor::PrevDiagnostic");
     add(w, format!("{m}-shift-m"), "workspace::ShowProblems");
     add(w, format!("{m}-alt-z"), "workspace::UndoLastOperation");
+    // v0.5 agent sessions.
+    add(w, format!("{m}-alt-i"), "agent::TogglePanel");
+    add(w, format!("{m}-shift-alt-z"), "agent::UndoLastTurn");
+    add(w, format!("{m}-alt-r"), "agent::ReviewLastTurn");
+    add(w, format!("{m}-alt-f"), "agent::SendFeedback");
+    add("AgentComposer", format!("{m}-enter"), "agent::SendPrompt");
+    add("AgentPanel", "escape".into(), "agent::Cancel");
+    // v0.4 accessibility: keyboard-only operation, interface zoom.
+    add(w, "f6".into(), "workspace::FocusNextRegion");
+    add(w, "shift-f6".into(), "workspace::FocusPrevRegion");
+    add(w, "shift-f10".into(), "workspace::ShowContextMenu");
+    add(w, "menu".into(), "workspace::ShowContextMenu");
+    add(w, "tab".into(), "workspace::FocusNextControl");
+    add(w, "shift-tab".into(), "workspace::FocusPrevControl");
+    add(w, format!("{m}-alt-="), "workspace::UiZoomIn");
+    add(w, format!("{m}-alt-+"), "workspace::UiZoomIn");
+    add(w, format!("{m}-alt--"), "workspace::UiZoomOut");
+    add(w, format!("{m}-alt-0"), "workspace::UiZoomReset");
     add(c, "escape".into(), "editor::ClearSelection");
 
     let d = "DiffView";
     add(d, "alt-n".into(), "diff::NextHunk");
     add(d, "alt-p".into(), "diff::PrevHunk");
-    add(d, "n".into(), "diff::NextHunk");
-    add(d, "p".into(), "diff::PrevHunk");
+    // Plain letters bind only where nothing is typed: a text field inside the diff / review
+    // tab (comment box, find bar) carries `TextInput`, which switches them off.
+    let dp = "DiffView && !TextInput";
+    add(dp, "n".into(), "diff::NextHunk");
+    add(dp, "p".into(), "diff::PrevHunk");
     add(d, "alt-j".into(), "diff::NextFile");
     add(d, "alt-k".into(), "diff::PrevFile");
-    add(d, "v".into(), "diff::ToggleViewed");
+    add(dp, "v".into(), "diff::ToggleViewed");
+    // v0.4 review queue: mark the hunk at the cursor reviewed, jump to the next unreviewed hunk.
+    add(dp, "r".into(), "review::ToggleHunkReviewed");
+    add(dp, "]".into(), "review::NextUnreviewed");
+    add(d, "alt-shift-j".into(), "review::NextUnreviewed");
+    // v0.6 review comments and pull requests.
+    add(dp, "c".into(), "review::AddComment");
+    add(d, "alt-shift-n".into(), "review::NextComment");
+    add(d, "alt-shift-p".into(), "review::PrevComment");
+    add(d, format!("{m}-alt-enter"), "review::SubmitReview");
+    add(w, format!("{m}-alt-p"), "review::ShowPullRequests");
+    add(d, format!("{m}-alt-m"), "diff::ToggleMovedCode");
+    add(d, format!("{m}-alt-t"), "diff::ToggleStructural");
     add(d, format!("{m}-alt-d"), "diff::ToggleLayout");
     // v0.2: staging from the diff view. No bare-letter bindings: a stray key
     // (e.g. typing after Ctrl+F, which does not open a find bar in diffs) must
@@ -342,6 +376,33 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Plain-letter and bracket keys only bind in read-only review contexts and never where text
+    /// is typed.
+    #[test]
+    fn plain_keys_are_review_only_and_not_in_text_inputs() {
+        for p in [Platform::MacOS, Platform::Linux, Platform::Windows] {
+            for b in default_keymap(p) {
+                let first = b.keys.split(' ').next().unwrap_or_default();
+                let plain =
+                    first.len() == 1 && first != " " && !first.chars().all(char::is_numeric);
+                if plain && b.action.starts_with("review::")
+                    || b.action.starts_with("diff::") && plain
+                {
+                    let ctx = b.context.as_deref().unwrap_or_default();
+                    assert!(
+                        ctx.starts_with("DiffView") && ctx.contains("!TextInput"),
+                        "{p:?}: {} on plain `{}` needs a read-only context, got `{ctx}`",
+                        b.action,
+                        b.keys
+                    );
+                }
+            }
+            let km = default_keymap(p);
+            assert_eq!(find(&km, "review::NextUnreviewed"), ["]", "alt-shift-j"]);
+            assert_eq!(find(&km, "review::ToggleHunkReviewed"), ["r"]);
         }
     }
 

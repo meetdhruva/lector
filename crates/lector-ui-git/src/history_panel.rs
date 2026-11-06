@@ -5,16 +5,19 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    canvas, div, point, prelude::*, px, quad, size, App, BorderStyle, Bounds, ClipboardItem,
-    Entity, FocusHandle, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent, PathBuilder,
-    Pixels, Point, SharedString, Subscription, Task, Window,
+    canvas, div, point, prelude::*, quad, size, App, BorderStyle, Bounds, ClipboardItem, Entity,
+    FocusHandle, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent, PathBuilder, Pixels,
+    Point, SharedString, Subscription, Task, Window,
 };
 use lector_git::{graph, Changeset, CommitInfo, EdgeKind, GraphRow, LogQuery, Oid, RefKind};
+use lector_ui::actions::picker as picker_actions;
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::list::{virtual_list, VirtualListState};
 use lector_ui::components::text_input::{TextInput, TextInputEvent};
 use lector_ui::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
+use lector_ui::keymap::contexts;
+use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
 use lector_workspace::review::WORKDIR_REV;
 
@@ -135,7 +138,7 @@ impl HistoryPanel {
             list: VirtualListState::new(),
             error: None,
             menu: ContextMenuState::default(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             _subscriptions: subs,
         };
         panel.reload(cx);
@@ -255,6 +258,26 @@ impl HistoryPanel {
                 format!("{}:{}–{}", p, l.start + 1, l.end),
             ),
         }
+    }
+
+    fn selected_index(&self) -> Option<usize> {
+        let oid = self.selected?;
+        self.commits.iter().position(|c| c.oid == oid)
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.commits.len();
+        if count == 0 {
+            return;
+        }
+        let next = match self.selected_index() {
+            Some(ix) => (ix as isize + delta).clamp(0, count as isize - 1) as usize,
+            None if delta > 0 => 0,
+            None => count - 1,
+        };
+        self.selected = Some(self.commits[next].oid);
+        self.list.reveal(next);
+        cx.notify();
     }
 
     fn open_commit(
@@ -448,7 +471,7 @@ impl HistoryPanel {
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .text_size(metrics::TEXT)
+                                .text_size(metrics::text())
                                 .text_color(ui.text.hsla())
                                 .when(is_head, |el| el.font_weight(FontWeight::MEDIUM))
                                 .child(summary),
@@ -458,7 +481,7 @@ impl HistoryPanel {
                         h_flex()
                             .w_full()
                             .gap(px(5.))
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_faint.hsla())
                             .whitespace_nowrap()
                             .overflow_hidden()
@@ -707,9 +730,37 @@ impl Render for HistoryPanel {
         let count = self.commits.len();
         let entity = cx.entity();
         let file_scope = matches!(self.scope, HistoryScope::File(_) | HistoryScope::Lines(..));
+        let ring = lector_ui::a11y::ring_color(cx);
         v_flex()
             .id("history-panel")
+            .key_context(contexts::LIST_PANEL)
             .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &picker_actions::SelectNext, _, cx| {
+                    this.move_selection(1, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &picker_actions::SelectPrev, _, cx| {
+                this.move_selection(-1, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &picker_actions::Confirm, window, cx| {
+                    if let Some(ix) = this.selected_index() {
+                        this.open_commit(ix, false, window, cx);
+                    }
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::workspace::ShowContextMenu, window, cx| {
+                    match this.selected_index() {
+                        Some(ix) => {
+                            let position = this.list.row_anchor(ix, px(ROW_H));
+                            this.deploy_menu(ix, position, window, cx);
+                        }
+                        None => cx.propagate(),
+                    }
+                },
+            ))
             .size_full()
             .child(
                 v_flex()
@@ -748,7 +799,7 @@ impl Render for HistoryPanel {
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_ellipsis()
-                                            .text_size(metrics::TEXT_SM)
+                                            .text_size(metrics::text_sm())
                                             .child(label),
                                     )
                                     .child(
@@ -756,13 +807,13 @@ impl Render for HistoryPanel {
                                             .size(IconSize::XSmall)
                                             .color(ui.text_faint.hsla()),
                                     )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                                            this.deploy_scope_menu(e.position, window, cx);
-                                            cx.stop_propagation();
-                                        }),
-                                    ),
+                                    .tab_index(0)
+                                    .focus(move |s| lector_ui::a11y::focus_ring_style(s, ring))
+                                    .on_click(cx.listener(
+                                        |this, e: &gpui::ClickEvent, window, cx| {
+                                            this.deploy_scope_menu(e.position(), window, cx);
+                                        },
+                                    )),
                             )
                             .when(file_scope, |el| {
                                 el.child(
@@ -805,7 +856,7 @@ impl Render for HistoryPanel {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(metrics::TEXT_SM)
+                                    .text_size(metrics::text_sm())
                                     .child(self.filter.clone()),
                             ),
                     ),
@@ -814,7 +865,7 @@ impl Render for HistoryPanel {
                 el.child(
                     div()
                         .p(px(12.))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(e),
                 )
@@ -823,7 +874,7 @@ impl Render for HistoryPanel {
                 el.child(
                     div()
                         .p(px(12.))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(if self.loading.is_some() {
                             "Loading…"

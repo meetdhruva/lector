@@ -1,0 +1,7 @@
+[
+  {"iid": 3, "title": "Cache tokens per host", "description": "", "state": "opened", "draft": false,
+   "author": {"username": "grace"}, "web_url": "https://gitlab.corp/group/sub/app/-/merge_requests/3",
+   "created_at": "2026-11-01T09:00:00Z", "updated_at": "2026-11-05T09:00:00Z",
+   "source_branch": "token-cache", "target_branch": "main", "sha": "aaaa000000000000000000000000000000000000",
+   "reviewers": [{"username": "ada"}], "labels": ["backend"], "user_notes_count": 4}
+]

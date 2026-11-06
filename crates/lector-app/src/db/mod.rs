@@ -583,6 +583,46 @@ impl Db {
         Ok(out)
     }
 
+    // ----- comment threads (v0.6, `lector_app::comments`) ----------------------
+    // Stored in the `comments` table under `t\0<repo>\0<id>`; legacy [`Comment`]
+    // rows use `<repo>\0<id>` (repos are absolute paths, so prefixes never collide).
+
+    fn thread_key(repo: &str, id: u64) -> String {
+        format!("t\0{repo}\0{id:020}")
+    }
+
+    /// Next id for a comment thread or comment (shared sequence with legacy comments).
+    pub fn next_comment_id(&self) -> DbResult<u64> {
+        let tx = self.inner.db.begin_write()?;
+        let id;
+        {
+            let mut meta = tx.open_table(META)?;
+            id = meta.get(KEY_COMMENT_SEQ)?.map(|g| g.value()).unwrap_or(0) + 1;
+            meta.insert(KEY_COMMENT_SEQ, id)?;
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Stores (or with `None` deletes) a serialized comment thread.
+    pub fn put_comment_thread(&self, repo: &str, id: u64, value: Option<&[u8]>) -> DbResult<()> {
+        self.put_bytes(COMMENTS, &Self::thread_key(repo, id), value)
+    }
+
+    /// One serialized comment thread.
+    pub fn comment_thread(&self, repo: &str, id: u64) -> DbResult<Option<Vec<u8>>> {
+        self.get_bytes(COMMENTS, &Self::thread_key(repo, id))
+    }
+
+    /// Every serialized comment thread of a repository, oldest first.
+    pub fn comment_threads(&self, repo: &str) -> DbResult<Vec<Vec<u8>>> {
+        Ok(self
+            .scan_prefix(COMMENTS, &format!("t\0{repo}\0"))?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
+    }
+
     // ----- stores ----------------------------------------------------------------
 
     /// Viewed marks backed by this database.

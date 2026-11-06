@@ -1,7 +1,13 @@
 # Packages a built Lector binary for Windows.
 #
 #   pwsh scripts/package-windows.ps1 -Binary target\x86_64-pc-windows-msvc\dist\lector.exe `
+#        -CliBinary target\x86_64-pc-windows-msvc\dist\lector-cli.exe `
 #        -Version 0.1.0 -Arch x64 -OutDir dist
+#
+# lector.exe is a GUI-subsystem program (no console). -CliBinary is the console build of the
+# command line (crate lector-cli, no GUI dependencies); it is installed twice: as lector-cli.exe
+# and as lector.com. In a terminal `lector` resolves .com before .exe, so `lector status` and
+# `lector mcp` get a real console, and `lector .` still opens the app (lector.com starts lector.exe).
 #
 # Produces in -OutDir:
 #   Lector-<version>-windows-<arch>-portable.zip   portable build (settings stay next to the exe)
@@ -9,6 +15,7 @@
 #   Lector-<version>-windows-<arch>.msi            MSI for managed deployment (WiX v5)
 param(
   [Parameter(Mandatory = $true)][string]$Binary,
+  [Parameter(Mandatory = $true)][string]$CliBinary,
   [Parameter(Mandatory = $true)][string]$Version,
   [Parameter(Mandatory = $true)][ValidateSet("x64", "arm64")][string]$Arch,
   [Parameter(Mandatory = $true)][string]$OutDir
@@ -23,6 +30,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "third-party") | Out
 
 # --- staging ------------------------------------------------------------------------
 Copy-Item $Binary (Join-Path $Stage "lector.exe")
+Copy-Item $CliBinary (Join-Path $Stage "lector-cli.exe")
+Copy-Item $CliBinary (Join-Path $Stage "lector.com")
 Copy-Item (Join-Path $Root "assets\app-icon\lector.ico") $Stage
 foreach ($f in "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE") {
   Copy-Item (Join-Path $Root $f) $Stage

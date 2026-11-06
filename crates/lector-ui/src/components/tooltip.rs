@@ -1,6 +1,7 @@
 //! Tooltips: a small floating label with an optional key binding hint.
 
-use gpui::{div, prelude::*, px, Action, AnyView, App, SharedString, Window};
+use crate::scale::px;
+use gpui::{div, prelude::*, Action, AnyView, App, SharedString, Window};
 
 use super::{binding_text_for_action, h_flex, metrics, v_flex};
 use crate::theme::{ActiveTheme, ColorExt};
@@ -74,9 +75,9 @@ impl Render for Tooltip {
                 .bg(ui.tooltip_bg.hsla())
                 .border_1()
                 .border_color(ui.tooltip_border.hsla())
-                .rounded(metrics::RADIUS)
+                .rounded(metrics::radius())
                 .shadow_md()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.tooltip_fg.hsla())
                 .child(
                     h_flex()
@@ -86,7 +87,7 @@ impl Render for Tooltip {
                         .when_some(self.key_binding.clone(), |el, kb| {
                             el.child(
                                 div()
-                                    .text_size(metrics::TEXT_XS)
+                                    .text_size(metrics::text_xs())
                                     .text_color(ui.text_muted.hsla())
                                     .child(kb),
                             )
@@ -95,7 +96,7 @@ impl Render for Tooltip {
                 .when_some(self.meta.clone(), |el, meta| {
                     el.child(
                         div()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_muted.hsla())
                             .child(meta),
                     )

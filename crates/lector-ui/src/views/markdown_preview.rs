@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use std::time::Duration;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle,
+    div, prelude::*, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle,
     SharedString, Subscription, Task, Window,
 };
 use lector_workspace::Project;

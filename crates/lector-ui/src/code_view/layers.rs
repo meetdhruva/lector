@@ -123,6 +123,12 @@ impl CodeView {
         self.layers.widgets.contains_key(owner) || self.layers.backgrounds.contains_key(owner)
     }
 
+    /// Width of the text area in the last painted frame (row widgets that span
+    /// the view, e.g. inline comment threads).
+    pub fn text_width(&self) -> Option<Pixels> {
+        Some(self.last_layout.as_ref()?.text_bounds.size.width)
+    }
+
     /// Top of `row` relative to the view's top edge in the last painted
     /// frame (`None` when it was not visible).
     pub fn row_top(&self, row: u32) -> Option<Pixels> {

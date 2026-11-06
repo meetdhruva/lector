@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, Action, AnyElement, App, Axis, ClipboardItem, CursorStyle, Decorations,
+    div, prelude::*, Action, AnyElement, App, Axis, ClipboardItem, CursorStyle, Decorations,
     DragMoveEvent, Entity, FocusHandle, Focusable, MouseButton, Pixels, ResizeEdge, SharedString,
     Subscription, Window,
 };
@@ -21,6 +22,8 @@ use lector_workspace::Project;
 mod chrome;
 mod editing;
 mod integration;
+mod lsp_banner;
+mod regions;
 mod undo_toast;
 use super::sidebar::{Sidebar, SidebarPanel};
 use super::theme_selector::ThemeSelectorDelegate;
@@ -38,6 +41,7 @@ pub use chrome::{no_folder_project, no_folder_root};
 pub use editing::quit_with_prompts;
 use integration::Integration;
 pub use integration::TabRestorer;
+pub use regions::Region;
 pub use undo_toast::{ToastAction, UNDO_TOAST_DURATION};
 
 /// Per-file facts shown in the status bar.
@@ -93,6 +97,25 @@ pub fn detect_file_meta(text: &str) -> FileMeta {
     }
 }
 
+/// A summary of the uncommitted changes, for the welcome view and the status bar.
+#[derive(Clone, Debug)]
+pub struct ReviewHint {
+    /// Number of changed files.
+    pub uncommitted: usize,
+    /// Whether the changes differ from what the user last looked at in a review.
+    pub new_since_last: bool,
+    /// Creates the action that opens the review (in risk order).
+    pub open_review: fn() -> Box<dyn gpui::Action>,
+}
+
+impl PartialEq for ReviewHint {
+    fn eq(&self, other: &Self) -> bool {
+        self.uncommitted == other.uncommitted
+            && self.new_since_last == other.new_since_last
+            && std::ptr::fn_addr_eq(self.open_review, other.open_review)
+    }
+}
+
 /// Reads `.git/HEAD` to find the current branch (read-only, no git needed).
 pub fn read_git_branch(root: &Path) -> Option<SharedString> {
     let mut dir = Some(root);
@@ -142,11 +165,16 @@ pub struct Workspace {
     branch_status: Option<SharedString>,
     sidebar: Entity<Sidebar>,
     sidebar_visible: bool,
+    /// Logical (unscaled) width; multiplied by the UI scale when drawn.
     sidebar_width: Pixels,
     center: PaneNode,
     active_pane: Entity<Pane>,
     modal_layer: Entity<ModalLayer>,
     focus_handle: FocusHandle,
+    /// Contains the title bar's controls (F6 region).
+    title_focus: FocusHandle,
+    /// Contains the status bar's buttons (F6 region).
+    status_focus: FocusHandle,
     closed: Vec<PathBuf>,
     project: Project,
     integ: Integration,
@@ -154,9 +182,12 @@ pub struct Workspace {
     lsp_status: SharedString,
     toast: Option<(SharedString, u64)>,
     action_toast: Option<undo_toast::ActionToast>,
+    lsp_banner: Option<lsp_banner::LspBanner>,
     has_folder: bool,
     app_menu: Entity<super::app_menu::AppMenuBar>,
     welcome: Option<Entity<super::welcome::WelcomeView>>,
+    /// Uncommitted-changes summary from lector-ui-git (welcome view and status-bar chip).
+    review_hint: Option<ReviewHint>,
     title_drag_pending: bool,
     chrome_menu: crate::components::ContextMenuState,
     lsp_popover: crate::components::popover::Popover<super::lsp_status::LspStatusPopover>,
@@ -229,11 +260,13 @@ impl Workspace {
             branch_status: None,
             sidebar,
             sidebar_visible: true,
-            sidebar_width: px(272.),
+            sidebar_width: gpui::px(272.),
             center: PaneNode::Pane(pane.clone()),
             active_pane: pane,
             modal_layer,
             focus_handle: cx.focus_handle(),
+            title_focus: cx.focus_handle(),
+            status_focus: cx.focus_handle(),
             closed: Vec::new(),
             project,
             integ,
@@ -241,9 +274,11 @@ impl Workspace {
             lsp_status: "LSP: off".into(),
             toast: None,
             action_toast: None,
+            lsp_banner: None,
             has_folder,
             app_menu: cx.new(super::app_menu::AppMenuBar::new),
             welcome: None,
+            review_hint: None,
             title_drag_pending: false,
             chrome_menu: Default::default(),
             lsp_popover: Default::default(),
@@ -286,16 +321,16 @@ impl Workspace {
         Some(
             div()
                 .absolute()
-                .bottom(metrics::STATUS_BAR_HEIGHT + px(12.))
+                .bottom(metrics::status_bar_height() + px(12.))
                 .right(px(16.))
                 .px(px(12.))
                 .py(px(7.))
-                .rounded(metrics::RADIUS_LG)
+                .rounded(metrics::radius_lg())
                 .bg(ui.elevated.hsla())
                 .border_1()
                 .border_color(ui.border.hsla())
                 .shadow_lg()
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text.hsla())
                 .child(
                     h_flex()
@@ -425,6 +460,14 @@ impl Workspace {
         self.sidebar_visible
     }
 
+    /// Widens the sidebar to at least `width` (panels that need room, e.g. the Agent panel).
+    pub fn ensure_sidebar_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if self.sidebar_width < width {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
     /// The modal layer.
     pub fn modal_layer(&self) -> &Entity<ModalLayer> {
         &self.modal_layer
@@ -453,6 +496,24 @@ impl Workspace {
             self.branch_status = status_label;
             cx.notify();
         }
+    }
+
+    /// Sets what the welcome view and the status bar tell about uncommitted changes (v0.4 review
+    /// UX); `None` clears it. Used by lector-ui-git.
+    pub fn set_review_hint(&mut self, hint: Option<ReviewHint>, cx: &mut Context<Self>) {
+        if self.review_hint == hint {
+            return;
+        }
+        self.review_hint = hint.clone();
+        if let Some(welcome) = &self.welcome {
+            welcome.update(cx, |w, cx| w.set_review_hint(hint, cx));
+        }
+        cx.notify();
+    }
+
+    /// The current [`ReviewHint`].
+    pub fn review_hint(&self) -> Option<&ReviewHint> {
+        self.review_hint.as_ref()
     }
 
     /// Sets the LSP status text shown in the status bar.
@@ -650,7 +711,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_panel(&mut self, panel: SidebarPanel, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows (or, when already shown, hides) a sidebar panel.
+    pub fn show_panel(&mut self, panel: SidebarPanel, window: &mut Window, cx: &mut Context<Self>) {
         let already = self.sidebar_visible && self.sidebar.read(cx).active_panel() == panel;
         if already && panel != SidebarPanel::Files {
             self.sidebar_visible = false;
@@ -772,7 +834,7 @@ impl Workspace {
     fn zoom(&mut self, delta: Option<f32>, cx: &mut Context<Self>) {
         let mut settings = EditorSettings::get(cx);
         settings.font_size = match delta {
-            Some(d) => px((f32::from(settings.font_size) + d).clamp(8., 32.)),
+            Some(d) => gpui::px((f32::from(settings.font_size) + d).clamp(8., 32.)),
             None => EditorSettings::default().font_size,
         };
         cx.set_global(settings);
@@ -844,14 +906,17 @@ impl Workspace {
             }
         });
         h_flex()
-            .h(metrics::STATUS_BAR_HEIGHT)
+            .id("status-bar")
+            .track_focus(&self.status_focus)
+            .relative()
+            .h(metrics::status_bar_height())
             .flex_none()
             .w_full()
             .px(px(6.))
             .bg(ui.status_bar_bg.hsla())
             .border_t_1()
             .border_color(ui.border.hsla())
-            .text_size(metrics::TEXT_SM)
+            .text_size(metrics::text_sm())
             .text_color(fg)
             .child(
                 h_flex()
@@ -883,6 +948,31 @@ impl Workspace {
                                 window.dispatch_action(Box::new(ShowChanges), cx)
                             })
                     }))
+                    .when_some(
+                        self.review_hint.clone().filter(|h| h.new_since_last && h.uncommitted > 0),
+                        |el, hint| {
+                            let open = hint.open_review;
+                            el.child(
+                                item(
+                                    "status-new-changes",
+                                    // Large UI scales have no room for the long form.
+                                    if crate::scale::scale() >= 1.4 {
+                                        "New changes: Review".into()
+                                    } else {
+                                        "New changes since you last looked: Review".into()
+                                    },
+                                )
+                                .icon(IconName::GitCompare)
+                                .color(cx.theme().git.modified.hsla())
+                                .tooltip(Tooltip::text(
+                                    "Open the changes in review order, riskiest files first",
+                                ))
+                                .on_click(move |_, window, cx| {
+                                    window.dispatch_action(open(), cx)
+                                }),
+                            )
+                        },
+                    )
                     .when_some(indexing, |el, text| {
                         el.child(
                             item("status-indexing", text.into())
@@ -972,7 +1062,7 @@ impl Workspace {
                                     let size = window.viewport_size();
                                     let position = gpui::point(
                                         size.width - px(8.),
-                                        size.height - metrics::STATUS_BAR_HEIGHT - px(4.),
+                                        size.height - metrics::status_bar_height() - px(4.),
                                     );
                                     let _ = weak.update(cx, |ws, cx| {
                                         ws.toggle_lsp_popover(position, window, cx)
@@ -1133,7 +1223,7 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let sidebar_width = self.sidebar_width;
+        let sidebar_width = self.sidebar_width * crate::scale::scale();
         let center = if self.center_is_empty(cx) {
             let welcome = self.welcome_view(window, cx);
             gpui::AnyView::from(welcome)
@@ -1142,6 +1232,7 @@ impl Render for Workspace {
         } else {
             self.center.render(0, cx)
         };
+        crate::scale::sync_window(window);
         let mut root = v_flex();
         let registrations = std::mem::take(&mut self.action_registrations);
         for register in &registrations {
@@ -1150,6 +1241,7 @@ impl Render for Workspace {
         self.action_registrations = registrations;
         let root = self.register_chrome_actions(root, cx);
         let root = self.register_editing_actions(root, cx);
+        let root = self.register_region_actions(root, cx);
         root.id("workspace")
             .key_context(contexts::WORKSPACE)
             .track_focus(&self.focus_handle)
@@ -1233,7 +1325,8 @@ impl Render for Workspace {
                     if e.drag(cx).id == "sidebar-edge" {
                         let w = e.event.position.x - e.bounds.left();
                         this.sidebar_width =
-                            clamp_width(w - px(46.), px(180.), window.viewport_size().width * 0.6);
+                            clamp_width(w - px(46.), px(180.), window.viewport_size().width * 0.6)
+                                / crate::scale::scale();
                         cx.notify();
                     }
                 }),
@@ -1265,6 +1358,7 @@ impl Render for Workspace {
             .child(self.render_status_bar(cx))
             .children(self.render_toast(cx))
             .children(self.render_action_toast(cx))
+            .children(self.render_lsp_banner(cx))
             .children(self.chrome_menu.render())
             .children(self.lsp_popover.render())
             .child(self.modal_layer.clone())

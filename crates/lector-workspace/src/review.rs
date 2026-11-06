@@ -103,6 +103,7 @@ pub fn changeset_key(cs: &Changeset) -> String {
         Changeset::Commit(oid) => format!("commit:{oid}"),
         Changeset::Range { from, to } => format!("range:{from}..{to}"),
         Changeset::BranchVsBase { branch, base } => format!("branch:{base}...{branch}"),
+        Changeset::Snapshots { from, to } => format!("snapshots:{from}..{to}"),
     }
 }
 
@@ -130,6 +131,13 @@ pub fn parse_changeset_key(key: &str) -> Option<Changeset> {
                     Changeset::BranchVsBase {
                         branch: branch.into(),
                         base: base.into(),
+                    }
+                }
+                "snapshots" => {
+                    let (from, to) = rest.split_once("..")?;
+                    Changeset::Snapshots {
+                        from: from.parse().ok()?,
+                        to: to.parse().ok()?,
                     }
                 }
                 "workdir" => Changeset::Range {
@@ -163,6 +171,9 @@ pub fn changeset_title(repo: Option<&Repo>, cs: &Changeset) -> String {
         }
         Changeset::Range { from, to } => format!("{from}..{to}"),
         Changeset::BranchVsBase { branch, base } => format!("{base}…{branch}"),
+        Changeset::Snapshots { from, to } => repo
+            .and_then(|r| lector_git::ShadowRepo::known_note(r, *to))
+            .unwrap_or_else(|| format!("Checkpoint {} → {}", from.short(), to.short())),
     }
 }
 

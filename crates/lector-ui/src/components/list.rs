@@ -3,8 +3,9 @@
 
 use std::ops::Range;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, App, ElementId, ScrollStrategy, SharedString,
+    div, prelude::*, uniform_list, AnyElement, App, ElementId, ScrollStrategy, SharedString,
     UniformListScrollHandle, Window,
 };
 
@@ -34,6 +35,19 @@ impl VirtualListState {
     /// Scrolls so `ix` is centered.
     pub fn center(&self, ix: usize) {
         self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+    }
+
+    /// Window position just below the middle of row `ix` of a list of fixed-height rows,
+    /// clamped to the visible part: where a keyboard-opened context menu appears.
+    pub fn row_anchor(&self, ix: usize, row_height: gpui::Pixels) -> gpui::Point<gpui::Pixels> {
+        let base = self.scroll.0.borrow().base_handle.clone();
+        let bounds = base.bounds();
+        let offset = base.offset();
+        let y = bounds.origin.y + offset.y + row_height * ix as f32 + row_height;
+        gpui::point(
+            bounds.origin.x + px(40.),
+            y.max(bounds.top()).min(bounds.bottom()),
+        )
     }
 }
 
@@ -127,11 +141,11 @@ impl RenderOnce for ListRow {
         let hover = ui.hover.hsla();
         h_flex()
             .id(self.id)
-            .h(metrics::ROW_HEIGHT)
+            .h(metrics::row_height())
             .pl(px(8.) + self.indent)
             .pr(px(8.))
             .gap(px(6.))
-            .text_size(metrics::TEXT)
+            .text_size(metrics::text())
             .text_color(ui.text.hsla())
             .when(self.selected, |el| el.bg(ui.active.hsla()))
             .when(!self.selected, |el| el.hover(move |s| s.bg(hover)))
@@ -148,7 +162,7 @@ impl RenderOnce for ListRow {
                 el.child(
                     div()
                         .flex_none()
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(d),
                 )

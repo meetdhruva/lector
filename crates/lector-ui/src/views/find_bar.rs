@@ -12,9 +12,10 @@
 
 use std::ops::Range;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Task, Window,
+    div, prelude::*, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString,
+    Subscription, Task, Window,
 };
 use lector_buffer::TextEdit;
 use lector_search::{replacements_in_text, CaseMode, SearchQuery};
@@ -540,7 +541,7 @@ impl Render for FindBar {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(if self.count == 0 && !status.is_empty() {
                                 ui.error.hsla()
                             } else {
@@ -631,7 +632,10 @@ impl FindBar {
                 Button::new("replace-next", "Replace")
                     .style(ButtonStyle::Subtle)
                     .compact()
-                    .tooltip(Tooltip::text("Replace Next"))
+                    .tooltip(Tooltip::for_action(
+                        "Replace Next",
+                        &crate::actions::editor::ReplaceNext,
+                    ))
                     .on_click(move |_, window, cx| {
                         let _ = next.update(cx, |bar, cx| bar.replace_next(window, cx));
                     }),
@@ -640,7 +644,10 @@ impl FindBar {
                 Button::new("replace-all", "All")
                     .style(ButtonStyle::Subtle)
                     .compact()
-                    .tooltip(Tooltip::text("Replace All"))
+                    .tooltip(Tooltip::for_action(
+                        "Replace All",
+                        &crate::actions::editor::ReplaceAll,
+                    ))
                     .on_click(move |_, window, cx| {
                         let _ = weak.update(cx, |bar, cx| bar.replace_all(window, cx));
                     }),

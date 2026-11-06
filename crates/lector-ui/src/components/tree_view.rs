@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::Range;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, ClickEvent, EventEmitter, FocusHandle, Focusable, Hsla,
+    div, prelude::*, AnyElement, App, ClickEvent, EventEmitter, FocusHandle, Focusable, Hsla,
     MouseButton, MouseDownEvent, SharedString, Window,
 };
 
@@ -158,7 +159,7 @@ impl<D: TreeDelegate> TreeView<D> {
             flat: Vec::new(),
             selected: None,
             list: VirtualListState::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             context_menu: ContextMenuState::default(),
             id: id.into(),
             focused: false,
@@ -381,7 +382,7 @@ impl<D: TreeDelegate> TreeView<D> {
     fn deploy_context_menu(
         &mut self,
         ix: usize,
-        event: &MouseDownEvent,
+        position: gpui::Point<gpui::Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -393,7 +394,7 @@ impl<D: TreeDelegate> TreeView<D> {
             return;
         };
         self.context_menu
-            .deploy(menu, event.position, window, cx, |this: &mut Self| {
+            .deploy(menu, position, window, cx, |this: &mut Self| {
                 &mut this.context_menu
             });
         cx.notify();
@@ -477,12 +478,12 @@ impl<D: TreeDelegate> TreeView<D> {
             let row = h_flex()
                 .id(("tree-row", ix))
                 .relative()
-                .h(metrics::ROW_HEIGHT)
+                .h(metrics::row_height())
                 .w_full()
                 .pl(indent)
                 .pr(px(8.))
                 .gap(px(4.))
-                .text_size(metrics::TEXT)
+                .text_size(metrics::text())
                 .text_color(label_color)
                 .cursor_pointer()
                 .when(selected, |el| {
@@ -494,6 +495,7 @@ impl<D: TreeDelegate> TreeView<D> {
                 })
                 .when(!selected, |el| el.hover(move |s| s.bg(hover)))
                 .children(guides)
+                .children(crate::a11y::region_ring(selected && focused, cx, px(3.)))
                 .child(
                     div()
                         .flex()
@@ -518,7 +520,7 @@ impl<D: TreeDelegate> TreeView<D> {
                     el.child(
                         div()
                             .flex_none()
-                            .text_size(metrics::TEXT_SM)
+                            .text_size(metrics::text_sm())
                             .text_color(ui.text_faint.hsla())
                             .child(d),
                     )
@@ -528,7 +530,7 @@ impl<D: TreeDelegate> TreeView<D> {
                         div()
                             .flex_none()
                             .w(px(14.))
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(color)
                             .child(badge),
@@ -539,8 +541,8 @@ impl<D: TreeDelegate> TreeView<D> {
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |this, event, window, cx| {
-                        this.deploy_context_menu(ix, event, window, cx)
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.deploy_context_menu(ix, event.position, window, cx)
                     }),
                 );
             rows.push(row.into_any_element());
@@ -568,6 +570,17 @@ impl<D: TreeDelegate> Render for TreeView<D> {
             .on_action(cx.listener(Self::expand_selected))
             .on_action(cx.listener(Self::collapse_selected))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::workspace::ShowContextMenu, window, cx| {
+                    match this.selected {
+                        Some(ix) => {
+                            let position = this.list.row_anchor(ix, metrics::row_height());
+                            this.deploy_context_menu(ix, position, window, cx)
+                        }
+                        None => cx.propagate(),
+                    }
+                },
+            ))
             .size_full()
             .child(list)
             .children(self.context_menu.render())

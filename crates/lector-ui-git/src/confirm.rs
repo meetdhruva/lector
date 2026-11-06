@@ -2,11 +2,12 @@
 //! says exactly what will be lost; Enter confirms, Escape cancels.
 
 use gpui::{
-    div, prelude::*, px, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, KeyDownEvent, SharedString, Window,
+    div, prelude::*, App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    KeyDownEvent, SharedString, Window,
 };
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle};
 use lector_ui::icons::{Icon, IconName, IconSize};
+use lector_ui::scale::px;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
 
@@ -77,7 +78,7 @@ impl Render for ConfirmDialog {
             .w(px(440.))
             .p(px(16.))
             .gap(px(10.))
-            .rounded(metrics::RADIUS_LG)
+            .rounded(metrics::radius_lg())
             .border_1()
             .border_color(ui.border.hsla())
             .bg(ui.elevated.hsla())
@@ -92,7 +93,7 @@ impl Render for ConfirmDialog {
                     )
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui.text.hsla())
                             .child(self.spec.title.clone()),
@@ -100,7 +101,7 @@ impl Render for ConfirmDialog {
             )
             .children(self.spec.message.iter().map(|m| {
                 div()
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .text_color(ui.text_muted.hsla())
                     .child(m.clone())
             }))
@@ -109,11 +110,11 @@ impl Render for ConfirmDialog {
                     v_flex()
                         .px(px(8.))
                         .py(px(6.))
-                        .rounded(metrics::RADIUS)
+                        .rounded(metrics::radius())
                         .bg(ui.surface.hsla())
                         .border_1()
                         .border_color(ui.border_variant.hsla())
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text.hsla())
                         .children(
                             self.spec
@@ -146,13 +147,15 @@ impl Render for ConfirmDialog {
                             .id("confirm-ok")
                             .h(px(26.))
                             .px(px(12.))
-                            .rounded(metrics::RADIUS)
+                            .rounded(metrics::radius())
                             .bg(ui.error.hsla())
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(gpui::white())
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.9))
+                            .tab_index(0)
+                            .focus(lector_ui::a11y::ring_focus(cx))
                             .child(self.spec.confirm_label.clone())
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     ),

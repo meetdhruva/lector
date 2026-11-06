@@ -11,6 +11,7 @@ mod client;
 mod config;
 mod convert;
 mod error;
+pub mod install;
 mod manager;
 mod types;
 

@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{prelude::*, px, AnyElement, App, DismissEvent, SharedString, Task, Window};
+use crate::scale::px;
+use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Task, Window};
 use lector_workspace::{FileList, GitStatusMap};
 
 use super::file_tree::git_color;

@@ -5,14 +5,17 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, App, ClipboardItem, Entity, FocusHandle, Focusable, FontWeight,
-    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
+    div, prelude::*, App, ClipboardItem, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
+    MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
 };
 use lector_git::{Branch, Changeset, LogQuery, Oid, Repo, Stash, Tag};
+use lector_ui::actions::picker as picker_actions;
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::list::{virtual_list, VirtualListState};
 use lector_ui::components::{h_flex, metrics, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
+use lector_ui::keymap::contexts;
+use lector_ui::scale::px;
 use lector_ui::views::sidebar::SidebarPanel;
 use lector_ui::{ActiveTheme, ColorExt};
 
@@ -75,6 +78,7 @@ pub struct BranchesPanel {
     load_task: Option<Task<()>>,
     error: Option<SharedString>,
     menu: ContextMenuState,
+    selected: Option<usize>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -150,7 +154,8 @@ impl BranchesPanel {
             load_task: None,
             error: None,
             menu: ContextMenuState::default(),
-            focus_handle: cx.focus_handle(),
+            selected: None,
+            focus_handle: cx.focus_handle().tab_stop(true),
             _subscriptions: subs,
         };
         panel.reload(cx);
@@ -234,6 +239,72 @@ impl BranchesPanel {
         );
     }
 
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.rows.len();
+        if count == 0 {
+            return;
+        }
+        let next = match self.selected {
+            Some(ix) => (ix as isize + delta).clamp(0, count as isize - 1) as usize,
+            None if delta > 0 => 0,
+            None => count - 1,
+        };
+        self.selected = Some(next);
+        self.list.reveal(next);
+        cx.notify();
+    }
+
+    /// Enter on the selected row: toggle a group, show a ref's log, open a stash.
+    fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.selected else {
+            return;
+        };
+        match self.rows.get(ix).cloned() {
+            Some(Row::Header(group, _)) => {
+                if !self.collapsed.remove(&group) {
+                    self.collapsed.insert(group);
+                }
+                self.rebuild();
+                cx.notify();
+            }
+            Some(Row::Local(i)) => {
+                self.show_log(self.data.local[i].branch.name.clone(), window, cx)
+            }
+            Some(Row::Remote(i)) => self.show_log(self.data.remote[i].name.clone(), window, cx),
+            Some(Row::Tag(i)) => self.show_log(self.data.tags[i].name.clone(), window, cx),
+            Some(Row::Stash(i)) => {
+                let oid = self.data.stashes[i].oid;
+                crate::review_tab::open_commit_tab(&self.store, oid, false, window, cx);
+            }
+            None => {}
+        }
+    }
+
+    /// Shift-F10 on the selected row: its context menu.
+    fn menu_for_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.selected else {
+            cx.propagate();
+            return;
+        };
+        let position = self.list.row_anchor(ix, metrics::row_height());
+        let (name, oid, is_branch) = match self.rows.get(ix).cloned() {
+            Some(Row::Local(i)) => {
+                let b = &self.data.local[i].branch;
+                (b.name.clone(), b.oid, true)
+            }
+            Some(Row::Remote(i)) => {
+                let b = &self.data.remote[i];
+                (b.name.clone(), b.oid, true)
+            }
+            Some(Row::Tag(i)) => {
+                let t = &self.data.tags[i];
+                (t.name.clone(), t.oid, false)
+            }
+            _ => return,
+        };
+        self.deploy_ref_menu(name, oid, is_branch, position, window, cx);
+    }
+
     fn deploy_ref_menu(
         &mut self,
         name: String,
@@ -309,11 +380,12 @@ impl BranchesPanel {
             h_flex()
                 .id(id)
                 .w_full()
-                .h(metrics::ROW_HEIGHT)
+                .h(metrics::row_height())
                 .pl(px(22.))
                 .pr(px(10.))
                 .gap(px(6.))
                 .cursor_pointer()
+                .when(self.selected == Some(id.1), |el| el.bg(ui.active.hsla()))
                 .hover(|s| s.bg(ui.hover.hsla()))
         };
         let name_el = |name: String, strong: bool| {
@@ -323,7 +395,7 @@ impl BranchesPanel {
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(metrics::TEXT)
+                .text_size(metrics::text())
                 .text_color(ui.text.hsla())
                 .when(strong, |el| el.font_weight(FontWeight::SEMIBOLD))
                 .child(name)
@@ -331,7 +403,7 @@ impl BranchesPanel {
         let faint = |s: String| {
             div()
                 .flex_none()
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .text_color(ui.text_faint.hsla())
                 .child(s)
         };
@@ -342,11 +414,12 @@ impl BranchesPanel {
                 h_flex()
                     .id(("branches-header", ix))
                     .w_full()
-                    .h(metrics::ROW_HEIGHT)
+                    .h(metrics::row_height())
                     .pl(px(6.))
                     .pr(px(10.))
                     .gap(px(4.))
                     .cursor_pointer()
+                    .when(self.selected == Some(ix), |el| el.bg(ui.active.hsla()))
                     .hover(|s| s.bg(ui.hover.hsla()))
                     .child(
                         Icon::new(if collapsed {
@@ -360,7 +433,7 @@ impl BranchesPanel {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui.text_muted.hsla())
                             .child(group.title().to_uppercase()),
@@ -370,7 +443,7 @@ impl BranchesPanel {
                             .px(px(6.))
                             .rounded(px(8.))
                             .bg(ui.hover.hsla())
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_muted.hsla())
                             .child(n.to_string()),
                     )
@@ -409,7 +482,7 @@ impl BranchesPanel {
                         el.when(ahead > 0, |el| {
                             el.child(
                                 div()
-                                    .text_size(metrics::TEXT_XS)
+                                    .text_size(metrics::text_xs())
                                     .text_color(theme.git.added.hsla())
                                     .child(format!("↑{ahead}")),
                             )
@@ -417,7 +490,7 @@ impl BranchesPanel {
                         .when(behind > 0, |el| {
                             el.child(
                                 div()
-                                    .text_size(metrics::TEXT_XS)
+                                    .text_size(metrics::text_xs())
                                     .text_color(theme.git.modified.hsla())
                                     .child(format!("↓{behind}")),
                             )
@@ -531,7 +604,26 @@ impl Render for BranchesPanel {
         let head = self.store.read(cx).head.clone();
         gpui::div()
             .id("branches-panel")
+            .key_context(contexts::LIST_PANEL)
             .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &picker_actions::SelectNext, _, cx| {
+                    this.move_selection(1, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &picker_actions::SelectPrev, _, cx| {
+                this.move_selection(-1, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &picker_actions::Confirm, window, cx| {
+                    this.activate_selected(window, cx)
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &lector_ui::actions::workspace::ShowContextMenu, window, cx| {
+                    this.menu_for_selected(window, cx)
+                },
+            ))
             .size_full()
             .flex()
             .flex_col()
@@ -575,7 +667,7 @@ impl Render for BranchesPanel {
                                 )
                                 .child(
                                     div()
-                                        .text_size(metrics::TEXT_XS)
+                                        .text_size(metrics::text_xs())
                                         .text_color(ui.text_faint.hsla())
                                         .child(match &h.upstream {
                                             Some(up) => {
@@ -597,7 +689,7 @@ impl Render for BranchesPanel {
                 el.child(
                     div()
                         .p(px(12.))
-                        .text_size(metrics::TEXT_SM)
+                        .text_size(metrics::text_sm())
                         .text_color(ui.text_faint.hsla())
                         .child(e),
                 )

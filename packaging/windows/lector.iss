@@ -54,6 +54,9 @@ Name: "contextmenu"; Description: "Add ""Open with Lector"" to the Explorer cont
 
 [Files]
 Source: "{#SourceDir}\lector.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Console build of the command line: `lector` in a terminal resolves lector.com before lector.exe.
+Source: "{#SourceDir}\lector-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\lector.com"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\*.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE-*"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\third-party\*"; DestDir: "{app}\third-party"; Flags: ignoreversion recursesubdirs

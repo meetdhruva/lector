@@ -12,6 +12,7 @@
 
 pub use gpui;
 
+pub mod a11y;
 pub mod actions;
 pub mod assets;
 pub mod code_view;
@@ -25,15 +26,20 @@ pub mod lsp;
 pub mod markdown;
 pub mod menus;
 pub mod os;
+pub mod scale;
 pub mod settings;
 pub mod startup;
 pub mod theme;
 pub mod views;
 
 #[cfg(test)]
+mod a11y_tests;
+#[cfg(test)]
 mod editing_tests;
 #[cfg(test)]
 mod polish_tests;
+#[cfg(test)]
+mod review_ux_tests;
 #[cfg(test)]
 mod tests;
 
@@ -57,6 +63,7 @@ pub fn init(
     settings: (lector_config::Settings, Vec<String>),
 ) {
     assets::load_fonts(cx);
+    a11y::start_os_detection();
     if matches!(mode, ThemeMode::Named(_)) {
         cx.set_global(settings::CliTheme);
     }

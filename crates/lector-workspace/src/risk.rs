@@ -28,6 +28,7 @@
 //!
 //! `score = (1 - Π(1 - w_raise)) · Π(1 - w_damp)`, rounded to 3 decimals.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
@@ -180,13 +181,17 @@ pub fn assess(diff: &FileDiff, langs: &LanguageRegistry) -> RiskReport {
 
 /// Assesses and orders `files` by risk (highest first; ties by churn, then
 /// input order). Returns `(index into files, report)` for every file.
-pub fn rank_files(files: &[FileDiff]) -> Vec<(usize, RiskReport)> {
+pub fn rank_files<D: Borrow<FileDiff>>(files: &[D]) -> Vec<(usize, RiskReport)> {
     rank_files_with(files, &LanguageRegistry::new())
 }
 
-/// [`rank_files`] with an explicit language registry.
-pub fn rank_files_with(files: &[FileDiff], langs: &LanguageRegistry) -> Vec<(usize, RiskReport)> {
+/// [`rank_files`] with an explicit language registry (`D` may be `FileDiff`, `Arc<FileDiff>`, ...).
+pub fn rank_files_with<D: Borrow<FileDiff>>(
+    files: &[D],
+    langs: &LanguageRegistry,
+) -> Vec<(usize, RiskReport)> {
     let tests_changed = files.iter().any(|f| {
+        let f: &FileDiff = f.borrow();
         let p = path_of(f);
         is_test_path(&p) && !f.is_identical()
     });
@@ -197,6 +202,7 @@ pub fn rank_files_with(files: &[FileDiff], langs: &LanguageRegistry) -> Vec<(usi
         .iter()
         .enumerate()
         .map(|(i, f)| {
+            let f: &FileDiff = f.borrow();
             let s = f.stats();
             (i, assess_in(f, langs, ctx), s.added + s.removed)
         })

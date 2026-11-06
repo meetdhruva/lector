@@ -246,6 +246,134 @@ impl Default for SessionSettings {
     }
 }
 
+/// One coding agent speaking the Agent Client Protocol over stdio (`[[agent.servers]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentServer {
+    /// Name shown in the agent picker ("Gemini").
+    pub name: String,
+    /// Program to run (looked up on `PATH`).
+    pub command: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    pub env: BTreeMap<String, String>,
+}
+
+/// Review options (v0.4 review UX).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewSettings {
+    /// Order files by risk ("needs attention" first) in the review tab and the Changes panel;
+    /// generated and lock files go to a collapsed low-risk group.
+    pub risk_order: bool,
+    /// Detect code that was moved (within a file or between the files of a change) and show it
+    /// dimmed in diffs.
+    pub detect_moved: bool,
+    /// Render syntax-aware (structural) diffs when `diff::ToggleStructural` is on and the file
+    /// is small enough.
+    pub structural: bool,
+}
+
+impl Default for ReviewSettings {
+    fn default() -> Self {
+        Self {
+            risk_order: true,
+            detect_moved: true,
+            structural: false,
+        }
+    }
+}
+
+/// Agent sessions (v0.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    /// Agents from the user's settings. Known agents found on `PATH` (Gemini CLI,
+    /// `claude-code-acp`, `codex-acp`) are offered as well. Only read from the user's
+    /// settings file: a project cannot define commands to run.
+    pub servers: Vec<AgentServer>,
+    /// Snapshot the working tree before and after every turn (review and undo per turn).
+    pub checkpoints: bool,
+    /// Let agents read files in the project without asking.
+    pub auto_allow_reads: bool,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            checkpoints: true,
+            auto_allow_reads: true,
+        }
+    }
+}
+
+/// Accessibility-related interface options (v0.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiSettings {
+    /// Scale of the whole interface (menus, panels, dialogs, status bar), 0.75 to 2.0.
+    /// Separate from the code font size (`buffer_font_size`, View > Zoom In/Out).
+    pub scale: f32,
+    /// Turn off caret blinking, animated scrolling, toast slide-ins and spinner rotation.
+    /// Unset follows the operating system's "reduce motion" preference where Lector can
+    /// read it (macOS, GNOME/GTK); otherwise motion stays on.
+    pub reduce_motion: Option<bool>,
+}
+
+impl UiSettings {
+    /// Smallest accepted `scale`.
+    pub const MIN_SCALE: f32 = 0.75;
+    /// Largest accepted `scale`.
+    pub const MAX_SCALE: f32 = 2.0;
+
+    /// `scale` clamped to the supported range (NaN becomes 1.0).
+    pub fn clamped_scale(&self) -> f32 {
+        if self.scale.is_finite() {
+            self.scale.clamp(Self::MIN_SCALE, Self::MAX_SCALE)
+        } else {
+            1.0
+        }
+    }
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            reduce_motion: None,
+        }
+    }
+}
+
+/// Code hosts (v0.6, `lector-forge`): which hosts are GitHub Enterprise / self-hosted GitLab,
+/// API URL overrides and the default pull-request filter. Only the user's own settings file
+/// may set it (a project's `.lector/settings.toml` could otherwise send tokens elsewhere).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ForgeSettings {
+    /// GitHub Enterprise hosts (github.com is always known).
+    pub github_hosts: Vec<String>,
+    /// Self-hosted GitLab hosts (gitlab.com is always known).
+    pub gitlab_hosts: Vec<String>,
+    /// API base URL overrides by host.
+    pub api_urls: BTreeMap<String, String>,
+    /// Pull Requests panel filter: "review_requested", "mine" or "all".
+    pub default_filter: String,
+}
+
+impl Default for ForgeSettings {
+    fn default() -> Self {
+        Self {
+            github_hosts: Vec::new(),
+            gitlab_hosts: Vec::new(),
+            api_urls: BTreeMap::new(),
+            default_filter: "review_requested".into(),
+        }
+    }
+}
+
 /// Accepts either `"Font"` or `["Font A", "Font B"]`.
 fn string_or_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     #[derive(Deserialize)]
@@ -308,6 +436,14 @@ pub struct Settings {
     pub editor: EditorSettings,
     /// Session options.
     pub session: SessionSettings,
+    /// Interface scale and motion (accessibility, v0.4).
+    pub ui: UiSettings,
+    /// Review options (risk order, moved code, structural diffs).
+    pub review: ReviewSettings,
+    /// Coding agents (v0.5, `lector-agent`).
+    pub agent: AgentSettings,
+    /// Code hosts (v0.6, `lector-forge`).
+    pub forge: ForgeSettings,
 }
 
 impl Default for Settings {
@@ -340,6 +476,10 @@ impl Default for Settings {
             git: GitSettings::default(),
             editor: EditorSettings::default(),
             session: SessionSettings::default(),
+            ui: UiSettings::default(),
+            review: ReviewSettings::default(),
+            agent: AgentSettings::default(),
+            forge: ForgeSettings::default(),
         }
     }
 }
@@ -459,6 +599,54 @@ ensure_final_newline = false
 [session]
 # Reopen the tabs and layout from the last session.
 restore = true
+
+[ui]
+# Scale of the whole interface, 0.75 to 2.0 (View > Zoom UI In / Out / Reset).
+# The code font is separate: buffer_font_size and View > Zoom In / Out.
+scale = 1.0
+# Turn off caret blinking, animated scrolling, toast slide-ins and spinner rotation.
+# Left unset, Lector follows the operating system's "reduce motion" preference where it
+# can read it (macOS, GNOME/GTK) and otherwise keeps motion on. Set true or false to force.
+# reduce_motion = false
+
+[review]
+# Order files by risk ("needs attention" first) in the review tab and the Changes panel.
+# Generated and lock files go to a collapsed "Low-risk & generated" group.
+risk_order = true
+# Dim code that was only moved (within a file or between files of a change) and label where it
+# came from. Toggle per view with "Toggle Moved Code".
+detect_moved = true
+# Syntax-aware diff highlights ("Toggle Structural Diff"); falls back to the line diff when a
+# file is too big.
+structural = false
+
+[agent]
+# Snapshot the working tree before and after every agent turn, so each turn can be
+# reviewed as a changeset and undone.
+checkpoints = true
+# Let agents read files inside the project without asking.
+auto_allow_reads = true
+# Agents speaking the Agent Client Protocol. Gemini CLI, claude-code-acp and codex-acp
+# are offered automatically when found on PATH. Only your own settings file may add
+# agents (a project's .lector/settings.toml cannot). Example:
+# [[agent.servers]]
+# name = "Gemini"
+# command = "gemini"
+# args = ["--experimental-acp"]
+# env = { GEMINI_API_KEY = "..." }
+
+[forge]
+# Pull requests (GitHub) and merge requests (GitLab). github.com and gitlab.com are always
+# known; list GitHub Enterprise and self-hosted GitLab hosts here. Tokens come from
+# GITHUB_TOKEN / GH_TOKEN / GITLAB_TOKEN, then `gh` / `glab`, then the OS keychain.
+# Only your own settings file may set [forge].
+github_hosts = []
+gitlab_hosts = []
+# Default filter of the Pull Requests panel: "review_requested", "mine" or "all".
+default_filter = "review_requested"
+# API URL overrides by host, e.g. a proxy:
+# [forge.api_urls]
+# "github.example.com" = "https://github.example.com/api/v3"
 "#;
 
 /// A fully commented TOML file that parses to [`Settings::default`].
@@ -523,8 +711,17 @@ pub(crate) fn load_settings_from(
     let mut warnings = Vec::new();
     let mut merged = toml::Table::new();
     let project_file = project_root.map(|r| r.join(".lector").join("settings.toml"));
-    for file in std::iter::once(user_file.to_path_buf()).chain(project_file) {
-        if let Some(layer) = read_layer(&file, &mut warnings) {
+    for (i, file) in std::iter::once(user_file.to_path_buf())
+        .chain(project_file)
+        .enumerate()
+    {
+        if let Some(mut layer) = read_layer(&file, &mut warnings) {
+            if i > 0 && layer.remove("forge").is_some() {
+                warnings.push(format!(
+                    "{}: [forge] is ignored in project settings (set it in your own settings.toml)",
+                    file.display()
+                ));
+            }
             deep_merge(&mut merged, layer);
         }
     }
@@ -552,12 +749,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ui_scale_and_reduce_motion() {
+        let d = Settings::default();
+        assert_eq!(d.ui.scale, 1.0);
+        assert_eq!(d.ui.reduce_motion, None, "unset follows the OS");
+        let s: Settings = toml::from_str("[ui]\nscale = 1.5\nreduce_motion = true\n").unwrap();
+        assert_eq!(s.ui.clamped_scale(), 1.5);
+        assert_eq!(s.ui.reduce_motion, Some(true));
+        for (raw, want) in [(0.1, 0.75), (9.0, 2.0), (1.25, 1.25), (f32::NAN, 1.0)] {
+            let ui = UiSettings {
+                scale: raw,
+                ..UiSettings::default()
+            };
+            assert_eq!(ui.clamped_scale(), want, "{raw}");
+        }
+        // The commented default file documents both keys.
+        assert!(default_settings_toml().contains("[ui]"));
+        assert!(default_settings_toml().contains("# reduce_motion = false"));
+    }
+
+    #[test]
+    fn forge_settings_user_only() {
+        let d = Settings::default().forge;
+        assert_eq!(d.default_filter, "review_requested");
+        assert!(d.github_hosts.is_empty() && d.api_urls.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.toml");
+        std::fs::write(
+            &user,
+            "[forge]\ngitlab_hosts = [\"git.corp\"]\ndefault_filter = \"mine\"\n[forge.api_urls]\n\"github.com\" = \"http://127.0.0.1:9\"\n",
+        )
+        .unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(project.join(".lector")).unwrap();
+        std::fs::write(
+            project.join(".lector/settings.toml"),
+            "[forge.api_urls]\n\"github.com\" = \"https://evil.example\"\n",
+        )
+        .unwrap();
+        let (s, w) = load_settings_from(&user, Some(&project));
+        assert_eq!(s.forge.gitlab_hosts, vec!["git.corp".to_string()]);
+        assert_eq!(s.forge.default_filter, "mine");
+        assert_eq!(s.forge.api_urls["github.com"], "http://127.0.0.1:9");
+        assert!(w.iter().any(|w| w.contains("[forge] is ignored")), "{w:?}");
+    }
+
+    #[test]
     fn default_toml_parses_to_defaults() {
         let s: Settings = toml::from_str(default_settings_toml()).unwrap();
         assert_eq!(s, Settings::default());
         let mut w = Vec::new();
         assert!(parse_layer("d", default_settings_toml(), &mut w).is_some());
         assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn review_settings_defaults_and_overrides() {
+        let d = Settings::default().review;
+        assert!(d.risk_order && d.detect_moved && !d.structural);
+        let mut w = Vec::new();
+        let table = parse_layer(
+            "t",
+            "[review]\nrisk_order = false\nstructural = true\n",
+            &mut w,
+        )
+        .unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let s = Settings::deserialize(table).unwrap();
+        assert!(!s.review.risk_order);
+        assert!(s.review.detect_moved, "unset keys keep their default");
+        assert!(s.review.structural);
+    }
+
+    #[test]
+    fn agent_servers_parse() {
+        let text = "[agent]\ncheckpoints = false\n[[agent.servers]]\nname = \"Fake\"\ncommand = \"python3\"\nargs = [\"agent.py\"]\nenv = { A = \"1\" }\n";
+        let mut w = Vec::new();
+        let table = parse_layer("t", text, &mut w).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let s = Settings::deserialize(table).unwrap();
+        assert!(!s.agent.checkpoints);
+        assert!(s.agent.auto_allow_reads);
+        assert_eq!(s.agent.servers.len(), 1);
+        assert_eq!(s.agent.servers[0].args, vec!["agent.py".to_string()]);
+        assert_eq!(
+            s.agent.servers[0].env.get("A").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

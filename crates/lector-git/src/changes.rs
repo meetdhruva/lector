@@ -66,6 +66,20 @@ impl Repo {
                 let new_tree = repo.find_commit(branch_id).git()?.tree().git()?;
                 tree_changes(&repo, Some(&old_tree), Some(&new_tree))?
             }
+            Changeset::Snapshots { from, to } => {
+                let shadow =
+                    crate::shadow::known_shadow_with(self.workdir(), *from).ok_or_else(|| {
+                        Error::Parse(format!(
+                            "snapshot {from} is not in a known shadow repository"
+                        ))
+                    })?;
+                let snap = |commit: Oid| crate::ShadowSnapshot {
+                    commit,
+                    time: 0,
+                    note: String::new(),
+                };
+                shadow.changes_between(&snap(*from), &snap(*to))?
+            }
         };
         out.sort_by(|a, b| a.path().cmp(b.path()));
         Ok(out)

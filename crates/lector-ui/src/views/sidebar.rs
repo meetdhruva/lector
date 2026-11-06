@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, Action, AnyView, App, Entity, FocusHandle, Focusable, FontWeight,
+    div, prelude::*, Action, AnyView, App, Entity, FocusHandle, Focusable, FontWeight,
     SharedString, Window,
 };
 
@@ -33,17 +34,23 @@ pub enum SidebarPanel {
     Search,
     /// Symbol outline of the active file.
     Outline,
+    /// GitHub pull requests / GitLab merge requests (v0.6, lector-ui-git).
+    PullRequests,
+    /// Coding agent sessions (v0.5, lector-ui-agent).
+    Agent,
 }
 
 impl SidebarPanel {
     /// All panels in activity-bar order.
-    pub const ALL: [SidebarPanel; 6] = [
+    pub const ALL: [SidebarPanel; 8] = [
         SidebarPanel::Files,
         SidebarPanel::Changes,
         SidebarPanel::History,
         SidebarPanel::Branches,
         SidebarPanel::Search,
         SidebarPanel::Outline,
+        SidebarPanel::PullRequests,
+        SidebarPanel::Agent,
     ];
 
     /// Activity bar icon.
@@ -55,6 +62,8 @@ impl SidebarPanel {
             SidebarPanel::Branches => IconName::GitBranch,
             SidebarPanel::Search => IconName::Search,
             SidebarPanel::Outline => IconName::ListTree,
+            SidebarPanel::PullRequests => IconName::GitPullRequest,
+            SidebarPanel::Agent => IconName::Sparkles,
         }
     }
 
@@ -67,6 +76,8 @@ impl SidebarPanel {
             SidebarPanel::Branches => "Branches",
             SidebarPanel::Search => "Search",
             SidebarPanel::Outline => "Outline",
+            SidebarPanel::PullRequests => "Pull Requests",
+            SidebarPanel::Agent => "Agent",
         }
     }
 
@@ -79,6 +90,8 @@ impl SidebarPanel {
             SidebarPanel::Branches => Box::new(ShowBranches),
             SidebarPanel::Search => Box::new(ToggleProjectSearch),
             SidebarPanel::Outline => Box::new(ShowOutline),
+            SidebarPanel::PullRequests => Box::new(crate::actions::review::ShowPullRequests),
+            SidebarPanel::Agent => Box::new(crate::actions::agent::TogglePanel),
         }
     }
 
@@ -103,6 +116,14 @@ impl SidebarPanel {
             ),
             SidebarPanel::Search => ("Search", "Search across the project."),
             SidebarPanel::Outline => ("No symbols", "Symbols of the active file will appear here."),
+            SidebarPanel::PullRequests => (
+                "Not a git repository",
+                "Pull requests appear for repositories hosted on GitHub or GitLab.",
+            ),
+            SidebarPanel::Agent => (
+                "Agent",
+                "Drive a coding agent and review each turn's changes.",
+            ),
         }
     }
 }
@@ -120,6 +141,10 @@ pub struct Sidebar {
     file_tree: Entity<TreeView<FsTreeDelegate>>,
     panels: HashMap<SidebarPanel, AnyView>,
     focus_handle: FocusHandle,
+    /// Contains the activity bar's buttons (F6 region; not a tab stop itself).
+    activity_focus: FocusHandle,
+    /// Contains the active panel (header and content).
+    panel_focus: FocusHandle,
     has_folder: bool,
     gear_menu: ContextMenuState,
 }
@@ -148,9 +173,71 @@ impl Sidebar {
             file_tree,
             panels: HashMap::new(),
             focus_handle: cx.focus_handle(),
+            activity_focus: cx.focus_handle(),
+            panel_focus: cx.focus_handle(),
             has_folder: true,
             gear_menu: ContextMenuState::default(),
         }
+    }
+
+    /// Handle that contains the focus while an activity bar button has it.
+    pub fn activity_handle(&self) -> FocusHandle {
+        self.activity_focus.clone()
+    }
+
+    /// Handle that contains the focus while the active panel (not the activity bar) has it.
+    pub fn panel_handle(&self) -> FocusHandle {
+        self.panel_focus.clone()
+    }
+
+    /// Focuses the activity bar's first button.
+    pub fn focus_activity_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.activity_focus);
+        window.focus_next();
+        if !self.activity_focus.contains_focused(window, cx) {
+            window.focus(&self.activity_focus);
+        }
+    }
+
+    /// Focuses the active panel: the file tree, or the panel's first tab stop (its list or
+    /// input), or the panel itself when it has none.
+    pub fn focus_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active == SidebarPanel::Files && self.has_folder {
+            let handle = self.file_tree.focus_handle(cx);
+            window.focus(&handle);
+            return;
+        }
+        window.focus(&self.panel_focus);
+        window.focus_next();
+        if !self.panel_focus.contains_focused(window, cx) {
+            window.focus(&self.panel_focus);
+        }
+    }
+
+    /// Up / Down move between the activity bar's buttons, Home / End jump to the ends.
+    fn activity_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &event.keystroke;
+        if ks.modifiers.modified() {
+            return;
+        }
+        let before = window.focused(cx);
+        match ks.key.as_str() {
+            "down" => window.focus_next(),
+            "up" => window.focus_prev(),
+            _ => return,
+        }
+        // Stay inside the bar: wrapping into other regions is F6's job.
+        if !self.activity_focus.contains_focused(window, cx) {
+            if let Some(before) = before {
+                window.focus(&before);
+            }
+        }
+        cx.stop_propagation();
     }
 
     /// Marks the window as having no folder open (empty states with Open
@@ -238,6 +325,9 @@ impl Sidebar {
                 })
         });
         v_flex()
+            .id("activity-bar")
+            .track_focus(&self.activity_focus)
+            .on_key_down(cx.listener(Self::activity_key))
             .h_full()
             .w(px(46.))
             .flex_none()
@@ -284,7 +374,7 @@ impl Sidebar {
         let tree = self.file_tree.clone();
         let tree2 = self.file_tree.clone();
         h_flex()
-            .h(metrics::TAB_BAR_HEIGHT)
+            .h(metrics::tab_bar_height())
             .flex_none()
             .pl(px(14.))
             .pr(px(6.))
@@ -293,7 +383,7 @@ impl Sidebar {
             .border_color(ui.border_variant.hsla())
             .child(
                 div()
-                    .text_size(metrics::TEXT_XS)
+                    .text_size(metrics::text_xs())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(ui.text_muted.hsla())
                     .child(self.active.title().to_uppercase()),
@@ -366,13 +456,13 @@ impl Sidebar {
             .child(
                 div()
                     .mt(px(6.))
-                    .text_size(metrics::TEXT)
+                    .text_size(metrics::text())
                     .text_color(ui.text_muted.hsla())
                     .child(title),
             )
             .child(
                 div()
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .text_color(ui.text_faint.hsla())
                     .text_center()
                     .child(body),
@@ -407,7 +497,7 @@ impl Sidebar {
 }
 
 impl Render for Sidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();
         let content = match self.active {
             SidebarPanel::Files if self.has_folder => self.file_tree.clone().into_any_element(),
@@ -425,12 +515,20 @@ impl Render for Sidebar {
             .child(self.render_activity_bar(cx))
             .child(
                 v_flex()
+                    .id("sidebar-panel")
+                    .track_focus(&self.panel_focus)
+                    .relative()
                     .h_full()
                     .flex_1()
                     .min_w_0()
                     .bg(ui.surface.hsla())
                     .child(self.render_header(cx))
-                    .child(div().flex_1().min_h_0().pt(px(4.)).child(content)),
+                    .child(div().flex_1().min_h_0().pt(px(4.)).child(content))
+                    .children(crate::a11y::region_ring(
+                        self.panel_focus.contains_focused(window, cx),
+                        cx,
+                        px(0.),
+                    )),
             )
             .children(self.gear_menu.render())
     }

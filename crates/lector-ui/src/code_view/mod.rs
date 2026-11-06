@@ -1882,6 +1882,22 @@ impl CodeView {
         }
     }
 
+    /// Shift-F10 / the Menu key: the context menu at the caret (below its line).
+    fn show_context_menu(
+        &mut self,
+        _: &crate::actions::workspace::ShowContextMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let head = self.selection().head;
+        let below = self.last_layout.as_ref().map(|l| l.line_height);
+        let anchor = self
+            .point_for_pos(head)
+            .map(|p| gpui::point(p.x, p.y + below.unwrap_or(px(20.))))
+            .unwrap_or_else(|| gpui::point(px(120.), px(120.)));
+        self.deploy_context_menu(anchor, window, cx);
+    }
+
     fn toggle_read_only(&mut self, _: &ToggleReadOnly, _: &mut Window, cx: &mut Context<Self>) {
         if self.buffer.is_none() {
             cx.propagate();
@@ -1899,14 +1915,25 @@ impl CodeView {
         self.blink_task = None;
     }
 
+    /// Whether the caret blinks: `cursor_blink` is on and motion is not reduced
+    /// (`ui.reduce_motion`, or the OS preference).
+    fn blink_enabled(cx: &App) -> bool {
+        crate::settings::AppSettings::get(cx).cursor_blink && !crate::a11y::reduce_motion(cx)
+    }
+
+    /// Whether a blink timer is running (tests).
+    pub fn is_blinking(&self) -> bool {
+        self.blink_task.is_some()
+    }
+
     fn ensure_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.blink_task.is_some()
-            || !crate::settings::AppSettings::get(cx).cursor_blink
-            || !self.focus_handle.is_focused(window)
-        {
-            if !crate::settings::AppSettings::get(cx).cursor_blink {
-                self.cursor_visible = true;
-            }
+        if !Self::blink_enabled(cx) {
+            // Reduced motion (or blink off): a steady caret, and stop a timer that is running.
+            self.blink_task = None;
+            self.cursor_visible = true;
+            return;
+        }
+        if self.blink_task.is_some() || !self.focus_handle.is_focused(window) {
             return;
         }
         let epoch = self.blink_epoch;
@@ -1916,7 +1943,10 @@ impl CodeView {
                 .await;
             let go_on = this
                 .update_in(cx, |v, window, cx| {
-                    if v.blink_epoch != epoch || !v.focus_handle.is_focused(window) {
+                    if v.blink_epoch != epoch
+                        || !v.focus_handle.is_focused(window)
+                        || !Self::blink_enabled(cx)
+                    {
                         v.cursor_visible = true;
                         if v.blink_epoch == epoch {
                             v.blink_task = None;
@@ -2480,6 +2510,7 @@ impl Render for CodeView {
             .on_action(cx.listener(Self::add_cursor_above))
             .on_action(cx.listener(Self::add_cursor_below))
             .on_action(cx.listener(Self::split_selection_into_lines))
+            .on_action(cx.listener(Self::show_context_menu))
             .when(self.buffer.is_some(), |el| {
                 el.on_action(cx.listener(Self::undo))
                     .on_action(cx.listener(Self::redo))

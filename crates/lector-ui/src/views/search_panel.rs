@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::scale::px;
 use futures::StreamExt;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    div, prelude::*, AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     HighlightStyle, SharedString, StyledText, Subscription, Task, Window,
 };
 use lector_search::{CancelToken, CaseMode, LineMatch, SearchEvent, SearchQuery, WalkOptions};
@@ -45,7 +46,7 @@ pub fn input_box(input: Entity<TextInput>, icon: IconName, cx: &App) -> gpui::Di
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .text_size(metrics::TEXT)
+                .text_size(metrics::text())
                 .text_color(ui.text.hsla())
                 .child(input),
         )
@@ -160,7 +161,7 @@ impl SearchPanel {
             search_task: None,
             debounce_task: None,
             list: VirtualListState::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             context_menu: ContextMenuState::default(),
             _subscriptions: subs,
         }
@@ -516,13 +517,13 @@ impl SearchPanel {
             .child(
                 div()
                     .mt(px(4.))
-                    .text_size(metrics::TEXT)
+                    .text_size(metrics::text())
                     .text_color(ui.text_muted.hsla())
                     .child(title),
             )
             .child(
                 div()
-                    .text_size(metrics::TEXT_SM)
+                    .text_size(metrics::text_sm())
                     .text_color(ui.text_faint.hsla())
                     .text_center()
                     .child(body),
@@ -580,7 +581,7 @@ impl SearchPanel {
         div()
             .px(px(12.))
             .py(px(4.))
-            .text_size(metrics::TEXT_XS)
+            .text_size(metrics::text_xs())
             .text_color(if error {
                 cx.theme().git.deleted.hsla()
             } else {
@@ -628,7 +629,7 @@ fn match_row(m: &LineMatch, selected: bool, cx: &App) -> AnyElement {
         .pl(px(30.))
         .pr(px(8.))
         .gap(px(8.))
-        .text_size(metrics::TEXT_SM)
+        .text_size(metrics::text_sm())
         .when(selected, |el| el.bg(ui.active.hsla()))
         .when(!selected, |el| el.hover(|s| s.bg(ui.hover.hsla())))
         .child(
@@ -636,7 +637,7 @@ fn match_row(m: &LineMatch, selected: bool, cx: &App) -> AnyElement {
                 .flex_none()
                 .min_w(px(28.))
                 .text_color(ui.text_faint.hsla())
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .child(format!("{}", m.line + 1)),
         )
         .child(
@@ -727,6 +728,17 @@ impl Render for SearchPanel {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::workspace::ShowContextMenu, window, cx| {
+                    match this.selected {
+                        Some(ix) => {
+                            let position = this.list.row_anchor(ix, px(22.));
+                            this.deploy_menu(ix, position, window, cx)
+                        }
+                        None => cx.propagate(),
+                    }
+                },
+            ))
             .child(
                 v_flex()
                     .px(px(8.))
@@ -795,7 +807,7 @@ fn file_row(f: &FileResult, selected: bool, cx: &App) -> AnyElement {
         .pl(px(8.))
         .pr(px(8.))
         .gap(px(5.))
-        .text_size(metrics::TEXT)
+        .text_size(metrics::text())
         .when(selected, |el| el.bg(ui.active.hsla()))
         .when(!selected, |el| el.hover(|s| s.bg(ui.hover.hsla())))
         .child(
@@ -826,7 +838,7 @@ fn file_row(f: &FileResult, selected: bool, cx: &App) -> AnyElement {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(metrics::TEXT_XS)
+                        .text_size(metrics::text_xs())
                         .text_color(ui.text_faint.hsla())
                         .child(f.dir.clone()),
                 ),
@@ -837,7 +849,7 @@ fn file_row(f: &FileResult, selected: bool, cx: &App) -> AnyElement {
                 .px(px(6.))
                 .rounded(px(8.))
                 .bg(ui.hover.hsla())
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .text_color(ui.text_muted.hsla())
                 .child(format!("{}", f.matches.len())),
         )

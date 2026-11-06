@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{prelude::*, px, AnyElement, App, DismissEvent, SharedString, Window};
+use crate::scale::px;
+use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Window};
 
 use super::welcome::{recent_entries, RecentEntry};
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
@@ -147,7 +148,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                 .px(px(12.))
                 .py(px(6.))
                 .gap(px(14.))
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .text_color(ui.text_faint.hsla())
                 .child(format!(
                     "{} open in this window",

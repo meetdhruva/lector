@@ -34,6 +34,14 @@
                     Icon="LectorIcon" Advertise="yes" />
         </File>
       </Component>
+      <!-- Console build of the command line (no GUI deps): lector.com wins over lector.exe in a
+           terminal (PATHEXT), lector-cli.exe is the explicit name. -->
+      <Component Id="LectorCliExe">
+        <File Id="LectorCliExeFile" Source="$(SourceDir)\lector-cli.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="LectorCom">
+        <File Id="LectorComFile" Source="$(SourceDir)\lector.com" KeyPath="yes" />
+      </Component>
       <!-- One component per unversioned file so WiX can generate stable GUIDs. -->
       <Component Id="Readme">
         <File Source="$(SourceDir)\README.md" KeyPath="yes" />

@@ -15,12 +15,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId,
+    div, prelude::*, AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId,
     EventEmitter, Hsla, SharedString, Subscription, Task, WeakEntity, Window,
 };
 use lector_ui::code_view::{CodeView, RowBackground, RowWidget, WidgetAnchor};
 use lector_ui::components::{h_flex, metrics, Tooltip};
 use lector_ui::editor::{DocumentEvent, DocumentModel, FileView};
+use lector_ui::scale::px;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
 use lector_workspace::conflicts::{self, ConflictParse, Resolution, Side};
@@ -405,6 +406,11 @@ fn action_bar(
             .text_color(ui.text_muted.hsla())
             .cursor_pointer()
             .hover(|s| s.text_color(ui.text.hsla()).bg(ui.hover.hsla()))
+            .tab_index(0)
+            .focus({
+                let ring = ui.focus_ring.hsla();
+                move |s| lector_ui::a11y::focus_ring_style(s, ring)
+            })
             .tooltip(Tooltip::text(tip))
             .child(label)
     };
@@ -427,7 +433,7 @@ fn action_bar(
         .id(("conflict-actions", ix))
         .occlude()
         .gap(px(2.))
-        .text_size(metrics::TEXT_XS)
+        .text_size(metrics::text_xs())
         .child(
             link(
                 "accept-current",

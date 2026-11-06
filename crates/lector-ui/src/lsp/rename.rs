@@ -5,8 +5,9 @@
 
 use std::ops::Range;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, App, Context, Corner, DismissEvent, Entity, EventEmitter, FocusHandle,
+    div, prelude::*, App, Context, Corner, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable, SharedString, Window,
 };
 use lector_lsp::PointUtf16;
@@ -87,10 +88,10 @@ impl Render for RenameBox {
                     .px(px(6.))
                     .py(px(3.))
                     .gap(px(2.))
-                    .child(div().text_size(metrics::TEXT).child(self.input.clone()))
+                    .child(div().text_size(metrics::text()).child(self.input.clone()))
                     .child(
                         div()
-                            .text_size(metrics::TEXT_XS)
+                            .text_size(metrics::text_xs())
                             .text_color(ui.text_faint.hsla())
                             .child("Enter to rename, Escape to cancel"),
                     ),

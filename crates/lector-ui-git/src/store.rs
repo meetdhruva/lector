@@ -9,13 +9,15 @@
 use std::sync::Arc;
 
 use futures::StreamExt as _;
-use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity, Window};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, WeakEntity, Window};
 use lector_app::git_service::{GitSnapshot, RepoState, Subscription};
 use lector_config::{ReviewStore, Settings};
 use lector_git::{HeadInfo, Repo, StatusEntry};
 use lector_ui::views::{Workspace, WorkspaceEvent};
 use lector_workspace::conflicts::ConflictState;
 use lector_workspace::Project;
+
+use crate::review_model::{ModelInputs, ReviewModel};
 
 /// Emitted when `HEAD`, refs or status changed.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +43,8 @@ pub struct GitStore {
     pub generation: u64,
     /// The git views of this window (set by `init`).
     pub views: Option<crate::GitViews>,
+    /// Risk analysis of the working tree and the "new changes" state (v0.4 review UX).
+    pub review_model: Entity<ReviewModel>,
     state: Option<Arc<RepoState>>,
     _subscriptions: Vec<gpui::Subscription>,
     _repo_subscription: Option<Subscription>,
@@ -115,6 +119,7 @@ impl GitStore {
             review: core.review_store(),
             generation: 0,
             views: None,
+            review_model: cx.new(|_| ReviewModel::new()),
             state,
             _subscriptions: subscriptions,
             _repo_subscription: repo_subscription,
@@ -129,8 +134,24 @@ impl GitStore {
         self.status = snap.status.clone();
         self.conflicts = snap.conflicts.clone();
         self.generation += 1;
+        self.refresh_review_model(cx);
         cx.emit(GitStoreEvent::Changed);
         cx.notify();
+    }
+
+    fn refresh_review_model(&mut self, cx: &mut Context<Self>) {
+        let (Some(project), Some(repo)) = (self.project.as_ref(), self.repo().cloned()) else {
+            return;
+        };
+        let settings = self.settings(cx);
+        let inputs = ModelInputs {
+            repo,
+            languages: project.languages().clone(),
+            status: self.status.clone(),
+            diff_options: lector_workspace::review::diff_options(&settings.diff),
+            detect_moved: settings.review.detect_moved,
+        };
+        self.review_model.update(cx, |m, cx| m.refresh(inputs, cx));
     }
 
     /// The project.

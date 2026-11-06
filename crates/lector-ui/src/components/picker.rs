@@ -3,8 +3,9 @@
 
 use std::ops::Range;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, App, DismissEvent, Entity, EventEmitter,
+    div, prelude::*, uniform_list, AnyElement, App, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, MouseButton, Pixels, ScrollStrategy,
     SharedString, StyledText, Subscription, UniformListScrollHandle, Window,
 };
@@ -177,7 +178,7 @@ impl<D: PickerDelegate> Picker<D> {
             return div()
                 .px(px(14.))
                 .py(px(12.))
-                .text_size(metrics::TEXT)
+                .text_size(metrics::text())
                 .text_color(ui.text_faint.hsla())
                 .child(self.delegate.empty_message())
                 .into_any_element();
@@ -375,8 +376,8 @@ impl RenderOnce for PickerItem {
             .px(px(8.))
             .pl(px(8.) + self.indent)
             .gap(px(8.))
-            .rounded(metrics::RADIUS)
-            .text_size(metrics::TEXT)
+            .rounded(metrics::radius())
+            .text_size(metrics::text())
             .text_color(ui.text.hsla())
             .when(self.selected, |el| el.bg(ui.active.hsla()))
             .when(!self.selected, |el| el.hover(|s| s.bg(ui.hover.hsla())))
@@ -401,7 +402,7 @@ impl RenderOnce for PickerItem {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .text_size(metrics::TEXT_SM)
+                                .text_size(metrics::text_sm())
                                 .text_color(ui.text_faint.hsla())
                                 .child(highlighted_text(detail, &self.detail_positions, accent)),
                         )
@@ -415,7 +416,7 @@ impl RenderOnce for PickerItem {
                         .py(px(1.))
                         .rounded(px(4.))
                         .bg(ui.keybinding_bg.hsla())
-                        .text_size(metrics::TEXT_XS)
+                        .text_size(metrics::text_xs())
                         .text_color(ui.text_muted.hsla())
                         .child(end),
                 )

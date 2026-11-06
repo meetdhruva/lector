@@ -1,0 +1,12 @@
+[
+  {"method": "GET", "path": "/api/v4/user", "body": "{\"username\": \"ada\", \"id\": 7}"},
+  {"method": "GET", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests", "file": "mrs.json"},
+  {"method": "GET", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3", "file": "mr_3.json"},
+  {"method": "GET", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/diffs", "file": "diffs_3.json"},
+  {"method": "GET", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/discussions", "file": "discussions_3.json"},
+  {"method": "POST", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/discussions", "body": "{\"id\": \"d-new\", \"notes\": []}"},
+  {"method": "POST", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/notes", "body": "{\"id\": 900}"},
+  {"method": "POST", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/approve", "body": "{}"},
+  {"method": "POST", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/discussions/d1/notes", "body": "{\"id\": 77, \"body\": \"ok\", \"author\": {\"username\": \"ada\"}, \"created_at\": \"2026-11-06T10:00:00Z\"}"},
+  {"method": "PUT", "path": "/api/v4/projects/group%2Fsub%2Fapp/merge_requests/3/discussions/d1", "body": "{\"id\": \"d1\"}"}
+]

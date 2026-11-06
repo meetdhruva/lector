@@ -6,8 +6,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::scale::px;
 use gpui::{
-    div, prelude::*, px, AnyElement, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable,
+    div, prelude::*, AnyElement, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, SharedString, StyledText, Task, Window,
 };
 use lector_workspace::{Document, Project, Target, TargetSource};
@@ -81,7 +82,7 @@ impl ReferencesView {
             source: None,
             selected: None,
             list: VirtualListState::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             task: None,
             context_menu: ContextMenuState::default(),
         }
@@ -203,6 +204,21 @@ impl ReferencesView {
         cx.notify();
     }
 
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.rows.len();
+        if count == 0 {
+            return;
+        }
+        let next = match self.selected {
+            Some(ix) => (ix as isize + delta).clamp(0, count as isize - 1) as usize,
+            None if delta > 0 => 0,
+            None => count - 1,
+        };
+        self.selected = Some(next);
+        self.list.reveal(next);
+        cx.notify();
+    }
+
     fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.selected = Some(ix);
         match self.rows.get(ix).copied() {
@@ -289,7 +305,7 @@ fn ref_row(t: &Target, word: &str, selected: bool, cx: &App) -> AnyElement {
             div()
                 .flex_none()
                 .min_w(px(40.))
-                .text_size(metrics::TEXT_XS)
+                .text_size(metrics::text_xs())
                 .text_color(ui.text_faint.hsla())
                 .child(format!(
                     "{}:{}",
@@ -304,7 +320,7 @@ fn ref_row(t: &Target, word: &str, selected: bool, cx: &App) -> AnyElement {
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .font_family(crate::code_view::EditorSettings::get(cx).font_family)
-                .text_size(metrics::TEXT_SM)
+                .text_size(metrics::text_sm())
                 .text_color(ui.text_muted.hsla())
                 .child(StyledText::new(text).with_highlights(highlights)),
         )
@@ -366,7 +382,7 @@ impl Render for ReferencesView {
                                 .child(div().text_color(ui.text.hsla()).child(g.name.clone()))
                                 .child(
                                     div()
-                                        .text_size(metrics::TEXT_XS)
+                                        .text_size(metrics::text_xs())
                                         .text_color(ui.text_faint.hsla())
                                         .child(g.dir.clone()),
                                 )
@@ -375,7 +391,7 @@ impl Render for ReferencesView {
                                         .px(px(6.))
                                         .rounded(px(8.))
                                         .bg(ui.hover.hsla())
-                                        .text_size(metrics::TEXT_XS)
+                                        .text_size(metrics::text_xs())
                                         .text_color(ui.text_muted.hsla())
                                         .child(format!("{}", g.targets.len())),
                                 )
@@ -405,7 +421,36 @@ impl Render for ReferencesView {
         });
         v_flex()
             .size_full()
+            .key_context(crate::keymap::contexts::LIST_PANEL)
             .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &crate::actions::picker::SelectNext, _, cx| {
+                    this.move_selection(1, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::picker::SelectPrev, _, cx| {
+                    this.move_selection(-1, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::picker::Confirm, _, cx| {
+                    if let Some(ix) = this.selected {
+                        this.activate(ix, cx);
+                    }
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &crate::actions::workspace::ShowContextMenu, window, cx| {
+                    match this.selected {
+                        Some(ix) => {
+                            let position = this.list.row_anchor(ix, px(24.));
+                            this.deploy_menu(ix, position, window, cx)
+                        }
+                        None => cx.propagate(),
+                    }
+                },
+            ))
             .bg(ui.background.hsla())
             .child(
                 h_flex()
@@ -422,7 +467,7 @@ impl Render for ReferencesView {
                     )
                     .child(
                         div()
-                            .text_size(metrics::TEXT)
+                            .text_size(metrics::text())
                             .text_color(ui.text.hsla())
                             .child(summary),
                     ),

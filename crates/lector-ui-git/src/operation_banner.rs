@@ -8,11 +8,12 @@
 //! confirmation that says what is lost. Both are explicit clicks only.
 
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, Subscription, Task, Window,
+    div, prelude::*, App, Context, Entity, FontWeight, SharedString, Subscription, Task, Window,
 };
 use lector_git::{Oid, OperationKind, RepoOperation};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
+use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
 
 use crate::commit_composer::CommitComposer;
@@ -248,7 +249,7 @@ impl Render for OperationBanner {
             .mb(px(6.))
             .p(px(8.))
             .gap(px(6.))
-            .rounded(metrics::RADIUS)
+            .rounded(metrics::radius())
             .border_1()
             .border_color(accent.opacity(0.55))
             .bg(accent.opacity(0.08))
@@ -268,14 +269,14 @@ impl Render for OperationBanner {
                             .gap(px(1.))
                             .child(
                                 div()
-                                    .text_size(metrics::TEXT_SM)
+                                    .text_size(metrics::text_sm())
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(ui.text.hsla())
                                     .child(title(&op)),
                             )
                             .child(
                                 div()
-                                    .text_size(metrics::TEXT_XS)
+                                    .text_size(metrics::text_xs())
                                     .text_color(ui.text_muted.hsla())
                                     .child(subtitle),
                             ),
@@ -311,7 +312,7 @@ impl Render for OperationBanner {
                     h_flex()
                         .items_start()
                         .gap(px(6.))
-                        .text_size(metrics::TEXT_XS)
+                        .text_size(metrics::text_xs())
                         .text_color(ui.text.hsla())
                         .child(
                             Icon::new(IconName::CircleX)

@@ -14,8 +14,9 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use crate::scale::px;
 use gpui::{
-    anchored, deferred, div, prelude::*, px, AnyElement, App, Corner, EventEmitter, FocusHandle,
+    anchored, deferred, div, prelude::*, AnyElement, App, Corner, EventEmitter, FocusHandle,
     Focusable, KeyDownEvent, MouseButton, SharedString, Window,
 };
 
@@ -113,6 +114,10 @@ pub struct AppMenuBar {
     /// Pointer over the titles or an open dropdown (outside clicks close).
     hovered_titles: bool,
     hovered_levels: Vec<bool>,
+    /// Title the keyboard cursor is on while the bar has focus but no menu is open.
+    cursor: usize,
+    /// Where focus goes back to when the bar is left without choosing anything.
+    return_focus: Option<FocusHandle>,
 }
 
 impl EventEmitter<AppMenuEvent> for AppMenuBar {}
@@ -130,10 +135,25 @@ impl AppMenuBar {
             model: menu_model(),
             open: None,
             compact: false,
-            focus_handle: cx.focus_handle(),
+            // A tab stop: F6 / Tab reach the bar, arrows pick a title, Enter or Down opens it.
+            focus_handle: cx.focus_handle().tab_stop(true),
             hovered_titles: false,
             hovered_levels: Vec::new(),
+            cursor: 0,
+            return_focus: None,
         }
+    }
+
+    /// Moves keyboard focus onto the bar (F6, `FocusNextRegion`): the first title is
+    /// highlighted; Left / Right pick another, Enter / Down / Space open it, Escape returns
+    /// to where focus came from.
+    pub fn focus_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.return_focus = window
+            .focused(cx)
+            .filter(|f| *f != self.focus_handle && !self.focus_handle.contains_focused(window, cx));
+        self.cursor = 0;
+        window.focus(&self.focus_handle);
+        cx.notify();
     }
 
     /// Whether a dropdown is open.
@@ -180,7 +200,10 @@ impl AppMenuBar {
     ) {
         let previous_focus = match self.open.take() {
             Some(open) => open.previous_focus,
-            None => window.focused(cx).filter(|f| *f != self.focus_handle),
+            None => window
+                .focused(cx)
+                .filter(|f| *f != self.focus_handle)
+                .or_else(|| self.return_focus.take()),
         };
         let mut all_rows: Vec<Rc<Vec<MenuRow>>> = self
             .model
@@ -414,10 +437,37 @@ impl AppMenuBar {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
         if self.open.is_none() {
+            // Bar focused, nothing open: a plain menu bar.
+            if !self.focus_handle.is_focused(window)
+                || ks.modifiers.control
+                || ks.modifiers.platform
+                || ks.modifiers.alt
+            {
+                return;
+            }
+            let n = self.title_count();
+            match ks.key.as_str() {
+                "left" => self.cursor = (self.cursor + n - 1) % n,
+                "right" => self.cursor = (self.cursor + 1) % n,
+                "home" => self.cursor = 0,
+                "end" => self.cursor = n - 1,
+                "enter" | "space" | "down" | "up" => {
+                    let ix = self.cursor.min(n - 1);
+                    self.open_menu(ix, true, window, cx);
+                }
+                "escape" => {
+                    if let Some(focus) = self.return_focus.take() {
+                        window.focus(&focus);
+                    }
+                }
+                _ => return,
+            }
+            cx.notify();
+            cx.stop_propagation();
             return;
         }
-        let ks = &event.keystroke;
         if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
             if ks.key == "f" && ks.modifiers.alt && !self.compact {
                 // alt-f again toggles the menu off.
@@ -506,7 +556,7 @@ impl AppMenuBar {
                             .pl(px(10.))
                             .pr(px(10.))
                             .gap(px(10.))
-                            .rounded(metrics::RADIUS)
+                            .rounded(metrics::radius())
                             .text_color(fg)
                             .when(is_selected && enabled, |el| el.bg(ui.active.hsla()))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
@@ -541,7 +591,7 @@ impl AppMenuBar {
                                                 .min_w_0()
                                                 .overflow_hidden()
                                                 .text_ellipsis()
-                                                .text_size(metrics::TEXT_SM)
+                                                .text_size(metrics::text_sm())
                                                 .text_color(ui.text_faint.hsla())
                                                 .child(d),
                                         )
@@ -552,7 +602,7 @@ impl AppMenuBar {
                                     div()
                                         .flex_none()
                                         .pl(px(24.))
-                                        .text_size(metrics::TEXT_SM)
+                                        .text_size(metrics::text_sm())
                                         .text_color(ui.text_faint.hsla())
                                         .child(kb),
                                 )
@@ -565,7 +615,7 @@ impl AppMenuBar {
                         .pl(px(10.))
                         .pr(px(6.))
                         .gap(px(10.))
-                        .rounded(metrics::RADIUS)
+                        .rounded(metrics::radius())
                         .text_color(ui.text.hsla())
                         .cursor_pointer()
                         .when(is_selected, |el| el.bg(ui.active.hsla()))
@@ -599,7 +649,7 @@ impl AppMenuBar {
                 .occlude()
                 .min_w(px(if level == 0 { 240. } else { 220. }))
                 .max_w(px(520.))
-                .text_size(metrics::TEXT)
+                .text_size(metrics::text())
                 .on_hover(cx.listener(move |this, hovered: &bool, _, _| {
                     this.set_level_hovered(level, *hovered)
                 }))
@@ -639,6 +689,7 @@ impl AppMenuBar {
         ix: usize,
         label: SharedString,
         icon: Option<IconName>,
+        ring: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = cx.theme().ui.clone();
@@ -656,14 +707,17 @@ impl AppMenuBar {
                     .occlude()
                     .h(px(26.))
                     .px(px(if icon.is_some() { 6. } else { 8. }))
-                    .rounded(metrics::RADIUS)
-                    .text_size(metrics::TEXT)
+                    .rounded(metrics::radius())
+                    .text_size(metrics::text())
                     .text_color(if is_open {
                         ui.text.hsla()
                     } else {
                         ui.title_bar_fg.hsla().opacity(0.82)
                     })
                     .when(is_open, |el| el.bg(ui.active.hsla()))
+                    .when(ring, |el| {
+                        el.border_2().border_color(ui.focus_ring.hsla()).px(px(6.))
+                    })
                     .when(!is_open, |el| {
                         el.hover(|s| s.bg(ui.hover.hsla()).text_color(ui.text.hsla()))
                     })
@@ -863,7 +917,7 @@ fn menu_surface(cx: &App) -> gpui::Div {
         .bg(ui.elevated.hsla())
         .border_1()
         .border_color(ui.border.hsla())
-        .rounded(metrics::RADIUS_LG)
+        .rounded(metrics::radius_lg())
         .shadow_lg()
 }
 
@@ -874,15 +928,19 @@ fn first_selectable(rows: &[MenuRow], from: usize, step: usize) -> Option<usize>
 }
 
 impl Render for AppMenuBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let bar_focused = self.open.is_none() && self.focus_handle.is_focused(window);
+        let cursor = if self.compact { 0 } else { self.cursor };
         let titles: Vec<AnyElement> = if self.compact {
-            vec![self.render_title(0, "Menu".into(), Some(IconName::Menu), cx)]
+            vec![self.render_title(0, "Menu".into(), Some(IconName::Menu), bar_focused, cx)]
         } else {
             let names: Vec<&'static str> = self.model.iter().map(|m| m.name).collect();
             names
                 .into_iter()
                 .enumerate()
-                .map(|(ix, name)| self.render_title(ix, name.into(), None, cx))
+                .map(|(ix, name)| {
+                    self.render_title(ix, name.into(), None, bar_focused && ix == cursor, cx)
+                })
                 .collect()
         };
         h_flex()

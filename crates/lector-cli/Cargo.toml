@@ -1,0 +1,38 @@
+[package]
+name = "lector-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Headless command line of Lector: status, changes with risk, diffs, commands, activity, undo and the MCP server. No GUI dependencies."
+
+[lib]
+name = "lector_cli"
+path = "src/lib.rs"
+
+# The console-subsystem entry point. On Windows the GUI `lector.exe` has no console, so the
+# installers ship this binary as `lector-cli.exe` and `lector.com` (see docs/RELEASING.md).
+[[bin]]
+name = "lector-cli"
+path = "src/main.rs"
+
+[dependencies]
+lector-app.workspace = true
+lector-workspace.workspace = true
+lector-config.workspace = true
+lector-git.workspace = true
+lector-diff.workspace = true
+lector-mcp.workspace = true
+lector-agent.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+dunce.workspace = true
+
+[dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

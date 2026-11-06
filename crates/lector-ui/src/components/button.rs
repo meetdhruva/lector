@@ -2,7 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, AnyView, App, ClickEvent, ElementId, Hsla, SharedString, Window};
+use crate::scale::px;
+use gpui::{div, prelude::*, AnyView, App, ClickEvent, ElementId, Hsla, SharedString, Window};
 
 use super::{h_flex, metrics};
 use crate::icons::{Icon, IconName, IconSize};
@@ -134,17 +135,20 @@ impl RenderOnce for Button {
         let active = ui.active.hsla();
         let accent = self.style == ButtonStyle::Accent;
         let (px_x, h, text) = if self.compact {
-            (px(6.), px(20.), metrics::TEXT_SM)
+            (px(6.), px(20.), metrics::text_sm())
         } else {
-            (px(8.), px(26.), metrics::TEXT)
+            (px(8.), px(26.), metrics::text())
         };
+        let ring = crate::a11y::ring_color(cx);
+        let border_w = if border.is_some() { 1. } else { 0. };
+        let pad_focused = crate::a11y::ring_padding(px_x, border_w);
         let mut el = h_flex()
             .id(self.id)
             .flex_none()
             .gap(px(5.))
             .h(h)
             .px(px_x)
-            .rounded(metrics::RADIUS)
+            .rounded(metrics::radius())
             .text_size(text)
             .text_color(fg)
             .when(self.full_width, |el| el.w_full().justify_center())
@@ -156,7 +160,14 @@ impl RenderOnce for Button {
             })
             .child(self.label);
         if !self.disabled {
+            // A tab stop with the theme's focus ring; Enter and Space click it.
             el = el
+                .tab_index(0)
+                .focus(move |s| {
+                    crate::a11y::focus_ring_style(s, ring)
+                        .pl(pad_focused)
+                        .pr(pad_focused)
+                })
                 .cursor_pointer()
                 .when(!accent, |el| {
                     el.hover(move |s| s.bg(hover)).active(move |s| s.bg(active))
@@ -260,6 +271,7 @@ impl RenderOnce for IconButton {
         let active = ui.active.hsla();
         let hover_fg = ui.text.hsla();
         let side = self.square.unwrap_or(self.size.px() + px(10.));
+        let ring = crate::a11y::ring_color(cx);
         let mut el = div()
             .id(self.id)
             .flex()
@@ -267,11 +279,13 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .size(side)
-            .rounded(metrics::RADIUS)
+            .rounded(metrics::radius())
             .when(self.selected, |el| el.bg(active))
             .child(Icon::new(self.icon).size(self.size).color(color));
         if !self.disabled {
             el = el
+                .tab_index(0)
+                .focus(move |s| crate::a11y::focus_ring_style(s, ring))
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover).text_color(hover_fg))
                 .active(move |s| s.bg(active));

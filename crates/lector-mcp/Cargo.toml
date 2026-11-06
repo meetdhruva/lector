@@ -1,0 +1,21 @@
+[package]
+name = "lector-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Model Context Protocol server for Lector: registry commands as MCP tools over stdio (JSON-RPC 2.0, no async runtime)."
+
+[dependencies]
+lector-app.workspace = true
+lector-workspace.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+dunce.workspace = true
+
+[dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

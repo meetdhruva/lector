@@ -132,6 +132,22 @@ fn args_for(id: &str, head: &str) -> Vec<Value> {
             vec![json!({"path": "src/main.rs"})]
         }
         "document.set_read_only" => vec![json!({"path": "src/main.rs", "read_only": true})],
+        // Review comments live in Lector's db; commands run in id order (add, delete,
+        // export, list, reply, resolve) and ids start at 1 (thread 1 / comment 2, thread 3).
+        "comments.add" => vec![
+            json!({"path": "src/main.rs", "line": 0, "body": "first"}),
+            json!({"path": "src/main.rs", "line": 1, "end_line": 2, "body": "second", "draft": true}),
+        ],
+        "comments.delete" => vec![json!({"thread": 3})],
+        "comments.reply" => vec![json!({"thread": 1, "body": "reply"})],
+        "comments.resolve" => vec![
+            json!({"thread": 1}),
+            json!({"thread": 1, "resolved": false}),
+        ],
+        "comments.export" => vec![
+            json!({}),
+            json!({"format": "json", "include_resolved": true}),
+        ],
         _ => vec![json!({})],
     }
 }
