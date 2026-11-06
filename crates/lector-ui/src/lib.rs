@@ -15,6 +15,7 @@ pub use gpui;
 pub mod actions;
 pub mod assets;
 pub mod code_view;
+pub mod commands_bridge;
 pub mod components;
 pub mod editor;
 pub mod fuzzy;
@@ -64,6 +65,7 @@ pub fn init(
     settings::apply_settings(cx, settings.0, settings.1);
     settings::bind_effective_keymap(cx);
     lsp::init(cx);
+    commands_bridge::init(cx);
     cx.on_action(|_: &actions::workspace::Quit, cx| views::workspace::quit_with_prompts(cx));
     cx.on_action(|_: &actions::workspace::NewWindow, cx| {
         if let Err(err) = open_empty_window(cx, None) {
@@ -106,7 +108,7 @@ pub fn open_folder_window(
     root: PathBuf,
     file: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    if let Err(err) = lector_config::RecentProjects::new().record(&root) {
+    if let Err(err) = commands_bridge::recent_projects().record(&root) {
         tracing::warn!("cannot record recent project: {err}");
     }
     open_workspace_window(

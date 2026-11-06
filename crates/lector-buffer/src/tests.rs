@@ -3079,3 +3079,14 @@ fn replacing_a_selection_by_itself_is_not_an_edit() {
     b.paste("abc");
     assert!(!b.is_dirty());
 }
+
+/// Proptest regression: two carets on one whitespace-only line, typing a closer.
+/// Electric outdent of the end caret used to overlap the other caret's insert.
+#[test]
+fn electric_outdent_skips_rows_with_several_carets() {
+    let mut b = Buffer::new(Rope::from_str("ae\u{301}\n  "), BufferOptions::default());
+    b.set_selections(vec![Selection::caret(0, 6), Selection::caret(0, 7)]);
+    b.insert(")");
+    assert_eq!(b.text().to_string(), "ae\u{301}\n ) )");
+    assert_eq!(b.selections().len(), 2);
+}

@@ -297,6 +297,102 @@ fn looks_binary(path: &Path) -> bool {
     buf[..n].contains(&0)
 }
 
+/// Searches exactly `files` (paths relative to `root`, e.g. the candidates of a
+/// [`crate::TrigramIndex`]) with the same semantics and events as
+/// [`search_project`] (no walking: `WalkOptions` and `query.exclude` do not
+/// apply; `query.include` still filters). Files are searched on all cores.
+pub fn search_files(
+    root: &Path,
+    files: &[PathBuf],
+    query: &SearchQuery,
+    cancel: &CancelToken,
+    sink: impl Fn(SearchEvent) + Send + Sync,
+) -> Result<()> {
+    let done = |files_searched, matches, truncated| SearchEvent::Done {
+        files_searched,
+        matches,
+        truncated,
+    };
+    if query.pattern.is_empty() {
+        sink(done(0, 0, false));
+        return Ok(());
+    }
+    let matcher = match build_matcher(query) {
+        Ok(m) => m,
+        Err(e) => {
+            sink(SearchEvent::Error(e.to_string()));
+            sink(done(0, 0, false));
+            return Err(e);
+        }
+    };
+    let (include, _) = build_set(&query.include);
+    let has_include = !query.include.is_empty();
+    let files_searched = AtomicUsize::new(0);
+    let total = AtomicUsize::new(0);
+    let truncated = AtomicBool::new(false);
+    let next = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .min(8);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                let mut searcher = SearcherBuilder::new()
+                    .line_number(true)
+                    .binary_detection(BinaryDetection::quit(b'\0'))
+                    .build();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(rel) = files.get(i) else { break };
+                    if cancel.is_cancelled() || truncated.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if has_include && !include.is_match(rel) {
+                        continue;
+                    }
+                    let full = root.join(rel);
+                    if std::fs::metadata(&full)
+                        .map(|m| !m.is_file() || m.len() > MAX_FILE_SIZE)
+                        .unwrap_or(true)
+                        || looks_binary(&full)
+                    {
+                        continue;
+                    }
+                    let mut fs = FileSink {
+                        matcher: &matcher,
+                        out: Vec::new(),
+                        binary: false,
+                        total: &total,
+                        max: query.max_results,
+                        truncated: &truncated,
+                        cancel,
+                    };
+                    if searcher.search_path(&matcher, &full, &mut fs).is_ok() {
+                        files_searched.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if fs.binary {
+                        total.fetch_sub(fs.out.len(), Ordering::Relaxed);
+                        continue;
+                    }
+                    if !fs.out.is_empty() {
+                        sink(SearchEvent::File(FileMatches {
+                            path: rel.clone(),
+                            matches: fs.out,
+                        }));
+                    }
+                }
+            });
+        }
+    });
+    sink(done(
+        files_searched.load(Ordering::Relaxed),
+        total.load(Ordering::Relaxed),
+        truncated.load(Ordering::Relaxed),
+    ));
+    Ok(())
+}
+
 /// Searches the files under `root` (walked with `walk` plus `query.exclude`/`include`) in
 /// parallel, emitting one [`SearchEvent::File`] per file with matches and finally exactly
 /// one [`SearchEvent::Done`]. Binary files (NUL byte) and files over 10 MB are skipped.

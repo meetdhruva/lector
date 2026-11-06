@@ -204,7 +204,10 @@ pub fn discard_spec(tracked: &[String], untracked: &[String]) -> ConfirmSpec {
             .into(),
         );
     }
-    message.push("This cannot be undone.".into());
+    message.push(
+        "Lector backs the changes up first; undo from the Activity log (ctrl/cmd-alt-z) if you change your mind."
+            .into(),
+    );
     let items = tracked
         .iter()
         .map(|p| SharedString::from(p.clone()))

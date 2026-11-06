@@ -726,11 +726,11 @@ impl ChangesPanel {
                     .separator(),
                 Section::Unstaged => menu
                     .icon_entry("Stage", IconName::Plus, toggle)
-                    .icon_entry("Discard Changes…", IconName::Undo, discard)
+                    .icon_entry("Discard Changes", IconName::Undo, discard)
                     .separator(),
                 Section::Untracked => menu
                     .icon_entry("Stage", IconName::Plus, toggle)
-                    .icon_entry("Delete File…", IconName::Trash, discard)
+                    .icon_entry("Delete File", IconName::Trash, discard)
                     .separator(),
                 Section::Conflicts => {
                     let (t, r) = (this.clone(), rel.clone());
@@ -961,7 +961,7 @@ impl ChangesPanel {
                 button(
                     "discard-all-unstaged",
                     IconName::Undo,
-                    "Discard All Changes…",
+                    "Discard All Changes",
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
@@ -979,7 +979,7 @@ impl ChangesPanel {
                 button(
                     "delete-all-untracked",
                     IconName::Trash,
-                    "Delete All Untracked Files…",
+                    "Delete All Untracked Files",
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
@@ -1034,7 +1034,7 @@ impl ChangesPanel {
                 }))
                 .into_any_element()],
             Section::Unstaged => vec![
-                button("row-discard", IconName::Undo, "Discard Changes…")
+                button("row-discard", IconName::Undo, "Discard Changes")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.discard_file(si, fi, window, cx);
@@ -1043,7 +1043,7 @@ impl ChangesPanel {
                 stage().into_any_element(),
             ],
             Section::Untracked => vec![
-                button("row-delete", IconName::Trash, "Delete File…")
+                button("row-delete", IconName::Trash, "Delete File")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.discard_file(si, fi, window, cx);

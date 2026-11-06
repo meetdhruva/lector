@@ -18,6 +18,7 @@ mod structure;
 mod symbols;
 mod syntax;
 mod tags;
+mod walk;
 
 pub use error::{Result, SyntaxError};
 pub use highlight::HighlightSpan;
@@ -28,6 +29,7 @@ pub use outline::{OutlineItem, SymbolKind};
 pub use symbols::{SymbolIndex, SymbolLocation};
 pub use syntax::{NodeInfo, Syntax, SyntaxEdit, MAX_PARSE_BYTES};
 pub use tags::Tag;
+pub use walk::TreeNode;
 
 #[cfg(test)]
 mod query_tests {

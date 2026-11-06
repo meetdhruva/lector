@@ -4371,6 +4371,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "lector-app"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "dunce",
+ "futures",
+ "lector-buffer",
+ "lector-config",
+ "lector-diff",
+ "lector-fs",
+ "lector-git",
+ "lector-lsp",
+ "lector-search",
+ "lector-syntax",
+ "lector-text",
+ "lector-workspace",
+ "num_cpus",
+ "parking_lot",
+ "proptest",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "lector-buffer"
 version = "0.3.0"
 dependencies = [
@@ -4456,6 +4485,7 @@ dependencies = [
 name = "lector-search"
 version = "0.3.0"
 dependencies = [
+ "criterion",
  "globset",
  "grep-matcher",
  "grep-regex",
@@ -4463,7 +4493,9 @@ dependencies = [
  "ignore",
  "nucleo",
  "parking_lot",
+ "proptest",
  "regex",
+ "regex-syntax",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -4537,6 +4569,7 @@ dependencies = [
  "futures",
  "gpui",
  "image",
+ "lector-app",
  "lector-buffer",
  "lector-config",
  "lector-diff",
@@ -4552,6 +4585,7 @@ dependencies = [
  "parking_lot",
  "pulldown-cmark",
  "resvg",
+ "serde_json",
  "smallvec",
  "tempfile",
  "tracing",
@@ -4565,7 +4599,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "dunce",
+ "futures",
  "gpui",
+ "lector-app",
  "lector-buffer",
  "lector-config",
  "lector-diff",
@@ -4578,6 +4614,7 @@ dependencies = [
  "lector-ui",
  "lector-workspace",
  "parking_lot",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
@@ -4587,6 +4624,7 @@ name = "lector-workspace"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "dunce",
  "futures",
  "lector-buffer",
@@ -4601,6 +4639,7 @@ dependencies = [
  "memchr",
  "parking_lot",
  "proptest",
+ "regex",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -6165,6 +6204,15 @@ name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
+
+[[package]]
+name = "redb"
+version = "4.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b317ef681e18f6091efbfab532eaf924a135c492d9d0299d0fbfae07e92a39b"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "redox_syscall"

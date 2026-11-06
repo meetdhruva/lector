@@ -757,7 +757,7 @@ fn resolve_rows(entries: &[MenuEntrySpec], window: &mut Window, cx: &mut App) ->
 }
 
 fn recent_rows(window: &mut Window, cx: &mut App) -> Vec<MenuRow> {
-    let recent = lector_config::RecentProjects::new().list();
+    let recent = crate::commands_bridge::recent_projects().list();
     let mut rows: Vec<MenuRow> = recent
         .into_iter()
         .take(MAX_RECENT_IN_MENU)

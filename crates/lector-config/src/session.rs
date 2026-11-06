@@ -121,6 +121,14 @@ impl Default for Session {
     }
 }
 
+/// Stable key of a project root for session storage: 16 hex chars of the SHA-256 of
+/// the canonical root (also the v0.3 file stem `sessions/<key>.json`).
+pub fn session_key(root: &Path) -> String {
+    let canon = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let digest = Sha256::digest(canon.to_string_lossy().as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 /// Persists [`Session`]s as `<dir>/<hash of canonical root>.json`.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
@@ -128,13 +136,18 @@ pub struct SessionStore {
 }
 
 impl Default for SessionStore {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl SessionStore {
-    /// Store under `data_dir()/sessions`.
+    /// Store under `data_dir()/sessions` (the v0.3 JSON store).
+    #[deprecated(
+        since = "0.4.0",
+        note = "sessions live in the database: lector_app::db::Db::session_store"
+    )]
     pub fn new() -> Self {
         Self {
             dir: paths::sessions_dir(),
@@ -147,10 +160,7 @@ impl SessionStore {
     }
 
     fn file_for(&self, root: &Path) -> PathBuf {
-        let canon = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let digest = Sha256::digest(canon.to_string_lossy().as_bytes());
-        let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-        self.dir.join(format!("{hex}.json"))
+        self.dir.join(format!("{}.json", session_key(root)))
     }
 
     /// Load the session for `root`; `None` if missing or corrupt.

@@ -15,14 +15,19 @@ mod cancel;
 mod globs;
 mod grep;
 mod picker;
+mod trigram;
 mod walk;
 
 pub use cancel::CancelToken;
 pub use grep::{
-    find_in_text, replacements_in_text, search_project, CaseMode, FileMatches, LineMatch,
-    SearchError, SearchEvent, SearchQuery,
+    find_in_text, replacements_in_text, search_files, search_project, CaseMode, FileMatches,
+    LineMatch, SearchError, SearchEvent, SearchQuery,
 };
-pub use picker::{Picker, PickerInjector, PickerMatch};
+pub use picker::{Picker, PickerInjector, PickerMatch, MAX_RESULTS};
+pub use trigram::{
+    Candidates, RefreshStats, TrigramError, TrigramIndex, UpdateOutcome, FORMAT_VERSION,
+    MAX_INDEXED_FILE_SIZE,
+};
 pub use walk::{walk_files, WalkOptions};
 
 /// Result alias for search operations.

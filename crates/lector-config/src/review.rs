@@ -41,14 +41,42 @@ struct Inner {
     map: HashMap<Key, Entry>,
 }
 
+/// Storage behind a [`ReviewStore`] other than the v0.3 JSON file (v0.4: the
+/// `lector-app` database). Keys are (repo root, changeset key, path).
+pub trait ReviewBackend: Send + Sync {
+    /// The content hash recorded for the key, if marked viewed.
+    fn get(&self, repo: &str, changeset: &str, path: &str) -> Option<String>;
+    /// Records (`Some(hash)`) or clears (`None`) a mark.
+    fn set(
+        &self,
+        repo: &str,
+        changeset: &str,
+        path: &str,
+        hash: Option<&str>,
+    ) -> std::io::Result<()>;
+    /// Number of stored marks.
+    fn len(&self) -> usize;
+    /// True when no marks are stored.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// "Viewed" marks for files in a changeset. A mark records the content hash
 /// and stops counting once the content differs.
+///
+/// Since v0.4 the application stores marks in its database
+/// ([`ReviewStore::with_backend`], built by `lector_app::db::Db::review_store`); the
+/// JSON file ([`ReviewStore::open`]) remains for tests and as the v0.3 import source.
 #[derive(Clone)]
 pub struct ReviewStore {
     inner: Arc<Mutex<Inner>>,
+    backend: Option<Arc<dyn ReviewBackend>>,
 }
 
 impl Default for ReviewStore {
+    /// The v0.3 JSON store at `data_dir()/review.json` (deprecated in v0.4: prefer
+    /// the database-backed store from `lector_app`).
     fn default() -> Self {
         Self::open(paths::review_file())
     }
@@ -84,11 +112,28 @@ impl ReviewStore {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(Inner { file, map })),
+            backend: None,
+        }
+    }
+
+    /// A store over another backend (v0.4 database).
+    pub fn with_backend(backend: Arc<dyn ReviewBackend>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                file: PathBuf::new(),
+                map: HashMap::new(),
+            })),
+            backend: Some(backend),
         }
     }
 
     /// Whether `path` is marked viewed for this changeset *at this content*.
     pub fn is_viewed(&self, repo: &Path, changeset: &str, path: &str, content_hash: &str) -> bool {
+        if let Some(b) = &self.backend {
+            return b
+                .get(&repo.to_string_lossy(), changeset, path)
+                .is_some_and(|h| h == content_hash);
+        }
         self.inner
             .lock()
             .map
@@ -105,6 +150,10 @@ impl ReviewStore {
         content_hash: &str,
         viewed: bool,
     ) -> std::io::Result<()> {
+        if let Some(b) = &self.backend {
+            let hash = viewed.then_some(content_hash);
+            return b.set(&repo.to_string_lossy(), changeset, path, hash);
+        }
         let mut g = self.inner.lock();
         let k = key(repo, changeset, path);
         if viewed {
@@ -138,6 +187,9 @@ impl ReviewStore {
 
     /// Number of stored marks.
     pub fn len(&self) -> usize {
+        if let Some(b) = &self.backend {
+            return b.len();
+        }
         self.inner.lock().map.len()
     }
 

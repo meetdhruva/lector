@@ -1285,12 +1285,16 @@ impl CodeView {
         if let Some(buffer) = self.buffer.clone() {
             let sels = self.selections.clone();
             let primary = self.primary;
-            return buffer.update(cx, |b, _| {
+            return buffer.update(cx, |b, cx| {
                 let text = b.text().clone();
                 let bsels = edit::to_buffer_selections(&text, &sels, primary);
-                let buf = b.buffer_mut();
-                buf.set_selections(bsels);
-                buf.copy()
+                b.update_buffer(
+                    |buf| {
+                        buf.set_selections(bsels);
+                        buf.copy()
+                    },
+                    cx,
+                )
             });
         }
         if self.selections.iter().all(|s| s.is_empty()) {
@@ -1421,12 +1425,12 @@ impl CodeView {
             let text = b.text().clone();
             let before = text.version();
             let bsels = edit::to_buffer_selections(&text, &sels, primary);
-            let r = b.edit(Some(origin), Some(bsels), f, cx);
+            let r = b.edit(Some(origin), Some(bsels), f, cx)?;
             let rope = b.text().clone();
             let changed = rope.version() != before;
             let sels = edit::from_buffer_selections(&rope, b.buffer().selections());
-            (r, sels, changed, rope)
-        });
+            Some((r, sels, changed, rope))
+        })?;
         if changed && self.manage_source {
             let name = self
                 .path
@@ -1465,13 +1469,18 @@ impl CodeView {
         };
         let sels = self.selections.clone();
         let primary = self.primary;
-        let new_sels = buffer.update(cx, |b, _| {
+        let new_sels = buffer.update(cx, |b, cx| {
+            b.catch_up(cx);
             let text = b.text().clone();
             let bsels = edit::to_buffer_selections(&text, &sels, primary);
-            let buf = b.buffer_mut();
-            buf.set_selections(bsels);
-            f(buf);
-            edit::from_buffer_selections(&text, buf.selections())
+            b.update_buffer(
+                |buf| {
+                    buf.set_selections(bsels);
+                    f(buf);
+                    edit::from_buffer_selections(&text, buf.selections())
+                },
+                cx,
+            )
         });
         let (sels, primary) = selection::normalize(new_sels.0, new_sels.1);
         self.selections = sels;
@@ -2250,7 +2259,7 @@ impl CodeView {
     fn end_ime_transaction(&mut self, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.ime_transaction) {
             if let Some(buffer) = &self.buffer {
-                buffer.update(cx, |b, _| b.buffer_mut().end_transaction());
+                buffer.update(cx, |b, cx| b.update_buffer(|b| b.end_transaction(), cx));
             }
         }
     }
@@ -2356,7 +2365,7 @@ impl EntityInputHandler for CodeView {
             });
         if !self.ime_transaction {
             if let Some(buffer) = &self.buffer {
-                buffer.update(cx, |b, _| b.buffer_mut().begin_transaction());
+                buffer.update(cx, |b, cx| b.update_buffer(|b| b.begin_transaction(), cx));
                 self.ime_transaction = true;
             }
         }

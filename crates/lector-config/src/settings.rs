@@ -157,7 +157,9 @@ pub struct GitSettings {
     pub blame_gutter: bool,
     /// Show change marks in the gutter.
     pub show_gutter: bool,
-    /// Ask before discarding changes (files or hunks). Discarding cannot be undone.
+    /// Ask before discarding changes (files or hunks). Off by default since v0.4: Lector backs the
+    /// changes up first and shows an Undo toast instead. Discards still ask when the backup
+    /// (shadow repository) is unavailable.
     pub confirm_discard: bool,
     /// Add a `Signed-off-by` trailer to commits.
     pub commit_sign_off: bool,
@@ -170,7 +172,7 @@ impl Default for GitSettings {
         Self {
             blame_gutter: false,
             show_gutter: true,
-            confirm_discard: true,
+            confirm_discard: false,
             commit_sign_off: false,
             commit_message_ruler: 72,
         }
@@ -426,8 +428,9 @@ enabled = true
 blame_gutter = false
 # Show added/modified/deleted marks in the gutter.
 show_gutter = true
-# Ask before discarding changes (files or hunks); discarding cannot be undone.
-confirm_discard = true
+# Ask before discarding changes (files or hunks). Off: Lector backs them up and offers Undo
+# (Activity log, ctrl/cmd-alt-z); it still asks when it cannot back up.
+confirm_discard = false
 # Add a "Signed-off-by" trailer to commits.
 commit_sign_off = false
 # Guide column in the commit message editor (0 = none).

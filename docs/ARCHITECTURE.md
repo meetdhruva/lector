@@ -52,8 +52,16 @@ can edit and save files. The rules:
    never write — `crates/lector-workspace/tests/release_audit.rs` keeps enforcing this
    for every read path.
 2. **Opt-in automation only.** Auto-save and format-on-save are off by default.
-3. **Destructive operations confirm** (`git.confirm_discard`, closing unsaved tabs,
-   reloading a modified file) and say what will be lost.
+3. **Destructive operations are undoable, or confirm** (v0.4). Before a discard or any
+   other overwrite of user files, Lector backs up what will be lost into the **shadow
+   repo** (Lector's own data dir, never the user's `.git`), records the write in the
+   activity journal and shows an "Undo" toast instead of asking first
+   (`git.confirm_discard` now defaults to `false`; `true` brings the old confirmation
+   back). A confirmation remains only when the backup cannot be taken, when the
+   operation is irreversible (abort a rebase, ...), and for closing unsaved tabs /
+   reloading a modified file. Undoing never throws away newer edits silently: files that
+   changed since the operation make Undo ask "restore anyway?", and that is itself
+   backed up and undoable. Backups are kept 30 days / 1 GiB per repository.
 4. **Git writes go through the git CLI** (`lector-git::write`): hooks, index locking,
    filters (autocrlf, LFS) and signing behave exactly as in the terminal. Read paths stay
    on gix. Commands run with `-C <workdir>`, never through a shell, with arguments
@@ -258,6 +266,7 @@ conversion). Hunks always index original lines; sliders use imara-diff's indent 
 `fold_context` keeps `context` rows around changes, never folds fewer than 2 rows, and folds a
 change-free file entirely. `refine_inline` returns whole-line ranges when lines share <35% of
 non-whitespace bytes or exceed 4000 tokens. `GutterMark` `Deleted` is an empty range at the row after the removal.
+v0.4 (additive): `pub mod moves` (moved-code detection) and `pub mod remap` (`LineMap`, `reanchor`), see "v0.4 algorithms".
 
 ### lector-search
 ```rust
@@ -296,6 +305,8 @@ indices. `search_project`: `max_results == 0` is unlimited and counts matching l
 completes with `Done` and zero results; an invalid regex emits `Error` then `Done` and returns `Err`; binary
 files (NUL anywhere) and files > 10 MB are skipped; lines > 500 bytes are windowed around the first match
 (`ranges` always index `text`); `^`/`$` anchor per line; non-UTF-8 files are searched lossily.
+v0.4 (additive): `TrigramIndex`, `Candidates`, `search_files`, `PickerInjector::push_boosted`, `MAX_RESULTS`; the
+Picker now has its own top-k scorer (see "v0.4 algorithms").
 
 ### lector-git
 ```rust
@@ -491,6 +502,8 @@ pub mod paths { pub fn portable_root() -> Option<&'static Path> /* <exe dir>/lec
 pub struct SessionStore; // load(root) -> Option<Session>, save(root, &Session) — JSON under data_dir/sessions/<hash>.json
 pub struct RecentProjects; // new(), list() -> Vec<PathBuf> (newest first), most_recent_existing(), record(root), remove(root) — data_dir/recent.json, max 20
 pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is_viewed/set_viewed, persisted JSON
+// v0.4: ReviewStore::with_backend(Arc<dyn ReviewBackend { get, set, len }>) (lector-app's Db implements it);
+// session_key(root) -> String; SessionStore::new / RecentProjects::new are deprecated (Db-backed stores in lector-app).
 // Additions (lector-config): `load_settings_for(Option<&Path>)`, `Settings` sub-structs (ThemeSettings, DiffSettings,
 // FileSettings, LspSettings{enabled, servers: BTreeMap<String, ServerOverride{command,args,enabled}>}, GitSettings,
 // SessionSettings); `buffer_font_family: Vec<String>` (accepts a string or list in TOML); `Platform::{MacOS,Linux,Windows}`
@@ -702,15 +715,24 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
   selection}); afterwards `notify_repo_changed` emits `GitStoreEvent::Changed` unconditionally (status can look the
   same after staging one more hunk) and refreshes HEAD/status, so Changes, History, diff tabs and the branch label
   reload at once. Failures show git's stderr inline (panel banner / diff banner / commit error box), never only logs.
-  * Changes panel: hover buttons per row (Staged: − Unstage; Unstaged: ↶ Discard…, + Stage; Untracked: 🗑 Delete…,
+  * Changes panel: hover buttons per row (Staged: − Unstage; Unstaged: ↶ Discard, + Stage; Untracked: 🗑 Delete,
     + Stage; Conflicts: ✓ Mark Resolved) replacing the stats while hovered; section headers: Unstage All / Discard
-    All… + Stage All / Delete All Untracked… + Stage All; the same items head each row's context menu. The file list
+    All… + Stage All / Delete All Untracked + Stage All; the same items head each row's context menu. The file list
     has key context `ChangesPanel` (`space` = `git::Stage` toggles the selected row, `up`/`down`/`enter`; clicking a
     row opens the preview diff and keeps focus in the list). After an op the selection stays on the file if it is still
     in its section, else on the row now at the same position (space walks down a section); the list keeps its scroll.
-  * Discards confirm via `confirm::{confirm, discard_spec}` (modal in the workspace's `ModalLayer`; Enter / Escape)
-    unless `git.confirm_discard = false`, naming every file, saying staged changes are kept and that untracked files
-    are deleted from disk.
+  * Discards (v0.4) run at once through the `git.discard*` registry commands after a shadow backup and show the
+    8 s "Discarded … · Undo" toast (`Workspace::show_action_toast`; also `workspace::UndoLastOperation`). They confirm
+    via `confirm::{confirm, discard_spec}` (modal in the workspace's `ModalLayer`; Enter / Escape; naming every file,
+    saying staged changes are kept and that untracked files are deleted from disk) only when `git.confirm_discard =
+    true` (default `false`) or when the backup is unavailable (`BackupUnavailable` → "Discard without a backup?").
+    Every Changes-panel / diff / merge-editor button goes through `staging::run_op(store, GitOp, cx)`, which invokes
+    the command (`GitOp::command` maps op → id + args), refreshes the git views and shows the toast.
+  * `activity::{ActivityView, ActivityItem}` — the **Activity log** tab (`workspace::ShowActivity`, View → Activity
+    Log): every journaled write newest first (what, when, repository, files), an Undo button per entry (disabled with
+    the reason: already undone, irreversible, backup cleaned up), "Show changes" opening a before/after `CompareItem`
+    from the shadow backup; live via `Journal::subscribe`. Undo of an entry → `Journal::undo`; `Changed` → confirmation
+    "These files changed since — restore anyway?" → `UndoMode::Force`; a successful undo toasts "Redo".
   * `commit_composer::CommitComposer` (top of the panel in Working Tree mode; key context `CommitEditor`, so
     `cmd/ctrl-enter` = `git::Commit`): a `TextArea` in the buffer font with the `git.commit_message_ruler` column and
     a subject-length counter (amber > 50, red > 72), Amend (`git::ToggleAmend`; loads `last_commit_message`, restores
@@ -750,7 +772,7 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
     Mark Resolved: markers or marker problems left → confirm "Resolve Anyway"; then `FileView::save` (normal save path,
     disk-conflict prompt included) → `GitOp::Stage` → opens the next conflicted path (sorted, wrapping) and closes
     the tab, or toasts and shows the Changes panel when none is left. Modify/delete conflicts show Keep File (stage)
-    / Delete File… (confirmed; deletes and stages).
+    / Delete File (`git.resolve_delete`: backed up, no confirmation, Undo toast).
   * `operation_banner::OperationBanner` at the top of the Changes panel: "Merging feature → main" / "Rebasing feature
     onto main (3/7)" / "Cherry-picking abc1234 …", "2 conflicts · resolve, then Continue", **Continue** (disabled
     while conflicts remain; merge → commit composer with `MERGE_MSG` prefilled once per merge — the composer is in
@@ -1075,7 +1097,8 @@ pub struct JobHandle<T>;   // cancel(), is_finished(), try_take(), into_future()
 
 // commands/ (Agent APP)
 pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'static str, pub category: &'static str,
-                         pub args_schema: serde_json::Value /* JSON Schema */, pub destructive: bool, pub undoable: bool,
+                         pub args_schema: serde_json::Value /* JSON Schema */, pub writes: bool /* journaled */,
+                         pub destructive: bool, pub undoable: bool,
                          pub ui_action: Option<&'static str> /* "git::Stage" — the GPUI action that dispatches it */ }
 pub enum Availability { Available, Unavailable(String /* why, shown as tooltip */) }
 pub struct CommandContext { pub core: AppCore, pub project: Option<Project>, pub focus: Focus /* active path, selections, changeset, hunk */ }
@@ -1085,7 +1108,9 @@ pub trait Command: Send + Sync {
     fn preview(&self, cx: &CommandContext, args: &Value) -> anyhow::Result<Option<String /* human text or unified diff */>> { Ok(None) }
     fn apply(&self, cx: &CommandContext, args: &Value) -> anyhow::Result<Outcome>;
 }
-pub struct Outcome { pub summary: String, pub undo: Option<UndoRecord>, pub data: Value, pub ui: Vec<UiRequest> }
+pub struct Outcome { pub summary: String, pub undo: Option<UndoRecord>, pub data: Value, pub ui: Vec<UiRequest>,
+                     pub paths: Vec<PathBuf> /* written */, pub journal_id: Option<u64> /* set by invoke */ }
+pub trait ActivitySink: Send + Sync { fn record(&self, r: ActivityRecord) -> Option<u64>; }   // the journal implements it
 pub enum UiRequest { OpenPath { path: PathBuf, point: Option<Point> }, OpenChangeset(Changeset), Toast(String), Refresh }
 pub struct CommandRegistry;  // register, get(id), list(), invoke(id, args, cx) -> Result<Outcome> — invoke records to the journal
 pub struct AppCore;          // Clone handle: scheduler, registry, journal, db, git service, document store
@@ -1101,14 +1126,15 @@ pub struct Db;               // open(path), tables: review (viewed marks), comme
                              // one-time import of the v0.3 JSON stores (review.json, sessions/*.json, recent.json); keep the public
                              // ReviewStore / SessionStore / RecentProjects APIs working (backed by Db)
 
-// journal/ (Agent SAFE)
-pub struct Journal;          // append-only, persisted in Db; list(limit), get(id), undo(id) -> Result<ActivityEntry>, subscribe(cb)
+// journal/ (Agent SAFE) — as implemented, see "Activity journal and undo" below
+pub struct Journal;          // append-only, persisted in Db; list(limit), get(id), undo(id, &CommandContext, UndoMode) -> Result<ActivityEntry, UndoError>, subscribe(cb)
 pub struct ActivityEntry { pub id: u64, pub time: SystemTime, pub command: String, pub summary: String,
-                           pub repo: Option<PathBuf>, pub paths: Vec<PathBuf>, pub undo: Option<UndoRecord>, pub undone: bool }
+                           pub repo: Option<PathBuf>, pub paths: Vec<PathBuf>, pub undo: Option<UndoRecord>, pub undone: bool, .. }
 pub enum UndoRecord {
-    RestoreFiles { shadow: ShadowSnapshot, paths: Vec<String> },     // discard, accept-all, revert file, merge resolution
-    Invoke { command: String, args: Value },                         // stage <-> unstage
-    RestoreIndex { shadow: ShadowSnapshot, paths: Vec<String> },     // staging that cannot be expressed as a simple inverse
+    RestoreFiles { shadow: ShadowSnapshot, paths: Vec<String>, after: BTreeMap<String, String> },  // discard, accept, resolve, redo of an undo
+    Invoke { command: String, args: Value },                         // stage <-> unstage (the inverse command)
+    RestoreIndex { shadow: ShadowSnapshot, paths: Vec<String>, after: BTreeMap<String, String> },  // staging that has no simple inverse
+    Multi { records: Vec<UndoRecord> },                              // a write that touched files and the index; undone last first
 }
 
 // documents/ (Agent DOCS)
@@ -1119,35 +1145,277 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
                              // diagnostics() mapped through edits, blame_map()
 ```
 
-### lector-git shadow repo (v0.4; Agent SAFE)
+**Notes (as implemented) — scheduler, commands, db, git service, UI bridge (Agent APP).**
+* **AppCore** (`lector_app::{AppCore, CoreOptions}`): `AppCore::global()` (GUI; the user's db) / `AppCore::open(CoreOptions
+  { db_path, in_memory_db, workers, import_from, data_dir })` (never fails; `CoreOptions::for_tests()` = in-memory db, own
+  2-thread pool). Accessors `scheduler()`, `registry()`, `db()`, `git()`, `review_store()`; `set_activity_sink(Arc<dyn
+  ActivitySink>)` / `activity_sink()`; typed extension slots `set_extension::<T>(Arc<T>)`, `extension::<T>()`,
+  `extension_or_init` (DocumentStore, Journal live there). `open` registers `commands::register_builtin` (read +
+  documents + git_write) and installs the journal (`Journal::install`, or `install_in(data_dir)`).
+* **Scheduler**: `Scheduler::new(workers)` / `global()` (`default_workers()` = num_cpus − 1, min 2); FIFO within a
+  priority, highest priority first; keyed jobs cancel the previous job of the key (queued ones never run, running ones
+  see the token and their result is dropped → handle resolves `None`); `debounce` keeps only the last closure per key
+  and runs it as a keyed job `delay` after the last call; `cancel_key`, `pending()`, `wait_idle(timeout)`; panics in
+  jobs are caught (handle → `None`). `JobHandle::{cancel, token, is_finished, try_take, into_future, wait}` (`wait` blocks;
+  never from a worker). Workers stop when the last `Scheduler` clone drops. `CancelToken` = `lector_search::CancelToken`.
+* **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, ui_action }` built with
+  `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.destructive()`, `.undoable()`; `to_json()` is the
+  MCP/CLI description. `Outcome { summary, undo, data, ui, paths, journal_id }` (`Outcome::new(..).with_data/with_ui/
+  with_undo/with_paths`). `CommandContext { core, project, focus: Focus { path, selections: Vec<Range<Point>>,
+  changeset, hunk }, source: Source::{Ui, Cli, Mcp, Agent, Internal} }`. `CommandRegistry::{register, register_arc, get,
+  for_ui_action, list (sorted by id), invoke, invoke_async}`; `invoke` = validate args (`commands::schema`: type incl.
+  unions, properties, required, `additionalProperties: false`, items, enum, minimum/maximum; `null` args = `{}`) →
+  availability → apply → for `writes` specs `ActivitySink::record(ActivityRecord { command, args, summary, repo, paths,
+  undo, source }) -> Option<u64>` (the id lands in `Outcome::journal_id`). Errors: `CommandError::{Unknown,
+  Unavailable(reason), InvalidArgs, Failed(anyhow)}`. `FnCommand::new(spec, apply).with_available(..)`.
+* **Read commands** (`commands::read`, all `writes = false`, compact JSON, project-relative paths, 0-based lines,
+  `[start, end)` ranges): `workspace.open_path {path, line?, column?}`, `workspace.open_location {location:
+  "path:line:col" (1-based)}`, `git.open_changeset {changeset}`, `search.project {pattern, regex?, case?, whole_word?,
+  include?, exclude?, max_results?=200}`, `symbols.find {name, exact?, limit?}` (indexes tags on demand),
+  `git.list_changes {changeset?}` (+branch, operation, conflicts for the working tree), `git.show_diff {changeset?, path?,
+  context?=3, max_files?=50}` (hunks with `@@` header and `+`/`-`/` ` lines), `git.blame {path?, start_line?, end_line?}`,
+  `git.history {path?, start_line?, end_line?, rev?, author?, message?, limit?=50}`, `commands.list {category?,
+  available_only?}`, `settings.get {key?}` (dotted). Changeset args use the review keys (`worktree`, `commit:<sha>`, …);
+  missing args default from `Focus`.
+* **Db** (`lector_app::db`): redb 4.5, tables `meta` (schema version, flags, comment seq), `review`, `comments`
+  (`Comment { id, repo, changeset, path, line, anchor_text, body, created, resolved }`: `add_comment`, `update_comment`,
+  `delete_comment`, `comments(repo, changeset?)`), `sessions` (key = `lector_config::session_key(root)`), `recent`, `kv`
+  (`kv_get/put`, `kv_get_json/put_json`, `kv_scan(prefix)`), `cache` (`cache_get/put`, LRU by write time, trimmed to
+  `CACHE_MAX_BYTES` = 64 MB every 64 puts, `trim_cache`), `journal` (`append_journal`, `journal_get/put/list/trim`).
+  `SCHEMA_VERSION = 1`; migrations run in one write transaction on open; a newer file → `DbError::TooNew`. Opened in
+  redb's `MultiWriter` mode (several Lector processes share the file; falls back to `ExclusiveWriter`); if opening fails
+  (lock held by an incompatible process, corruption) `open_or_fallback` uses a private temp copy (deleted on drop), then
+  memory — `Db::mode() -> DbMode::{File, TempCopy, Memory}`. `import_v03(data_dir)` imports review.json, sessions/*.json and
+  recent.json once (flag in `meta`; files are kept). Stores: `Db::review_store()` → `lector_config::ReviewStore::with_backend`
+  (new `ReviewBackend` trait in lector-config, so `lector_workspace::review` keeps taking `&ReviewStore`),
+  `Db::session_store() -> DbSessionStore { load, save }`, `Db::recent_projects() -> DbRecentProjects { list,
+  most_recent_existing, record, remove }`. The JSON `SessionStore::new` / `RecentProjects::new` are `#[deprecated]`;
+  `ReviewStore::open` stays for tests/import.
+* **GitService**: `GitService::{new(scheduler), without_watching, repo(path), repo_for(&Repo), live_repos}` keeps weak
+  refs keyed by canonical workdir. `RepoState::{repo, workdir, snapshot, subscribe(cb) -> Subscription (drop =
+  unsubscribe), refresh (debounced 40 ms, keyed per repo → N windows = one computation), refresh_and_notify (publish even
+  if unchanged, after writes), refresh_blocking, is_watching, computations}`. `GitSnapshot { head, status, conflicts
+  (operation + entries), generation, error }` + `branch_label()`; snapshots are published only when something changed
+  (unchanged parts keep their `Arc`). Each state starts a `lector-fs` watcher on a background thread (`Files`,
+  `GitStateChanged`, `Rescan` → refresh); if that fails, a 5 s poll thread runs while the state is alive.
+* **UI** (`lector_ui::commands_bridge`): `CoreGlobal(AppCore)`, `core(cx)`, `command_context(&Workspace, cx)` (project,
+  active path, selections + `register_focus_provider` hooks — lector-ui-git fills the changeset of the active diff /
+  review / commit tab), `invoke(ws, id, args, toast_summary, window, cx)` (scheduler job; errors toast), `apply_outcome`
+  (OpenPath → `open_path_at`; OpenChangeset → `set_changeset_opener` hook (lector-ui-git: review / commit tab); Toast;
+  Refresh → `RepoState::refresh_and_notify`), `palette_entries(ctx)`, `recent_projects()`, `session_store()`. Every
+  GPUI action named by a `CommandSpec::ui_action` is registered on each workspace (`Workspace::register_boxed_action`)
+  and runs `invoke` (unavailable → toast with the reason). The palette (`CommandPaletteDelegate::with_registry`) greys
+  action rows whose command is unavailable (reason as tooltip; confirm does nothing) and adds argument-free registry
+  commands without an action ("Git: List Changes"). `Workspace` file-tree status and `GitStore` both subscribe to the
+  shared `RepoState` (`Project::set_git_status(&[StatusEntry])` builds the tree's map from the shared status);
+  `GitStore` keeps its public fields/API (`head`, `status`, `conflicts`, `review` (db-backed), `generation`, `refresh`)
+  plus `repo_state()` / `refresh_and_notify()`, and no longer polls. `lector_ui_git::store_for(workspace_id, cx)`.
+* Tests: scheduler (priority order, latest-wins, running-job cancellation, debounce coalescing / quiet period, 2000 jobs
+  from 8 threads none lost or duplicated, keyed contention, panics); schema; registry invoke/journal; db (persistence,
+  second open / corrupt file fallback, stores, v0.3 import once, cache LRU, journal, comments); git service (one state
+  and one computation for many refreshes, subscriptions + generation, watcher-driven refresh, drop);
+  `tests/read_only.rs` (every non-writing command on a repo fixture — tree and `.git` byte- and mtime-identical — plus
+  structured outcome checks).
+
+**documents (as implemented, `lector_app::documents`).**
 ```rust
-pub struct ShadowRepo;       // bare repo at data_dir()/shadow/<hash of workdir>.git, objects/info/alternates -> user repo's objects;
-                             // Lector writes only there, never into the user's .git
+pub trait DocExecutor: Send + Sync { fn spawn(&self, Priority, Option<JobKey>, DocJob); fn debounce(&self, JobKey, Duration, Priority, DocJob); }
+// impl for Scheduler (production); InlineExecutor (runs at once; tests/CLI); lector-ui's GpuiExecutor under GPUI's test dispatcher.
+impl DocumentStore {
+    pub fn new(Arc<dyn DocExecutor>) -> Self;  pub fn for_core(&AppCore) -> Arc<DocumentStore>;   // AppCore extension slot, on its scheduler
+    pub fn open(&self, path, &Project) -> Result<DocHandle, DocError>;   // blocking (reads + parses); existing doc if open
+    pub fn open_with(&self, path, &Project, OpenOptions { buffer_options, warm_rows }) -> Result<DocHandle, DocError>;
+    pub fn get(path) -> Option<DocHandle>;  documents();  dirty_documents();  forget(&DocHandle);  release(DocHandle);
+    pub fn register_before_save(Arc<dyn BeforeSaveHook>) -> HookId;  unregister_before_save(HookId);
+    pub fn set_delays(QueryDelays { structure: 300ms, gutter: 300ms, lsp: 150ms, blame: 120ms });   // QueryDelays::IMMEDIATE
+}
+impl DocHandle {   // PartialEq = same document
+    // state: id, path, project, version (Rope::version; LSP tag), seq (monotonic edit counter), is_dirty, is_editable,
+    // is_read_only, text() -> Option<Rope>, live_document() -> Document, snapshot() -> DocSnapshot { id, path, document, version,
+    // seq, dirty, editable, read_only, disk: DiskState { stamp, encoding, deleted, conflict: Option<DiskConflict { disk, stamp }> },
+    // save_count, syntax_pending }, holders()
+    pub fn edit_from<R>(&self, origin: EditOrigin, since_seq: u64, f: impl FnOnce(&mut Buffer) -> (R, Transaction)) -> Result<EditResult<R>, DocError>;
+    //   EditResult { value, transaction, catch_up: Vec<HistoryEntry> /* others' edits after since_seq */, gap, view: BufferView }
+    pub fn edit(f) -> Result<(R, Arc<Transaction>)>;  apply_edits(Vec<TextEdit>);  apply_edits_at(version, edits) /* VersionMismatch */;
+    pub fn replace_all(&str);  undo();  redo();  with_buffer_mut(|b| ..) /* no text change */;  set_options;  set_read_only(bool);
+    pub fn catch_up(since_seq) -> Option<CatchUp { entries: Vec<HistoryEntry { seq, origin, version, text, transaction }>, gap, view }>;
+    pub fn subscribe(cb: Fn(&DocEvent)) -> Subscription;   // in order, outside the document lock, on the thread that caused it
+    // disk (blocking): save(SaveRequest { force, trim_trailing_whitespace, ensure_final_newline, run_hooks, path /* Save As */ })
+    //   -> Result<SaveOutcome::{Saved, Unchanged}, DocError::ChangedOnDisk{..} | NotEditable | ReadOnly | Io>;
+    //   check_disk() -> DiskChange::{Unchanged, Reloaded, Conflict, Deleted}; reload() (discard); keep_mine()
+    // queries (non-blocking; QueryResult<T> { value /* newest known */, version, current }):
+    pub fn structure() -> QueryResult<Structure { document, outline, folds }>;  outline();  folds();  settled_document();  scopes_at_row(row);
+    pub fn gutter() -> QueryResult<Arc<Vec<GutterMark>>>;  refresh_gutter();  set_gutter_enabled(bool);
+    pub fn blame_map() -> QueryResult<Arc<Vec<BlameHunk>>>;   // disk blame remapped through a line diff to the buffer
+    pub fn highlights(rows) -> Option<Vec<LineHighlights>>;  request_highlights(&[chunk]) -> bool;  highlight_chunk(chunk);  cached_highlights();
+    pub fn set_diagnostics(Option<lsp::DocumentDiagnostics>);  diagnostics() -> Arc<Vec<DocDiagnostic>>;   // mapped through edits
+    pub fn sync_lsp_now() -> Option<u64>;   compute_counts() -> QueryCounts;
+}
+pub enum DocEvent { Edited { origin, seq, version, transaction }, Reparsed { version }, QueryReady { kind: QueryKind::{Structure, Gutter, Blame}, version },
+                    HighlightsReady { version, chunks }, DiagnosticsChanged, DirtyChanged { dirty }, Saved { version }, DiskStateChanged,
+                    Reloaded { version }, Replaced, PathChanged { old, new }, ReadOnlyChanged { read_only } }
+pub struct EditOrigin(u64);  // EXTERNAL, RELOAD, SAVE, EditOrigin::new() per front-end
+// policy: buffer_options(&Document, &Settings); auto_save_decision(AutoSave, delay_ms, AutoSaveTrigger::{Edited, TimerFired, FocusLost},
+//   AutoSaveInputs { dirty, editable, conflict, deleted, read_only }) -> AutoSaveDecision::{Never, SaveNow, SaveAfter(d)} (never over a
+//   conflict or a deleted file); cleanup_edits(rope, line_ending, trim, final_newline). derive: map_range/map_offset/map_row, remap_blame.
+```
+* *Locking.* One mutex per document, held only for a buffer op or installing a result. Events and jobs produced under it are collected
+  and run after it is released, so callbacks may call back into the handle and `InlineExecutor` cannot deadlock. Jobs hold weak references.
+* *Edits.* Every non-empty transaction gets a `seq`, a `HistoryEntry` (last 256: view catch-up, diagnostics conversion by LSP tag), a new
+  live `Document` (syntax `None` until the reparse), queued `SyntaxEdit`s (one incremental reparse at a time on the executor, edits made
+  meanwhile coalesced into the next; full parse on failure; a generation counter drops parses superseded by reloads / Save As), mapped
+  diagnostics and a debounced LSP sync (tagged with the version). Queries are lazy: asking schedules a keyed debounce for the current
+  version ("latest wins"); structure waits for the reparse of that version; results are installed only for their version and announced
+  with `QueryReady`. Highlights: per-chunk cache for the current version; stale results are still announced (requesters forget pending marks).
+* *Registry.* Keyed by `dunce::canonicalize(path)`; weak entries, so dropping the last handle forgets the document; `forget` detaches it
+  when the last view closes without saving (the next open reloads from disk). LSP `close_document` when a document is dropped (unless a
+  newer document of the path exists). Save As re-keys and re-detects the language.
+* *Saving.* Serialized per document: store hooks → cleanup edits as buffer edits (origin `SAVE`) → encode with the file's encoding / line
+  ending → stamp check (`ChangedOnDisk` unless `force`) → `write_atomic` → new stamp, `mark_saved` if unchanged meanwhile. A clean,
+  deleted document is written again.
+* *External changes.* Same stamp → nothing; gone → `deleted`; clean → `replace_all` (origin `RELOAD`, carets kept) adopting the disk
+  parse (`Reloaded`); dirty → `DiskConflict`. Non-editable (or changed editability) documents are replaced wholesale (`Replaced`).
+* *Commands* (`commands/documents.rs`, registered by `register_builtin`; JSON, project-relative paths, 0-based lines): `document.open
+  {path}`, `document.read {path, start_line?, end_line?}` (≤ 2000 lines by default; returns `version`), `document.apply_edits {path,
+  edits: [{range: [start, end) bytes | lines: [start, end), new_text}], expected_version?}` (unsaved until saved), `document.save {path,
+  force?}`, `document.save_all`, `document.revert {path}` (destructive), `document.set_read_only {path, read_only}`, `document.list
+  {dirty_only?}`. They use `DocumentStore::for_core`, the same store as the GUI.
+* Tests: `documents::tests` (shared handle across two views with catch-up, encodings/CRLF/BOM round trip, stamp conflicts, cleanup edits,
+  reload / conflict / keep mine / delete / recreate / revert, binary and read-only refusals, queries cached per version, gutter and
+  blame in a git fixture, diagnostics mapping, before-save hooks, Save As, scheduler cancellation of superseded work, re-entrant
+  subscribers), `policy::tests` (auto-save), `commands::documents::tests` (agent round trip).
+
+### lector-git shadow repo (v0.4; Agent SAFE) — as implemented
+```rust
+pub struct ShadowRepo;       // bare repo at data_dir()/shadow/<hash of workdir>.git; objects/info/alternates -> the user repo's object dir
+                             // (reads only). Lector writes only into the shadow, never into the user's .git.
 impl ShadowRepo {
-    pub fn open(data_dir: &Path, repo: &Repo) -> Result<ShadowRepo>;
+    pub fn path_for(data_dir: &Path, workdir: &Path) -> PathBuf;
+    pub fn open(data_dir: &Path, repo: &Repo) -> Result<ShadowRepo>;                       // creates on first use; hermetic git config
     pub fn snapshot_paths(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;   // working-tree contents (missing = recorded as absent)
-    pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;
-    pub fn snapshot_worktree(&self, note: &str) -> Result<ShadowSnapshot>;                  // whole tree incl. untracked, honours .gitignore (agent checkpoints)
-    pub fn restore_paths(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()>;      // writes files — only from an explicit undo
+    pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;   // index entries incl. conflict stages 1-3 and modes
+    pub fn snapshot_worktree(&self, note: &str) -> Result<ShadowSnapshot>;                // whole tree incl. untracked, honours .gitignore (agent checkpoints)
+    pub fn snapshots(&self) -> Result<Vec<ShadowSnapshot>>;  contains(&snap) -> bool;  kind(&snap) -> Result<SnapshotKind>;
+    pub fn entries(&self, &snap) -> Result<Vec<SnapshotEntry>>;  index_entries(&snap) -> Result<Vec<IndexRecord>>;  file_at(&snap, path) -> Result<Option<Vec<u8>>>;
     pub fn changes_between(&self, a: &ShadowSnapshot, b: &ShadowSnapshot) -> Result<Vec<FileChange>>;
-    pub fn prune(&self, keep: Duration) -> Result<()>;
+    pub fn changes_to_worktree(&self, snap, ..) -> Result<Vec<FileChange>>;  load(&self, &Side) -> Result<Option<Vec<u8>>>;   // before/after text for the UI
+    pub fn fingerprints(&self, paths) -> Result<BTreeMap<String, String>>;  fingerprint_worktree(..);  index_fingerprints(..);   // "changed since" checks
+    pub fn restore_paths(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()>;     // writes files — only from an explicit undo
+    pub fn restore_index(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()>;     // via `git update-index --index-info` on the user repo
+    pub fn prune(&self, keep: Duration) -> Result<()>;  prune_with(PruneOptions { keep, max_bytes }) -> Result<PruneReport>;   // DEFAULT_MAX_BYTES = 1 GiB
 }
 pub struct ShadowSnapshot { pub commit: Oid, pub time: i64, pub note: String }
 ```
+Design notes. Objects are written only through `git fast-import` into the shadow (never `hash-object -w`, which would
+"freshen" alternates' object files in the user's repo); a snapshot commit has the tree `files/` (contents), `blobs/`
+(index entries) and `manifest`, and is referenced from `refs/lector/snapshots/<time>-<n>` so `gc` keeps it. A lock file
+serializes writers across processes. `prune` deletes refs and runs `git gc --prune=now` in the shadow only. Tests
+(`crates/lector-git/tests/shadow.rs`) compare every file in the user's `.git` (content and mtime) before and after each
+operation, plus round trips (binary, empty, symlink, exec bit, deleted, nested, unicode names), conflict stages and prune.
 
-### v0.4 algorithms (Agent ALGO; core crates)
-* `lector_diff::moves::detect_moved(old: &str, new: &str, diff: &LineDiff, min_lines: u32) -> Vec<MovedBlock { old: Range<u32>, new: Range<u32>, reindented: bool }>`
-  (git `--color-moved`-style: normalized-line hashes, greedy longest blocks).
-* `lector_diff::remap::LineMap::new(old, new, &LineDiff)` → `map(old_line) -> Mapped { Exact(u32) | Moved(u32) | Deleted { near: u32 } }`;
-  `reanchor(anchor: &Anchor { line, text, context_before, context_after }, new_text) -> Option<u32>` (fuzzy fallback) —
-  used so comments and "viewed" marks survive new revisions/agent turns.
-* `lector_workspace::risk::assess(diff: &FileDiff, langs: &LanguageRegistry) -> RiskReport { score: f32 (0..1), reasons: Vec<RiskReason> }`
-  — explainable signals: public signature/API change (tree-sitter), deleted logic, tests touched/missing, security-sensitive
-  paths/APIs, error-handling removed, large churn, generated/lock files (low).
-* `lector_workspace::cache::ContentCache` — LRU caches keyed by content hash / blob id for Syntax, outline, tags, line diffs.
-* `lector_workspace::structural::diff(old, new, budget) -> Option<StructuralDiff>` (difftastic-style, time/node budget, None on overflow).
-* `lector_search::TrigramIndex` (build/update per file/serialize/query regex+literal → candidate files) and picker top-k
-  (fuzzy finder < 50 ms first results at 1M paths).
+### Activity journal and undo (v0.4; Agent SAFE; `lector_app::journal`, `commands::git_write`)
+* `Journal` implements `ActivitySink`; `CommandRegistry::invoke` records every `writes` command (summary, repo, paths,
+  `UndoRecord`, source) and fills `Outcome::journal_id`. Entries persist in the redb journal table
+  (`Db::{append_journal, journal_get, journal_put, journal_list, journal_trim}`), are bounded (`Journal::MAX_ENTRIES` =
+  2000, oldest dropped) and survive restarts. `Journal::{list, list_before, get, append, subscribe, last_undoable(repo),
+  undo_status(&entry) -> UndoStatus, undo_last, install(&AppCore), install_in(&AppCore, data_dir), of(&AppCore)}`;
+  `JournalStore` = `DbStore` / `MemoryStore` (tests).
+* `Journal::undo(id, &CommandContext, UndoMode::{Check, Force})`: `RestoreFiles` / `RestoreIndex` first compare the
+  recorded `after` fingerprints with the present state and refuse with `UndoError::Changed { id, paths }` (nothing
+  written); `Force` ("Restore anyway") proceeds. Before overwriting, the current state is backed up again and stored in
+  the undo's own journal entry, so an undo is undoable (redo) and so is "Restore anyway". `Invoke` runs the inverse
+  command through the registry (its own entry is the undo entry); `Multi` undoes last first. Errors: `UndoError::
+  {NotFound, AlreadyUndone, NotUndoable(reason), Changed, BackupGone, Failed}` — every refusal writes nothing.
+* **Git write commands** (`commands::git_write`, JSON schemas, `Outcome { summary, undo }`, none sets `ui_action`):
+  `git.stage {paths}`, `git.unstage {paths}`, `git.discard {paths, allow_without_backup?}` (restores tracked paths from
+  the index, deletes untracked ones; backed up first), `git.stage_hunk` / `git.unstage_hunk` / `git.discard_hunk {path,
+  changeset?, hunk? | old_lines/new_lines?, content_id?, allow_without_backup?}` (a stale `content_id` is refused),
+  `git.stage_all`, `git.unstage_all`, `git.discard_all {scope?: unstaged|untracked|all}`, `git.commit {message, amend?,
+  sign_off?}` (not undoable: the journal records it), `git.accept_file {path?, side: ours|theirs}`, `git.mark_resolved {path?}`,
+  `git.resolve_delete {path}` (undo = `Multi`), `git.continue_operation {kind}`, `git.abort_operation {kind}`
+  (irreversible, `undo: None`). Destructive commands that cannot take their backup fail with
+  `BackupUnavailable` unless `allow_without_backup` is set; `backup_available(core, repo)` lets the UI ask beforehand.
+  Backups older than 30 days / above 1 GiB are trimmed the first time a repository's shadow is opened in a process.
+* Tests: `crates/lector-app/tests/git_write.rs` (stage/unstage inverse, partial index restore, discard + undo exact
+  bytes, `Changed` refusal + `Force` + redo, hunks, stale `content_id`, commit, conflicts, abort, `resolve_delete`,
+  `undo_last`, `BackupUnavailable`, pruned backup, persistence/bound/subscribe, schema flags); hermetic git config
+  (`GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`, `gc.auto=0`, `maintenance.auto=false`); lector-ui-git `staging::tests` (op →
+  command mapping; discard → Undo toast → `UndoLastOperation` restores the files).
+
+### v0.4 algorithms (Agent ALGO; core crates) — as implemented
+All UI-free, no new dependencies on higher layers (`regex-syntax` in lector-search, `regex` in lector-workspace).
+Benchmarks: `cargo bench -p lector-diff --bench moves_bench`, `-p lector-search --bench search_bench|picker_gate`,
+`-p lector-workspace --bench algo_bench`.
+
+**Moved code — `lector_diff::moves`.**
+`detect_moved(old, new, &LineDiff, min_lines: u32) -> Vec<MovedBlock { old: Range<u32>, new: Range<u32>, reindented: bool }>`,
+`detect_moved_with(.., &MoveOptions { min_lines: 3, min_chars: 12, max_seed_occurrences: 64 })`,
+`detect_moved_across(&[(&old, &new, &LineDiff)]) -> Vec<CrossFileMove { old_file, new_file, old, new, reindented }>`
+(+ `_with`). Lines are compared by whitespace-insensitive hash; only lines inside hunks take part (removed vs added), a
+block never crosses a hunk boundary, matching is one-to-one, greedy longest-first (split remainders are re-queued).
+Blank and lone-brace lines are never anchors (blocks are trimmed to non-trivial edges); blocks below `min_lines` or
+`min_chars` alphanumerics are dropped; seeds with > 64 occurrences are skipped. `reindented` is true when the exact
+text differs only in leading whitespace. 13.5k lines / 113 hunks / 30 moves: 0.93 ms.
+
+**Remapping — `lector_diff::remap`.**
+`LineMap::{new(old, new, &diff) (incl. moves), from_diff, with_moves(&diff, &[MovedBlock]), map(old_line) -> Mapped,
+map_back(new_line) -> Option<u32>, new_line_count}`; `Mapped { Exact(u32) | Moved(u32) | Deleted { near: u32 } }`
+with `.line() -> Option<u32>`. Unchanged lines always map `Exact` (property test); lines inside a replaced hunk map to
+`Deleted { near }` (the corresponding replacement line, clamped). `Anchor { line, text, context_before, context_after }`
+(`Anchor::capture(text, line, context)`), `reanchor(&Anchor, new_text) -> Option<u32>` and
+`reanchor_with(.., &ReanchorOptions { window: 120, min_confidence: 0.6, hint }) -> Option<Reanchored { line,
+confidence, fuzzy }>`. Exact text + matching context wins first; otherwise fuzzy score
+`0.6·text + 0.3·context + 0.1·proximity` (0.85/0.15 without context). `None` when below `min_confidence`, when two
+candidates tie within 0.01, or when a trivial anchor (blank/brace) lacks context ≥ 0.5.
+
+**Risk — `lector_workspace::risk`.**
+`assess(&FileDiff, &LanguageRegistry) -> RiskReport { score: f32 /*0..1, 3 decimals*/, reasons: Vec<RiskReason { kind:
+RiskKind, weight, message, line: Option<u32> }> }` (+ `level() -> RiskLevel`, `top_reason()`, `summary()`),
+`rank_files(&[FileDiff]) -> Vec<(index, RiskReport)>` (descending; ties by index) and `rank_files_with(.., langs)`.
+Score = noisy-or of raising reasons × product of (1 − damping) for generated/lock/test-only/docs files. Public-API and
+signature changes come from the outline (tree-sitter, per-language export rules; data types compare whole
+definitions, others their header). Other signals are regex tables on changed lines (deleted conditionals / error
+handling, added `unwrap`/`expect`/`panic`, `unsafe`, eval/exec/shell, SQL built from strings), security-sensitive path
+words, tests-vs-source, churn, config. Deterministic; every point of the score is attributable to a reason.
+Heuristic: validated on synthetic snippets, not on real changesets.
+
+**Caches — `lector_workspace::cache`.**
+`ContentCache::{new(CacheConfig), global(), syntax(id, ..), outline(id, &syntax, &text), tags(..), line_diff(old_id,
+new_id, ..), stats() -> CacheStats { per-kind KindStats { hits, misses, evictions, entries, bytes, budget } }, reset_stats, clear}`.
+Keys: `ContentId::{Blob(Oid), Hash(u128)}` (`of_bytes`, `of_text`; 128-bit non-cryptographic hash, 60 KB in 8 µs).
+Thread-safe LRU per kind with byte budgets; values are `Arc`. `review::build_file_diff` / `prepare_side` use
+`ContentCache::global()` for parsing and line diffs (public APIs unchanged). Syntax parse 3.3 ms vs hit 178 ns.
+
+**Structural diff — `lector_workspace::structural`.**
+`diff(old_syntax, old_text, new_syntax, new_text, &Budget { max_states: 400_000, max_time: 750 ms, max_nodes: 1M })
+-> Option<StructuralDiff { old: Vec<Marked>, new: Vec<Marked>, states }>`; `Marked { range: Range<usize> /*bytes*/,
+mark: Mark::{Changed|Added|Removed|Moved} }`. Trees are lists (bracketed nodes) and atoms (leaves, strings, comments)
+built from `Syntax::flatten`. Identical prefixes/suffixes (and single matching list pairs) are trimmed, then Dijkstra
+over (left cursor, right cursor, entered-list stack) with difftastic-like costs (unchanged 1 + depth penalty, enter both
+lists 1, replace string/comment 150, novel node 300). `Moved` = fully novel subtrees with identical structure on both
+sides (>= 3 leaves, >= 12 bytes). Adjacent marks merge across whitespace. `None` over budget: callers fall back to the
+line diff. 99 lines: 0.4 ms; 374 / 699 lines with a small edit exceed the default budget (150 / 240 ms to give up).
+`lector-syntax` gained `Syntax::flatten(max_nodes) -> Option<Vec<TreeNode>>` (additive).
+
+**Trigram index — `lector_search::TrigramIndex`.**
+`build(root, &[PathBuf], &CancelToken)` (parallel), `from_contents`, `update_file/update_bytes` (replaces postings),
+`remove_file`, `refresh(&files) -> RefreshStats` (size/mtime sync), `compact`, `contains`, `file_count`,
+`searchable_count/paths`, `trigram_count`, `candidates_literal`, `candidates_regex` (plan from regex-syntax HIR: AND for
+concatenation, OR for alternation, no constraint for classes/optional/`(?i)`), `candidates(&SearchQuery) ->
+Candidates::{All | Files(Vec<String>)}`, `to_bytes`/`from_bytes` (magic `LTRI`, `FORMAT_VERSION = 1`, varint
+delta-coded postings, checksum, every read validated -> `TrigramError`). Case-folded (ASCII) trigrams; binary files and
+files > `MAX_INDEXED_FILE_SIZE` are not searchable (never candidates). Candidates are a superset: run
+`search_files(root, &[PathBuf], &SearchQuery, &CancelToken, sink)` (new, same events as `search_project`, no walk) on
+them; an integration test checks equality with a full search. 3000 files / 16 MB: build 213 ms, index 1.6 MB,
+rare literal 2 µs, regex 8-12 µs, update one file 70 µs.
+
+**Fuzzy finder — `lector_search::Picker`** (API unchanged; added `PickerInjector::push_boosted(item, haystack, boost)`
+and `MAX_RESULTS = 1000`). nucleo is only the lock-free append-only item store; scoring (nucleo `Pattern`/`Matcher`)
+runs on a worker thread using all cores. Only a top-k heap (score, shorter haystack, lower index) is kept,
+`matches()` exposes the best `MAX_RESULTS`; the empty query orders by boost then insertion. Partial results are
+published after the first batch (<= 2048 items) and then at most every 12 ms, `tick` returns true until settled.
+Completed match sets of the last 16 queries are remembered, so typing narrows the previous set and backspace
+reuses a remembered one.
 
 ### lector-ui (extension seams)
 ```rust
@@ -1293,14 +1561,26 @@ Notes (as implemented, lector-ui integration):
   `AnyView::cached` so a scrolling view does not re-render its siblings.
 * Not yet applied from settings: `show_whitespace`, `scroll_beyond_last_line`.
 
-### Editing (v0.3, `lector-ui`)
+### Editing (v0.3, `lector-ui`; v0.4: over the headless document store)
 
 ```
-FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (Entity, wraps lector_buffer::Buffer)
+FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (Entity; mirror of a shared document, or a private Buffer)
       │                                                     │ EditBufferEvent::Edited { origin, Arc<Transaction> }
-      └──► DocumentModel (one per open path, shared by all tabs of the file) ◄┘
-             owns: EditBuffer, live Document (= buffer text), settled Document, SourceState, DocumentSource
+      └──► DocumentModel (GPUI adapter, one per open path) ◄┘
+             │ owns: EditBuffer, live/settled Document copies, SourceState (stale highlight layers), DocumentSource
+             └──► lector_app::documents::DocHandle (buffer, disk state, syntax, queries, LSP sync, saving) — shared with
+                  agents, commands and other windows; events bridged to the main thread through a channel
 ```
+* **v0.4 seams.** `editor::document_store(cx)` is the app's `DocumentStore` (`DocumentStore::for_core(AppCore::global())`
+  on the shared scheduler; under GPUI's test dispatcher a store on `editor::doc_store::GpuiExecutor`, so `run_until_parked`
+  and fake clocks drive reparses, queries and debounces); `set_document_store` installs another. `DocumentModel::handle()`
+  exposes the `DocHandle`; `is_locked()` mirrors `DocHandle::set_read_only` (the tab locks its code view). `EditBuffer::shared(handle)`
+  mirrors the document's `BufferView` at the last processed `seq`: own edits go through `DocHandle::edit_from` (which also returns
+  edits other front-ends made meanwhile, emitted first as `Edited { origin: None }`), `catch_up(cx)` follows foreign edits on
+  `DocEvent::Edited`, `update_buffer(|b| .., cx)` runs non-text operations (selections, copy, undo grouping); `buffer()` returns a
+  `BufferRef` (`version`, `text`, `selections`, `options`, `is_dirty`, `can_undo/redo`). `EditBuffer::edit` returns `None` when the
+  document refused (locked). Typing latency: model sync per keystroke builds the `Document`/`DocumentSource` synchronously and
+  only *requests* the structure and gutter queries (a lock + keyed debounce); reparse/highlights/outline/gutter run on the executor.
 * **How a pane item becomes editable.** `CodeView::set_buffer(Some(Entity<EditBuffer>), manage_source, cx)`.
   With `manage_source = true` the view rebuilds a `RopeSource` itself after each edit (scratch buffers,
   `CodeView::editable(text, file_name, options, cx)`); otherwise the owner swaps the source (file tabs:
@@ -1321,12 +1601,12 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
 * **After each edit** (`DocumentModel`, all non-blocking): new `Document::with_text(rope, None)` + `DocumentSource`
   synchronously; `SourceState::begin_edit` keeps fresh highlight chunks above the first edited row and turns the
   rest into a `StaleHighlights` layer (old spans mapped through the edits; rows inside an edit render plain);
-  `Syntax::edit_and_reparse` on the background executor (edits arriving meanwhile are coalesced into the next
-  reparse; full parse on failure), then only the missing chunks are recomputed; outline / folds / breadcrumbs /
-  sticky headers from the *settled* snapshot recomputed 300 ms after typing stops (`FileView::document()` =
-  settled, `FileView::live_document()` = exact text; use the latter for offsets); diff gutter vs a cached HEAD
-  text after 300 ms (marks shift with edits meanwhile); `LspManager::open_document` with the new text after
-  150 ms. Measured on a 10k-line Rust file: `CodeView::edit` ≈ 60 µs, model sync ≈ 50 µs (p95 < 0.3 ms),
+  the store reparses incrementally (`DocEvent::Reparsed` → the model adopts the store's live document), then only the
+  missing chunks are requested (`DocHandle::request_highlights`, newest 4 first; `HighlightsReady`); outline / folds /
+  breadcrumbs / sticky headers from the *settled* snapshot = the store's `structure()` query, 300 ms after typing stops
+  (`FileView::document()` = settled, `FileView::live_document()` = exact text; use the latter for offsets); diff gutter =
+  the `gutter()` query vs a cached HEAD text after 300 ms (marks shift with edits meanwhile); the store syncs the LSP
+  (`open_document_tagged`) after 150 ms. Measured on a 10k-line Rust file: `CodeView::edit` ≈ 60 µs, model sync ≈ 50 µs (p95 < 0.3 ms),
   whole keystroke incl. a window redraw ≈ 2.5 ms p50 / 3.5 ms p95 (soft wrap on or off; wrap counts are
   re-measured only for edited rows). Traced under `lector_ui::perf` ("code view edit", "document edit sync",
   "incremental reparse"); `cargo test -p lector-ui typing_latency -- --ignored --nocapture`.
@@ -1405,20 +1685,23 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   Option<Task<anyhow::Result<Vec<TextEdit>>>>)` (also `Workspace::register_before_save`). Hooks run in registration
   order; their edits apply only if the buffer did not change while the hook ran.
 * **Saving** (`DocumentModel::save(force)` → `SaveOutcome::{Saved, Unchanged, Conflict}`; `FileView::save(window)`
-  prompts on conflicts): hooks → `trim_trailing_whitespace` / `ensure_final_newline` applied *as buffer edits*
+  prompts on conflicts; v0.4: GPUI hooks, then `DocHandle::save` on the background executor, `DocError::ChangedOnDisk` →
+  `Conflict`): hooks → `trim_trailing_whitespace` / `ensure_final_newline` applied *as buffer edits*
   (buffer == disk afterwards) → `lector_buffer::save::encode` with the file's encoding (UTF-8, UTF-8 BOM — sniffed at
   load —, UTF-16 LE/BE) and line ending (`Lf`/`CrLf` normalized, `Mixed` kept) → stamp check (`lector_fs::stamp`
   taken *before* loading) → `lector_fs::write_atomic` off the main thread → new stamp, `mark_saved` (only if the
   buffer did not change meanwhile). `editor::Save`, `SaveAs` (`cx.prompt_for_new_path`; the tab follows the new
   path), `workspace::SaveAll`, `RevertFile` (confirm when dirty). Auto-save: `after_delay` (model timer, skipped
-  while a disk conflict is pending), `on_focus_change` (window deactivation, switching tabs).
+  while a disk conflict is pending), `on_focus_change` (window deactivation, switching tabs) — both decided by
+  `lector_app::documents::auto_save_decision` (never over a conflict or a deleted file; `DocumentModel::focus_lost`).
 * **Dirty state**: tab dot instead of × (× on hover), edited preview tabs are pinned, `● ` window-title prefix,
   status bar "Modified" + lock. Closing tabs / Close Others / Close All / the window / `workspace::Quit` prompts
   Save (All) / Don't Save / Cancel when the last tab of a dirty document would close (`Pane::close*`,
   `Workspace::confirm_close`, `views::workspace::quit_with_prompts`). Panes count tabs per document
-  (`DocumentModel::view_count`); when the last tab closes the model leaves the registry, so reopening reloads from
-  disk. No hot exit in 0.3.
-* **External changes** (`FileView::reload` from the watcher → `DocumentModel::file_changed_on_disk`): same stamp →
+  (`DocumentModel::view_count`); when the last tab closes the model leaves the registry and, unless another window or an
+  agent holds the shared document, `DocumentStore::forget`s it, so reopening reloads from disk. No hot exit in 0.3.
+* **External changes** (`FileView::reload` from the watcher → `DocumentModel::file_changed_on_disk` → `DocHandle::check_disk`
+  on the background executor; Revert / Reload → `DocHandle::reload`): same stamp →
   ignored (our own save); clean buffer → `Buffer::replace_all` (carets kept) adopting the freshly parsed disk
   snapshot; dirty → `DiskConflict` banner: Reload (discard mine) / Keep Mine (next save overwrites) / Compare
   (`editor::compare::CompareItem`, unified disk ↔ buffer diff from `lector_diff` rows).
@@ -1474,6 +1757,9 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
   Cut, Copy, ShowCharacterPalette. Key contexts: `Workspace`, `CodeView`, `DiffView`, `Picker`,
   `TextInput`, `ContextMenu`, `TreeView`, `TextArea` (+ `TextInput`), `ChangesPanel` (file list),
   `CommitEditor` (commit composer), `ConfirmDialog`.
+* v0.4 undo (`workspace::`): ShowActivity (View → Activity Log; the journal of every write Lector made, with Undo per
+  entry), UndoLastOperation (`cmd/ctrl-alt-z`; Git → Undo Last Operation; undoes the newest undoable operation in the
+  repository of the active window, backed up first and itself undoable).
 * v0.3 merge conflicts `git::` OpenMergeEditor, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth,
   AcceptAllOurs, AcceptAllTheirs, MarkResolved, ContinueOperation, AbortOperation (Git → Merge Conflicts menu).
   Key context `MergeEditor`: `alt-1/2/3` accept current / incoming / both, `alt-n` / `alt-p` next / previous conflict.
@@ -1491,4 +1777,5 @@ next/prev tab `ctrl-tab`/`ctrl-shift-tab`, back/forward `ctrl--`/`ctrl-shift--`
 `shift-f12`, hover `cmd-k cmd-i`, fold/unfold `cmd-alt-[`/`cmd-alt-]`, soft wrap `alt-z`,
 blame `cmd-alt-b`, markdown preview `cmd-shift-v`, zoom `cmd-=`/`cmd--`/`cmd-0`,
 diff next/prev hunk `alt-n`/`alt-p` (also `]c`-free plain keys `n`/`p` in diff context),
-next/prev file `alt-j`/`alt-k`, toggle viewed `v` (diff context), toggle layout `cmd-alt-d`.
+next/prev file `alt-j`/`alt-k`, toggle viewed `v` (diff context), toggle layout `cmd-alt-d`,
+undo last operation `cmd-alt-z`.

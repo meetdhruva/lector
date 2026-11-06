@@ -2,8 +2,8 @@
 //!
 //! Highlights are computed off the main thread: `highlights()` returns what
 //! is cached and queues missing row chunks on a channel that the owning
-//! [`super::DocumentModel`] drains on a background executor, notifying the
-//! views when results arrive. Rows without results render as plain text.
+//! [`super::DocumentModel`] forwards to the document store (computed on its
+//! executor), notifying the views when results arrive. Rows without results render as plain text.
 //!
 //! While a document is being edited, the syntax tree of the newest text may
 //! still be parsing. Meanwhile rows are drawn with the previous highlights
@@ -25,8 +25,8 @@ use lector_workspace::{Document, LineHighlights};
 
 use crate::code_view::{CodeSource, GutterMark, GutterMarkKind, HighlightSpan, SpanStyle};
 
-/// Rows per highlight chunk (requests and cache granularity).
-pub const HIGHLIGHT_CHUNK: u32 = 128;
+/// Rows per highlight chunk (requests and cache granularity; the store's).
+pub const HIGHLIGHT_CHUNK: u32 = lector_app::documents::HIGHLIGHT_CHUNK;
 
 /// How many stale layers may chain before older ones are flattened.
 const MAX_STALE_DEPTH: usize = 6;

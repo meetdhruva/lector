@@ -21,6 +21,7 @@ use lector_workspace::Project;
 mod chrome;
 mod editing;
 mod integration;
+mod undo_toast;
 use super::sidebar::{Sidebar, SidebarPanel};
 use super::theme_selector::ThemeSelectorDelegate;
 use crate::actions::{editor, workspace::*};
@@ -37,6 +38,7 @@ pub use chrome::{no_folder_project, no_folder_root};
 pub use editing::quit_with_prompts;
 use integration::Integration;
 pub use integration::TabRestorer;
+pub use undo_toast::{ToastAction, UNDO_TOAST_DURATION};
 
 /// Per-file facts shown in the status bar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -151,6 +153,7 @@ pub struct Workspace {
     window_title: String,
     lsp_status: SharedString,
     toast: Option<(SharedString, u64)>,
+    action_toast: Option<undo_toast::ActionToast>,
     has_folder: bool,
     app_menu: Entity<super::app_menu::AppMenuBar>,
     welcome: Option<Entity<super::welcome::WelcomeView>>,
@@ -237,6 +240,7 @@ impl Workspace {
             window_title: String::new(),
             lsp_status: "LSP: off".into(),
             toast: None,
+            action_toast: None,
             has_folder,
             app_menu: cx.new(super::app_menu::AppMenuBar::new),
             welcome: None,
@@ -385,6 +389,28 @@ impl Workspace {
         self
     }
 
+    /// Like [`Workspace::register_action`] for an action known only by value
+    /// (built from its name), e.g. GPUI actions bound to registry commands
+    /// (`crate::commands_bridge`).
+    pub fn register_boxed_action(
+        &mut self,
+        action: Box<dyn Action>,
+        callback: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    ) -> &mut Self {
+        let callback = Rc::new(callback);
+        self.action_registrations
+            .push(Box::new(move |div, _window, cx| {
+                let callback = callback.clone();
+                let this = cx.entity().downgrade();
+                div.on_boxed_action(action.as_ref(), move |_, window, cx| {
+                    if let Some(ws) = this.upgrade() {
+                        ws.update(cx, |ws, cx| callback(ws, window, cx));
+                    }
+                })
+            }));
+        self
+    }
+
     /// The project root.
     pub fn root(&self) -> &Path {
         &self.root
@@ -523,8 +549,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let previous = window.focused(cx);
+        let entries = crate::commands_bridge::palette_entries(
+            &crate::commands_bridge::command_context(self, cx),
+        );
+        let workspace = cx.entity().downgrade();
         self.toggle_modal(window, cx, move |window, cx| {
-            let delegate = CommandPaletteDelegate::new(previous, cx);
+            let delegate = CommandPaletteDelegate::with_registry(previous, entries, workspace, cx);
             Picker::new(delegate, window, cx)
         });
     }
@@ -1234,6 +1264,7 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
             .children(self.render_toast(cx))
+            .children(self.render_action_toast(cx))
             .children(self.chrome_menu.render())
             .children(self.lsp_popover.render())
             .child(self.modal_layer.clone())

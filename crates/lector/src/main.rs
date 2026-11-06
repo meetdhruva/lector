@@ -98,7 +98,7 @@ fn default_target() -> Option<String> {
             return Some(cwd.to_string_lossy().into_owned());
         }
     }
-    lector_config::RecentProjects::new()
+    lector_ui::commands_bridge::recent_projects()
         .most_recent_existing()
         .map(|recent| recent.to_string_lossy().into_owned())
 }
@@ -154,7 +154,7 @@ fn path_from_open_url(raw: &str) -> Option<PathBuf> {
 
 /// Records `root` as a recent project.
 fn record_recent(root: &Path) {
-    if let Err(err) = lector_config::RecentProjects::new().record(root) {
+    if let Err(err) = lector_ui::commands_bridge::recent_projects().record(root) {
         tracing::warn!("cannot record recent project: {err}");
     }
 }

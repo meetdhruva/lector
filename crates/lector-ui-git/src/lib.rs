@@ -3,6 +3,7 @@
 //! changeset review and commit tabs, blame, file/line history, permalinks.
 #![forbid(unsafe_code)]
 
+pub mod activity;
 pub mod blame;
 pub mod branches_panel;
 pub mod changes_panel;
@@ -64,8 +65,62 @@ pub struct GitViews {
     pub conflicts: Entity<InlineConflicts>,
 }
 
+/// Git stores by workspace window, for app-wide hooks (`commands_bridge`).
+#[derive(Default)]
+struct StoresByWorkspace(std::collections::HashMap<gpui::EntityId, gpui::WeakEntity<GitStore>>);
+
+impl gpui::Global for StoresByWorkspace {}
+
+/// The git store of a workspace window, if it is in a repository.
+pub fn store_for(workspace: gpui::EntityId, cx: &App) -> Option<Entity<GitStore>> {
+    cx.try_global::<StoresByWorkspace>()?
+        .0
+        .get(&workspace)?
+        .upgrade()
+}
+
+/// The changeset shown by the active tab (diff, review or commit tab).
+fn active_changeset(ws: &Workspace, cx: &App) -> Option<lector_git::Changeset> {
+    let item = ws.active_pane().read(cx).active_item()?;
+    match item.tab_kind(cx)? {
+        lector_config::TabKind::Diff { changeset_key, .. } => {
+            lector_workspace::review::parse_changeset_key(&changeset_key)
+        }
+        lector_config::TabKind::Commit { oid } => {
+            oid.parse().ok().map(lector_git::Changeset::Commit)
+        }
+        lector_config::TabKind::Other { label } => label
+            .strip_prefix("review:")
+            .and_then(lector_workspace::review::parse_changeset_key),
+        lector_config::TabKind::File { .. } => None,
+    }
+}
+
+/// Hooks the git views into the command API: the focus carries the active
+/// changeset, and `UiRequest::OpenChangeset` opens a review / commit tab.
+fn init_command_hooks(cx: &mut App) {
+    cx.set_global(StoresByWorkspace::default());
+    lector_ui::commands_bridge::register_focus_provider(cx, |ws, focus, cx| {
+        if focus.changeset.is_none() {
+            focus.changeset = active_changeset(ws, cx);
+        }
+    });
+    lector_ui::commands_bridge::set_changeset_opener(cx, |_ws, cs, window, cx| {
+        let Some(store) = store_for(cx.entity_id(), cx) else {
+            return;
+        };
+        window.defer(cx, move |window, cx| match cs {
+            lector_git::Changeset::Commit(oid) => {
+                review_tab::open_commit_tab(&store, oid, false, window, cx)
+            }
+            cs => review_tab::open_review(&store, cs, window, cx),
+        });
+    });
+}
+
 /// Registers the git views with every new workspace window.
 pub fn init(cx: &mut App) {
+    init_command_hooks(cx);
     cx.observe_new(|ws: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -76,6 +131,10 @@ pub fn init(cx: &mut App) {
         if store.read(cx).repo().is_none() {
             return;
         }
+        let ws_id = workspace.entity_id();
+        cx.default_global::<StoresByWorkspace>()
+            .0
+            .insert(ws_id, store.downgrade());
         let changes = cx.new(|cx| ChangesPanel::new(store.clone(), cx));
         let history = cx.new(|cx| HistoryPanel::new(store.clone(), window, cx));
         let branches = cx.new(|cx| BranchesPanel::new(store.clone(), cx));
@@ -124,6 +183,7 @@ pub fn init(cx: &mut App) {
         })
         .detach();
 
+        activity::register(ws, &store);
         let s = store.clone();
         ws.register_tab_restorer(move |kind, _window, cx| restore_tab(&s, kind, cx));
         // The workspace restores its session before extensions are
@@ -306,6 +366,7 @@ fn restore_tab(
     review_tab::restore_item(store, kind, cx)
         .or_else(|| diff_view::restore_item(store, kind, cx))
         .or_else(|| merge_editor::restore_item(store, kind, cx))
+        .or_else(|| activity::restore_item(store, kind, cx))
 }
 
 fn restore_git_tabs(
@@ -317,7 +378,8 @@ fn restore_git_tabs(
     if !lector_ui::settings::AppSettings::get(cx).session.restore {
         return;
     }
-    let Some(session) = lector_config::SessionStore::new().load(ws.project().root()) else {
+    let Some(session) = lector_ui::commands_bridge::session_store().load(ws.project().root())
+    else {
         return;
     };
     let pane = ws.active_pane().clone();

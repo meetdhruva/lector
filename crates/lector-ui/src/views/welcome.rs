@@ -58,7 +58,7 @@ impl RecentEntry {
 
 /// Recent projects, newest first.
 pub fn recent_entries() -> Vec<RecentEntry> {
-    lector_config::RecentProjects::new()
+    crate::commands_bridge::recent_projects()
         .list()
         .into_iter()
         .map(RecentEntry::new)
@@ -106,7 +106,7 @@ impl WelcomeView {
     }
 
     fn remove_recent(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if let Err(err) = lector_config::RecentProjects::new().remove(path) {
+        if let Err(err) = crate::commands_bridge::recent_projects().remove(path) {
             tracing::warn!("cannot update recent projects: {err}");
         }
         self.refresh(cx);

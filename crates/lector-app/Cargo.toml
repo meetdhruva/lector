@@ -9,12 +9,12 @@ authors.workspace = true
 description = "Headless application core of Lector: documents, git state, commands, scheduler, activity journal, storage."
 
 [dependencies]
-lector-text.workspace = true
+lector-text = { workspace = true, features = ["serde"] }
 lector-buffer.workspace = true
 lector-fs.workspace = true
 lector-syntax.workspace = true
 lector-diff.workspace = true
-lector-git.workspace = true
+lector-git = { workspace = true, features = ["serde"] }
 lector-search.workspace = true
 lector-lsp.workspace = true
 lector-config.workspace = true
@@ -27,7 +27,11 @@ parking_lot.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
 futures = "0.3"
+redb = "4.5"
+num_cpus = "1"
+dunce.workspace = true
 
 [dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 proptest.workspace = true

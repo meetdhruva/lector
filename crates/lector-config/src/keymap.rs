@@ -206,6 +206,7 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(c, "f8".into(), "editor::NextDiagnostic");
     add(c, "shift-f8".into(), "editor::PrevDiagnostic");
     add(w, format!("{m}-shift-m"), "workspace::ShowProblems");
+    add(w, format!("{m}-alt-z"), "workspace::UndoLastOperation");
     add(c, "escape".into(), "editor::ClearSelection");
 
     let d = "DiffView";

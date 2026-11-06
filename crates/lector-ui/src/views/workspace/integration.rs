@@ -13,7 +13,7 @@ use gpui::{
     prelude::*, px, App, Axis, ClipboardItem, Entity, Focusable, SharedString, Subscription, Task,
     Window,
 };
-use lector_config::{PaneState, Session, SessionStore, TabKind, TabState};
+use lector_config::{PaneState, Session, TabKind, TabState};
 use lector_lsp::ServerState;
 use lector_search::CancelToken;
 use lector_workspace::{FileList, GitStatusMap, Location, NavHistory, Project};
@@ -56,6 +56,9 @@ pub(crate) struct Integration {
     config_watcher: Option<lector_fs::Watcher>,
     rescan_task: Option<Task<()>>,
     git_task: Option<Task<()>>,
+    /// Shared git state of the repository (one per repository, all windows).
+    git_state: Option<Arc<lector_app::git_service::RepoState>>,
+    git_subscription: Option<lector_app::git_service::Subscription>,
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
     nav_task: Option<Task<()>>,
@@ -84,6 +87,8 @@ impl Integration {
             config_watcher: None,
             rescan_task: None,
             git_task: None,
+            git_state: None,
+            git_subscription: None,
             index_task: None,
             session_task: None,
             nav_task: None,
@@ -275,30 +280,55 @@ impl Workspace {
         }));
     }
 
+    /// Asks the shared git state for fresh status (coalesced with every other
+    /// window and the git views); the file tree updates when it arrives.
     pub(crate) fn refresh_git_status(&mut self, cx: &mut gpui::Context<Self>) {
-        let project = self.project.clone();
-        self.integ.git_task = Some(cx.spawn(async move |this, cx| {
-            let status = cx
-                .background_executor()
-                .spawn(async move { project.refresh_git_status() })
-                .await;
-            let status = match status {
-                Ok(s) => s,
-                Err(err) => {
-                    tracing::warn!("git status: {err}");
-                    return;
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.integ.git_status = status.clone();
-                let tree = this.sidebar.read(cx).file_tree().clone();
-                tree.update(cx, |t, cx| {
-                    t.delegate.set_git_status(status);
-                    t.refresh(cx);
-                });
-                cx.notify();
+        let Some(repo) = self.project.repo() else {
+            return;
+        };
+        if self.integ.git_state.is_none() {
+            let state = crate::commands_bridge::core(cx).git().repo_for(repo);
+            let (tx, mut rx) =
+                futures::channel::mpsc::unbounded::<Arc<lector_app::git_service::GitSnapshot>>();
+            let initial = state.snapshot();
+            let sub = state.subscribe(move |snap| {
+                let _ = tx.unbounded_send(snap.clone());
             });
-        }));
+            self.integ.git_task = Some(cx.spawn(async move |this, cx| {
+                let mut next = (initial.generation > 0).then_some(initial);
+                loop {
+                    let snap = match next.take() {
+                        Some(s) => s,
+                        None => match rx.next().await {
+                            Some(s) => s,
+                            None => break,
+                        },
+                    };
+                    let mut snap = snap;
+                    while let Ok(newer) = rx.try_recv() {
+                        snap = newer;
+                    }
+                    let ok = this.update(cx, |this, cx| {
+                        let status = this.project.set_git_status(&snap.status);
+                        this.integ.git_status = status.clone();
+                        let tree = this.sidebar.read(cx).file_tree().clone();
+                        tree.update(cx, |t, cx| {
+                            t.delegate.set_git_status(status);
+                            t.refresh(cx);
+                        });
+                        cx.notify();
+                    });
+                    if ok.is_err() {
+                        break;
+                    }
+                }
+            }));
+            self.integ.git_subscription = Some(sub);
+            self.integ.git_state = Some(state.clone());
+        }
+        if let Some(state) = &self.integ.git_state {
+            state.refresh();
+        }
     }
 
     fn start_watchers(&mut self, cx: &mut gpui::Context<Self>) {
@@ -1504,7 +1534,7 @@ impl Workspace {
         }
         let session = self.session(cx);
         let root = self.project.root().to_path_buf();
-        if let Err(err) = SessionStore::new().save(&root, &session) {
+        if let Err(err) = crate::commands_bridge::session_store().save(&root, &session) {
             tracing::warn!("session save failed: {err}");
         }
     }
@@ -1514,7 +1544,7 @@ impl Workspace {
     pub fn restore_session(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> bool {
         let restore = AppSettings::get(cx).session.restore && self.has_folder;
         let session = if restore {
-            SessionStore::new().load(self.project.root())
+            crate::commands_bridge::session_store().load(self.project.root())
         } else {
             None
         };

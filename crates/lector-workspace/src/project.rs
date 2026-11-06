@@ -462,6 +462,18 @@ impl Project {
         Ok(map)
     }
 
+    /// Replaces the status snapshot with one built from already computed
+    /// `git status` entries (v0.4: the shared `lector_app` git state computes
+    /// status once per repository for every window).
+    pub fn set_git_status(&self, entries: &[lector_git::StatusEntry]) -> Arc<GitStatusMap> {
+        let map = match &self.inner.repo {
+            Some(_) => Arc::new(GitStatusMap::build(entries, &self.inner.repo_prefix)),
+            None => Arc::new(GitStatusMap::default()),
+        };
+        *self.inner.git_status.write() = map.clone();
+        map
+    }
+
     /// Indexes tags of all project files into [`Project::symbols`]. Skips files > 1 MB, binary
     /// or unknown-language files, indexes at most 20k files. `progress(done, total)` is called
     /// on the calling thread.

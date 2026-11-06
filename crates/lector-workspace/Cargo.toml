@@ -10,6 +10,7 @@ description = "UI-free application model for Lector: project, documents, navigat
 
 [dependencies]
 memchr.workspace = true
+regex.workspace = true
 dunce.workspace = true
 lector-text.workspace = true
 lector-fs.workspace = true
@@ -27,5 +28,11 @@ tracing.workspace = true
 futures = "0.3"
 
 [dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 proptest.workspace = true
+criterion = { workspace = true, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "algo_bench"
+harness = false

@@ -34,6 +34,24 @@ pub fn is_portable() -> bool {
     portable_root().is_some()
 }
 
+/// With the `test-support` feature (enabled only as a dev-dependency), tests never
+/// touch the real per-user folders: everything goes to a per-process temp folder.
+#[cfg(feature = "test-support")]
+fn test_root() -> Option<&'static Path> {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    Some(
+        ROOT.get_or_init(|| {
+            std::env::temp_dir().join(format!("lector-test-{}", std::process::id()))
+        })
+        .as_path(),
+    )
+}
+
+#[cfg(not(feature = "test-support"))]
+fn test_root() -> Option<&'static Path> {
+    None
+}
+
 fn env_dir(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|v| !v.is_empty())
@@ -60,6 +78,9 @@ pub fn config_dir() -> PathBuf {
     if let Some(dir) = env_dir("LECTOR_CONFIG_DIR") {
         return dir;
     }
+    if let Some(root) = test_root() {
+        return root.join("config");
+    }
     if let Some(root) = portable_root() {
         return root.join("config");
     }
@@ -75,6 +96,9 @@ pub fn config_dir() -> PathBuf {
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = env_dir("LECTOR_DATA_DIR") {
         return dir;
+    }
+    if let Some(root) = test_root() {
+        return root.join("data");
     }
     if let Some(root) = portable_root() {
         return root.join("data");

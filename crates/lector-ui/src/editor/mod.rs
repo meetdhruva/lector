@@ -2,15 +2,18 @@
 //! with breadcrumbs, banners, hover popovers, and image / binary previews.
 //!
 //! Editing seams (see `docs/ARCHITECTURE.md`, "Editing"):
-//! * one [`DocumentModel`] per open file, shared by all of its tabs, owns the
-//!   [`crate::code_view::EditBuffer`]; each tab's [`CodeView`] edits it with
-//!   its own carets;
+//! * one [`DocumentModel`] per open file, shared by all of its tabs, adapts a
+//!   shared `lector_app::documents::DocHandle` (the same document agents,
+//!   commands and other windows edit) and owns its
+//!   [`crate::code_view::EditBuffer`] mirror; each tab's [`CodeView`] edits it
+//!   with its own carets;
 //! * [`register_before_save`] adds hooks run before every save (format on
 //!   save);
 //! * external edits (LSP formatting, rename, code actions) go through
 //!   [`DocumentModel::apply_edits`] (one undo step, carets mapped).
 
 pub mod compare;
+pub mod doc_store;
 pub mod image_view;
 pub mod model;
 pub mod source;
@@ -30,9 +33,10 @@ use lector_fs::{FileKind, ImageFormat};
 use lector_syntax::{OutlineItem, SymbolKind};
 use lector_workspace::{Document, Indentation, LineEnding, Project};
 
+pub use doc_store::{document_store, set_document_store};
 pub use model::{
-    document_for_path, open_documents, register_before_save, BeforeSaveHook, DocumentEvent,
-    DocumentModel, SaveOutcome,
+    document_for_path, open_documents, register_before_save, BeforeSaveHook, DiskConflict,
+    DocumentEvent, DocumentModel, SaveOutcome,
 };
 pub use source::{DocumentSource, SourceState, HIGHLIGHT_CHUNK};
 
@@ -138,6 +142,8 @@ pub struct FileView {
     save_task: Option<Task<()>>,
     focus_pending: bool,
     setup_done: bool,
+    /// The shared document is locked (`document.set_read_only`).
+    doc_locked: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -241,6 +247,7 @@ impl FileView {
             save_task: None,
             focus_pending: false,
             setup_done: false,
+            doc_locked: false,
             _subscriptions: vec![code_view_sub, model_sub],
         };
         if view.model.read(cx).is_loaded() {
@@ -269,6 +276,14 @@ impl FileView {
                 cx.notify();
             }
             DocumentEvent::DirtyChanged | DocumentEvent::Saved | DocumentEvent::ConflictChanged => {
+                // A document locked (or unlocked) from outside, e.g. by an agent.
+                let locked = self.model.read(cx).is_locked();
+                if locked != self.doc_locked {
+                    self.doc_locked = locked;
+                    let read_only = locked || AppSettings::get(cx).editor.read_only;
+                    self.code_view
+                        .update(cx, |v, cx| v.set_read_only(read_only, cx));
+                }
                 cx.emit(FileViewEvent::StateChanged);
                 cx.notify();
             }
@@ -306,8 +321,10 @@ impl FileView {
         let source = model.source();
         let buffer = model.buffer().cloned();
         let editable = model.is_editable();
-        let read_only = AppSettings::get(cx).editor.read_only || !editable;
-        let first_setup = !self.setup_done;
+        let locked = model.is_locked();
+        let read_only = AppSettings::get(cx).editor.read_only || !editable || locked;
+        let first_setup = !self.setup_done || locked != self.doc_locked;
+        self.doc_locked = locked;
         self.code_view.update(cx, |v, cx| {
             if let Some(source) = source {
                 v.set_source(source, cx);

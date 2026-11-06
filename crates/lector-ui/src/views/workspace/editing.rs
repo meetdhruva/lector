@@ -96,11 +96,9 @@ impl Workspace {
             return;
         }
         for view in views {
+            // The shared auto-save policy decides (dirty, no conflict, not deleted).
             let model = view.read(cx).model().clone();
-            let conflict = model.read(cx).conflict().is_some();
-            if model.read(cx).is_dirty(cx) && !conflict {
-                model.update(cx, |m, cx| m.save(false, cx)).detach();
-            }
+            model.update(cx, |m, cx| m.focus_lost(cx));
         }
     }
 

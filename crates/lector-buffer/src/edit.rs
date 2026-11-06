@@ -97,6 +97,21 @@ impl Buffer {
             EditKind::Typing
         };
         let rope = &self.text;
+        // Rows touched by more than one selection: electric outdent rewrites the
+        // whole indentation of a row, which would overlap the other carets' edits.
+        let mut shared_rows = std::collections::HashSet::new();
+        if single.is_some_and(is_closer) && self.options.auto_indent && self.sels.len() > 1 {
+            let mut seen = std::collections::HashSet::new();
+            for s in &self.sels {
+                let r = s.range();
+                let (first, last) = (row_of(rope, r.start), row_of(rope, r.end));
+                for row in first..=last {
+                    if !seen.insert(row) {
+                        shared_rows.insert(row);
+                    }
+                }
+            }
+        }
         let mut changes: Vec<Change> = Vec::with_capacity(self.sels.len());
         let mut specs: Vec<NewSel> = Vec::with_capacity(self.sels.len());
         let mut closers: Vec<(Pos, char)> = Vec::new();
@@ -154,7 +169,11 @@ impl Buffer {
                     }
                 }
             }
-            if !handled && r.is_empty() && self.options.auto_indent {
+            if !handled
+                && r.is_empty()
+                && self.options.auto_indent
+                && !shared_rows.contains(&row_of(rope, r.start))
+            {
                 if let Some((line_start, indent)) = single
                     .filter(|c| is_closer(*c))
                     .and_then(|c| self.electric_outdent(r.start, c))

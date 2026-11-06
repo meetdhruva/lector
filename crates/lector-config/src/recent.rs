@@ -22,13 +22,18 @@ pub struct RecentProjects {
 }
 
 impl Default for RecentProjects {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl RecentProjects {
-    /// Store at `<data_dir>/recent.json`.
+    /// Store at `<data_dir>/recent.json` (the v0.3 JSON store).
+    #[deprecated(
+        since = "0.4.0",
+        note = "recent projects live in the database: lector_app::db::Db::recent_projects"
+    )]
     pub fn new() -> Self {
         Self::with_file(crate::paths::data_dir().join("recent.json"))
     }

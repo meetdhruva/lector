@@ -3,11 +3,14 @@
 //! Everything here is synchronous and meant to be called from background
 //! threads; the UI (`lector-ui`) owns threading and presentation.
 
+pub mod cache;
 pub mod conflicts;
 pub mod document;
 pub mod navigation;
 pub mod project;
 pub mod review;
+pub mod risk;
+pub mod structural;
 pub mod symbols;
 
 use std::io;

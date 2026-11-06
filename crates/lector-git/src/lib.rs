@@ -27,6 +27,7 @@ mod log;
 mod oid;
 mod permalink;
 mod repo;
+pub mod shadow;
 mod status;
 mod types;
 pub mod write;
@@ -40,6 +41,7 @@ pub use graph::{graph, EdgeKind, GraphEdge, GraphRow};
 pub use oid::Oid;
 pub use permalink::{build_permalink, detect_forge, parse_remote_url, Forge, RemoteWeb};
 pub use repo::{is_binary, Repo};
+pub use shadow::{ShadowRepo, ShadowSnapshot};
 pub use types::{
     BlameHunk, Branch, ChangeKind, Changeset, CommitDetail, CommitInfo, FileChange, HeadInfo,
     LogQuery, RefKind, RefLabel, Remote, Side, Signature, Stash, StatusEntry, Tag,

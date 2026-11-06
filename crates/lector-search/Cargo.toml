@@ -16,7 +16,18 @@ grep-regex = "0.1"
 grep-matcher = "0.1"
 thiserror.workspace = true
 regex.workspace = true
+regex-syntax = "0.8"
 parking_lot.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
+criterion = { workspace = true, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "search_bench"
+harness = false
+
+[[bench]]
+name = "picker_gate"
+harness = false

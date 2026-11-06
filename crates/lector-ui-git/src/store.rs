@@ -1,12 +1,16 @@
-//! Per-workspace git state shared by all git views: the project, `HEAD`,
-//! status, the review store, and background refresh.
+//! Per-workspace view of the shared git state: the project, `HEAD`, status,
+//! conflicts and the review store.
+//!
+//! Since v0.4 the state itself lives in `lector_app::git_service::RepoState`
+//! (one per repository, shared by every window, refreshed from the file
+//! watcher). A `GitStore` subscribes to it, mirrors the latest snapshot into its
+//! public fields and emits [`GitStoreEvent::Changed`]; it never polls.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window,
-};
+use futures::StreamExt as _;
+use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity, Window};
+use lector_app::git_service::{GitSnapshot, RepoState, Subscription};
 use lector_config::{ReviewStore, Settings};
 use lector_git::{HeadInfo, Repo, StatusEntry};
 use lector_ui::views::{Workspace, WorkspaceEvent};
@@ -20,7 +24,7 @@ pub enum GitStoreEvent {
     Changed,
 }
 
-/// Shared git state of one workspace window.
+/// Git state of one workspace window (a view over the shared `RepoState`).
 pub struct GitStore {
     /// The workspace.
     pub workspace: WeakEntity<Workspace>,
@@ -31,18 +35,16 @@ pub struct GitStore {
     pub status: Arc<Vec<StatusEntry>>,
     /// Merge / rebase / cherry-pick / revert in progress and conflicted paths.
     pub conflicts: Arc<ConflictState>,
-    /// Viewed marks.
+    /// Viewed marks (database-backed, shared by every window).
     pub review: ReviewStore,
     /// Bumped on each observed change.
     pub generation: u64,
     /// The git views of this window (set by `init`).
     pub views: Option<crate::GitViews>,
-    refresh_task: Option<Task<()>>,
-    refresh_again: bool,
-    last_refresh: Option<Instant>,
-    last_cost: Duration,
-    _subscriptions: Vec<Subscription>,
-    _poll: Option<Task<()>>,
+    state: Option<Arc<RepoState>>,
+    _subscriptions: Vec<gpui::Subscription>,
+    _repo_subscription: Option<Subscription>,
+    _updates: Option<Task<()>>,
 }
 
 impl EventEmitter<GitStoreEvent> for GitStore {}
@@ -57,9 +59,10 @@ impl GitStore {
     pub fn new(
         workspace: &Entity<Workspace>,
         project: Option<Project>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let core = lector_ui::commands_bridge::core(cx);
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe(
             workspace,
@@ -70,42 +73,64 @@ impl GitStore {
                 _ => {}
             },
         ));
-        // Poll cheaply while the window is active (catches changes the
-        // watcher missed, e.g. on network file systems).
-        let poll = cx.spawn_in(window, async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
-            let ok = this.update_in(cx, |this, window, cx| {
-                if window.is_window_active() {
-                    let stale = this.last_refresh.is_none_or(|t| {
-                        t.elapsed() > (this.last_cost * 20).max(Duration::from_secs(3))
-                    });
-                    if stale {
-                        this.refresh(cx);
+        let state = project
+            .as_ref()
+            .and_then(|p| p.repo())
+            .map(|repo| core.git().repo_for(repo));
+        let (repo_subscription, updates) = match &state {
+            Some(state) => {
+                let (tx, mut rx) = futures::channel::mpsc::unbounded::<Arc<GitSnapshot>>();
+                let sub = state.subscribe(move |snap| {
+                    let _ = tx.unbounded_send(snap.clone());
+                });
+                let initial = state.snapshot();
+                let task = cx.spawn(async move |this, cx| {
+                    if initial.generation > 0
+                        && this
+                            .update(cx, |this, cx| this.apply(&initial, cx))
+                            .is_err()
+                    {
+                        return;
                     }
-                }
-            });
-            if ok.is_err() {
-                break;
+                    while let Some(mut snap) = rx.next().await {
+                        // Only the newest pending snapshot matters.
+                        while let Ok(newer) = rx.try_recv() {
+                            snap = newer;
+                        }
+                        if this.update(cx, |this, cx| this.apply(&snap, cx)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                (Some(sub), Some(task))
             }
-        });
-        let mut store = GitStore {
+            None => (None, None),
+        };
+        GitStore {
             workspace: workspace.downgrade(),
             project,
             head: None,
             status: Arc::new(Vec::new()),
             conflicts: Arc::new(ConflictState::default()),
-            review: ReviewStore::default(),
+            review: core.review_store(),
             generation: 0,
             views: None,
-            refresh_task: None,
-            refresh_again: false,
-            last_refresh: None,
-            last_cost: Duration::from_millis(50),
+            state,
             _subscriptions: subscriptions,
-            _poll: Some(poll),
-        };
-        store.refresh(cx);
-        store
+            _repo_subscription: repo_subscription,
+            _updates: updates,
+        }
+    }
+
+    fn apply(&mut self, snap: &GitSnapshot, cx: &mut Context<Self>) {
+        // `RepoState` publishes only changed snapshots, or forced ones after a
+        // write (identical contents, views still reload), so every one counts.
+        self.head = snap.head.clone();
+        self.status = snap.status.clone();
+        self.conflicts = snap.conflicts.clone();
+        self.generation += 1;
+        cx.emit(GitStoreEvent::Changed);
+        cx.notify();
     }
 
     /// The project.
@@ -116,6 +141,11 @@ impl GitStore {
     /// The repository, if the project is in one.
     pub fn repo(&self) -> Option<&Repo> {
         self.project.as_ref().and_then(|p| p.repo())
+    }
+
+    /// The shared repository state (one per repository, all windows).
+    pub fn repo_state(&self) -> Option<&Arc<RepoState>> {
+        self.state.as_ref()
     }
 
     /// Current settings (from the app).
@@ -133,54 +163,19 @@ impl GitStore {
         }
     }
 
-    /// Re-reads HEAD and status in the background (coalesced).
-    pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo().cloned() else {
-            return;
-        };
-        if self.refresh_task.is_some() {
-            self.refresh_again = true;
-            return;
+    /// Asks the shared state to re-read HEAD and status (coalesced across
+    /// windows); the store updates when the new snapshot arrives.
+    pub fn refresh(&mut self, _cx: &mut Context<Self>) {
+        if let Some(state) = &self.state {
+            state.refresh();
         }
-        let started = Instant::now();
-        let work = cx.background_spawn(async move {
-            let head = repo.head().ok();
-            let status = repo.status().ok();
-            let conflicts = lector_workspace::conflicts::conflict_state(&repo).ok();
-            (head, status, conflicts)
-        });
-        self.refresh_task = Some(cx.spawn(async move |this, cx| {
-            let (head, status, conflicts) = work.await;
-            let _ = this.update(cx, |this, cx| {
-                this.refresh_task = None;
-                this.last_refresh = Some(Instant::now());
-                this.last_cost = started.elapsed();
-                let mut changed = false;
-                if head != this.head {
-                    this.head = head;
-                    changed = true;
-                }
-                if let Some(status) = status {
-                    if *this.status != status {
-                        this.status = Arc::new(status);
-                        changed = true;
-                    }
-                }
-                if let Some(conflicts) = conflicts {
-                    if *this.conflicts != conflicts {
-                        this.conflicts = Arc::new(conflicts);
-                        changed = true;
-                    }
-                }
-                if changed || this.generation == 0 {
-                    this.generation += 1;
-                    cx.emit(GitStoreEvent::Changed);
-                    cx.notify();
-                }
-                if std::mem::take(&mut this.refresh_again) {
-                    this.refresh(cx);
-                }
-            });
-        }));
+    }
+
+    /// Like [`GitStore::refresh`], but views reload even if nothing seems to
+    /// have changed (after a write).
+    pub fn refresh_and_notify(&mut self, _cx: &mut Context<Self>) {
+        if let Some(state) = &self.state {
+            state.refresh_and_notify();
+        }
     }
 }

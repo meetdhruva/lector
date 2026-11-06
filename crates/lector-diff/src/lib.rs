@@ -16,7 +16,9 @@
 #![forbid(unsafe_code)]
 
 mod inline;
+pub mod moves;
 pub mod patch;
+pub mod remap;
 mod rows;
 
 use std::hash::Hash;

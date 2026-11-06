@@ -396,3 +396,63 @@ fn replacements_expand_capture_groups_only_in_regex_mode() {
     bad.regex = true;
     assert!(replacements_in_text("a", &bad, "b").is_err());
 }
+
+/// The trigram index narrows candidates and `search_files` confirms them: the result must equal a
+/// full `search_project` for literal and regex queries.
+#[test]
+fn trigram_candidates_then_search_files_equal_full_search() {
+    let d = fixture();
+    let root = d.path();
+    let opts = WalkOptions {
+        git_ignore: true,
+        ..Default::default()
+    };
+    let files: Vec<PathBuf> = walk(root, &opts).into_iter().map(PathBuf::from).collect();
+    let index = TrigramIndex::build(root, &files, &CancelToken::new());
+    assert!(index.contains("bin.dat"));
+    assert!(!index.searchable_paths().contains(&"bin.dat".to_string()));
+
+    type Sink<'a> = &'a (dyn Fn(SearchEvent) + Send + Sync);
+    let collect = |run: &dyn Fn(Sink<'_>)| {
+        let out = Mutex::new(BTreeSet::new());
+        run(&|ev| {
+            if let SearchEvent::File(f) = ev {
+                for m in f.matches {
+                    out.lock()
+                        .unwrap()
+                        .insert((f.path.to_string_lossy().replace('\\', "/"), m.line));
+                }
+            }
+        });
+        out.into_inner().unwrap()
+    };
+    for (pattern, regex) in [
+        ("hello", false),
+        ("Hello World", false),
+        ("pub fn hello|TODO: w", true),
+        ("fn\\s+main", true),
+        ("[a-z]+", true),
+        ("nomatchatall", false),
+    ] {
+        let q = SearchQuery {
+            pattern: pattern.into(),
+            regex,
+            ..Default::default()
+        };
+        let full = collect(&|sink| {
+            search_project(root, &q, &opts, &CancelToken::new(), sink).unwrap();
+        });
+        let candidates = match index.candidates(&q).unwrap() {
+            Candidates::All => index.searchable_paths(),
+            Candidates::Files(f) => f,
+        };
+        let cands: Vec<PathBuf> = candidates.into_iter().map(PathBuf::from).collect();
+        let narrowed = collect(&|sink| {
+            search_files(root, &cands, &q, &CancelToken::new(), sink).unwrap();
+        });
+        assert_eq!(full, narrowed, "pattern {pattern:?}");
+        if pattern == "nomatchatall" {
+            assert!(cands.is_empty(), "trigrams must rule everything out");
+        }
+    }
+}

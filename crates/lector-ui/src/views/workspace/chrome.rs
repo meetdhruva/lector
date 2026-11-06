@@ -175,7 +175,7 @@ impl Workspace {
                 return;
             }
         };
-        if let Err(err) = lector_config::RecentProjects::new().record(project.root()) {
+        if let Err(err) = crate::commands_bridge::recent_projects().record(project.root()) {
             tracing::warn!("cannot record recent project: {err}");
         }
         self.save_session_now(cx);

@@ -28,6 +28,7 @@ pub const MAX_DIFF_BYTES: u64 = 5 * 1024 * 1024;
 /// Changesets with more files than this get no eager stats (computed on demand).
 pub const MAX_EAGER_STATS: usize = 3000;
 
+use crate::cache::{ContentCache, ContentId};
 use crate::project::Project;
 pub use crate::{Error, Result};
 
@@ -713,11 +714,22 @@ fn side_path(change: &FileChange, old: bool) -> Option<String> {
     }
 }
 
+/// Cache identity of a loaded side: the blob id when known, else a hash of the bytes.
+fn loaded_id(side: Option<&Side>, loaded: &Loaded) -> Option<ContentId> {
+    match (side, loaded) {
+        (Some(Side::Blob(oid)), _) => Some(ContentId::Blob(*oid)),
+        (_, Loaded::Missing) => Some(ContentId::of_bytes(&[])),
+        (_, Loaded::Bytes(b)) => Some(ContentId::of_bytes(b)),
+        (_, Loaded::TooLarge(_)) => None,
+    }
+}
+
 fn prepare_side(
     path: Option<String>,
     loaded: &Loaded,
     languages: &LanguageRegistry,
     parse: bool,
+    id: Option<ContentId>,
 ) -> (DiffSide, Option<FileKind>) {
     let mut side = DiffSide {
         path: path.clone(),
@@ -748,7 +760,10 @@ fn prepare_side(
                     side.language = languages.language_for_path(&rel, first_line.as_deref());
                     if parse {
                         if let Some(lang) = &side.language {
-                            side.syntax = Syntax::parse(lang, &text).ok();
+                            side.syntax = match id {
+                                Some(id) => ContentCache::global().syntax(id, lang, &text).ok(),
+                                None => Syntax::parse(lang, &text).ok(),
+                            };
                         }
                     }
                     side.text = Some(text);
@@ -809,9 +824,22 @@ fn build_file_diff(
 ) -> FileDiff {
     let too_large =
         matches!(old_loaded, Loaded::TooLarge(_)) || matches!(new_loaded, Loaded::TooLarge(_));
-    let (old, old_kind) = prepare_side(side_path(&change, true), old_loaded, languages, !too_large);
-    let (new, new_kind) =
-        prepare_side(side_path(&change, false), new_loaded, languages, !too_large);
+    let old_id = loaded_id(Some(&change.old), old_loaded);
+    let new_id = loaded_id(Some(&change.new), new_loaded);
+    let (old, old_kind) = prepare_side(
+        side_path(&change, true),
+        old_loaded,
+        languages,
+        !too_large,
+        old_id,
+    );
+    let (new, new_kind) = prepare_side(
+        side_path(&change, false),
+        new_loaded,
+        languages,
+        !too_large,
+        new_id,
+    );
     let image = [&old_kind, &new_kind].into_iter().find_map(|k| match k {
         Some(FileKind::Image(f)) if *f != ImageFormat::Svg => Some(*f),
         _ => None,
@@ -856,7 +884,12 @@ fn build_file_diff(
             .as_ref()
             .map(|t| t.to_string())
             .unwrap_or_default();
-        fd.diff = diff_text(&o, &n, opts);
+        fd.diff = match (old_id, new_id) {
+            (Some(a), Some(b)) => {
+                (*ContentCache::global().line_diff(a, b, opts, || diff_text(&o, &n, opts))).clone()
+            }
+            _ => diff_text(&o, &n, opts),
+        };
         fd.split = split_rows(&fd.diff);
         fd.unified = unified_rows(&fd.diff);
         fd.pairs = pair_rows(&fd.split);
@@ -908,7 +941,8 @@ pub fn side_from_bytes(path: &str, bytes: Vec<u8>, languages: &LanguageRegistry)
     } else {
         Loaded::Bytes(bytes)
     };
-    prepare_side(Some(path.to_string()), &loaded, languages, true).0
+    let id = loaded_id(None, &loaded);
+    prepare_side(Some(path.to_string()), &loaded, languages, true, id).0
 }
 
 /// The text of `path` at `rev` (for "view file at revision").

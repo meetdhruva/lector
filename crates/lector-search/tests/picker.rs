@@ -170,3 +170,204 @@ fn release_gate_1m_paths() {
         println!("  {q:>12}: results {results:?}, matched {n}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Top-k picker behaviour
+
+use lector_search::MAX_RESULTS;
+
+fn paths_picker(items: &[String]) -> Picker<usize> {
+    let p: Picker<usize> = Picker::new_for_paths(Arc::new(|| {}));
+    let inj = p.injector();
+    for (i, s) in items.iter().enumerate() {
+        inj.push(i, s);
+    }
+    p
+}
+
+fn settle_u(p: &mut Picker<usize>) {
+    let start = Instant::now();
+    while p.tick(10) {
+        assert!(start.elapsed() < Duration::from_secs(20), "did not settle");
+    }
+}
+
+/// Brute-force ranking with nucleo directly: (score desc, shorter haystack, lower index).
+fn brute_force(items: &[String], query: &str) -> Vec<(usize, u32)> {
+    use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+    use nucleo::{Config, Matcher, Utf32String};
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut out: Vec<(usize, u32, usize)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let hay = Utf32String::from(s.as_str());
+            pattern
+                .score(hay.slice(..), &mut matcher)
+                .map(|sc| (i, sc, hay.len()))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
+    out.into_iter().map(|(i, s, _)| (i, s)).collect()
+}
+
+#[test]
+fn top_k_matches_brute_force_ranking() {
+    let items = synthetic(5000);
+    let mut p = paths_picker(&items);
+    // Typed incrementally (exercises narrowing) and with shortenings (history reuse).
+    for q in [
+        "m",
+        "mo",
+        "mod1",
+        "mod12",
+        "mod1",
+        "src",
+        "src/cr",
+        "mod9 core",
+        "zz",
+        "m",
+    ] {
+        p.set_query(q);
+        settle_u(&mut p);
+        let expect = brute_force(&items, q);
+        assert_eq!(p.matched_count() as usize, expect.len(), "count for {q:?}");
+        let got: Vec<(usize, u32)> = p
+            .matches(0..MAX_RESULTS as u32)
+            .iter()
+            .map(|m| (*m.item, m.score))
+            .collect();
+        let n = expect.len().min(MAX_RESULTS);
+        assert_eq!(got, expect[..n], "ranking for {q:?}");
+    }
+}
+
+#[test]
+fn shorter_paths_win_ties_and_boost_orders() {
+    let mut p: Picker<&'static str> = Picker::new_for_paths(Arc::new(|| {}));
+    let inj = p.injector();
+    inj.push("long", "aaa/bbb/ccc/lib.rs");
+    inj.push("short", "lib.rs");
+    inj.push_boosted("recent", "zzz/zzz/lib.rs", 500);
+    p.set_query("");
+    while p.tick(5) {}
+    let order: Vec<&str> = p.matches(0..10).iter().map(|m| *m.item).collect();
+    assert_eq!(order[0], "recent", "boost orders the empty query");
+    p.set_query("lib");
+    while p.tick(5) {}
+    let order: Vec<&str> = p.matches(0..10).iter().map(|m| *m.item).collect();
+    assert_eq!(order[0], "recent");
+    // Same score without the boost: shorter path first.
+    let mut p: Picker<&'static str> = Picker::new_for_paths(Arc::new(|| {}));
+    let inj = p.injector();
+    inj.push("long", "aaa/bbb/ccc/lib.rs");
+    inj.push("short", "lib.rs");
+    p.set_query("lib.rs");
+    while p.tick(5) {}
+    let order: Vec<&str> = p.matches(0..10).iter().map(|m| *m.item).collect();
+    assert_eq!(order, vec!["short", "long"]);
+}
+
+#[test]
+fn items_injected_after_matching_are_found() {
+    let items = synthetic(2000);
+    let mut p = paths_picker(&items[..1000]);
+    p.set_query("mod7");
+    settle_u(&mut p);
+    let first = p.matched_count();
+    let inj = p.injector();
+    for (i, s) in items.iter().enumerate().skip(1000) {
+        inj.push(i, s);
+    }
+    settle_u(&mut p);
+    let expect = brute_force(&items, "mod7");
+    assert!(p.matched_count() > first);
+    assert_eq!(p.matched_count() as usize, expect.len());
+    assert_eq!(p.total_count(), 2000);
+    // Extending the query after new items arrived uses the grown candidate set.
+    p.set_query("mod77");
+    settle_u(&mut p);
+    assert_eq!(
+        p.matched_count() as usize,
+        brute_force(&items, "mod77").len()
+    );
+}
+
+#[test]
+fn concurrent_injection_while_typing() {
+    let items = Arc::new(synthetic(30_000));
+    let mut p = paths_picker(&[]);
+    let inj = p.injector();
+    let items2 = items.clone();
+    let t = std::thread::spawn(move || {
+        for (i, s) in items2.iter().enumerate() {
+            inj.push(i, s);
+        }
+    });
+    for q in ["c", "cr", "cra", "crat", "crate"] {
+        p.set_query(q);
+        p.tick(2);
+    }
+    t.join().unwrap();
+    settle_u(&mut p);
+    assert_eq!(p.total_count(), 30_000);
+    assert_eq!(
+        p.matched_count() as usize,
+        brute_force(&items, "crate").len()
+    );
+}
+
+#[test]
+fn query_syntax_and_negation_still_work_with_history() {
+    let items: Vec<String> = ["src/main.rs", "src/lib.rs", "src/libx.rs", "README.md"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut p = paths_picker(&items);
+    for q in [
+        "rs", "rs !lib", "rs !li", "rs !libx", "^src", "^src rs$", "'main", "rs !",
+    ] {
+        p.set_query(q);
+        settle_u(&mut p);
+        assert_eq!(
+            p.matched_count() as usize,
+            brute_force(&items, q).len(),
+            "{q:?}"
+        );
+    }
+}
+
+#[test]
+fn tick_reports_running_and_results_are_partial_then_complete() {
+    let items = synthetic(300_000);
+    let mut p = paths_picker(&items);
+    settle_u(&mut p);
+    p.set_query("c");
+    // Partial results show up quickly; the pass completes later.
+    let t = Instant::now();
+    let mut saw_results = false;
+    while p.tick(1) {
+        if !saw_results && !p.matches(0..5).is_empty() {
+            saw_results = true;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20));
+    }
+    assert!(saw_results || p.matched_count() > 0);
+    assert!(!p.matches(0..5).is_empty());
+    assert!(p.matched_count() > 250_000);
+}
+
+#[test]
+fn drop_and_clear_do_not_hang() {
+    let items = synthetic(1000);
+    let mut p = paths_picker(&items);
+    p.set_query("mod");
+    p.clear();
+    assert_eq!(p.total_count(), 0);
+    p.injector().push(1, "a/b.rs");
+    p.set_query("b");
+    settle_u(&mut p);
+    assert_eq!(p.matched_count(), 1);
+    drop(p);
+}

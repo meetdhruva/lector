@@ -11,3 +11,5 @@ cc 9179e1285c5b3459e2e3001ffc87c1a88f91eb34d9af4582a532a4b7fb933cea # shrinks to
 cc 0c7c3242f17cfd7afbac964f241d5d1ee57d3fc69a37c6532fe8c50ec40c45db # shrinks to init = ([], [0], 0), ops = [Typed(0), Group([Undo])]
 cc 4fc165be4a8e5f5d2bf5979df69c72379f3c1e57babf2a66c7df1edc5af53e0b # shrinks to init = ([14, 14, 14, 14, 14, 2, 22, 0, 5, 13, 4], [92, 111, 165], 0), ops = [DeleteWordLeft, ApplyEdits([(200, 3, 14), (257, 0, 0)])]
 cc a688877c555d9dc0c7b61b74160b3f2de69aee61c7a46c1f9acc079f110c5490 # shrinks to init = ([20], [72], 0), chars = [6]
+cc b89d7b90ee16a14d44b098d1f0d2b8790a9d4a5ef1a3ec5d4013f75b02e9b692 # shrinks to init = ([0, 12, 27], [48, 66], 0), ops = [Group([Delete, Typed(17)])]
+cc 0c620b5bf3dfc8b2ccfd65c9a6d26dca83ec8d01b21fdc3508e063c760508d8f # shrinks to init = ([0, 0, 0, 3, 2, 0, 11, 2, 11, 14, 0, 0, 11, 12, 14, 14, 14, 0, 14, 3, 3, 3, 0, 3, 0, 26, 0, 2, 14, 3, 3, 0, 3, 2, 0, 12, 3, 0, 3, 0, 27, 8, 22, 12, 14, 14, 26, 14, 26, 14, 3, 13, 0, 3, 0, 0, 22, 26, 14, 0], [476, 299, 0, 0, 0, 0, 0, 0], 0), ops = [Group([Typed(15)])]

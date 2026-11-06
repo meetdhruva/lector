@@ -64,6 +64,9 @@ pub mod workspace {
             // v0.3: editing.
             SaveAll,
             ShowProblems,
+            // v0.4: undo instead of confirm.
+            ShowActivity,
+            UndoLastOperation,
         ]
     );
 }

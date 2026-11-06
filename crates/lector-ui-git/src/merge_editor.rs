@@ -79,7 +79,6 @@ struct Panes {
 pub struct MergeEditor {
     store: Entity<GitStore>,
     rel: String,
-    abs: PathBuf,
     result: Entity<FileView>,
     tracker: Entity<FileConflicts>,
     panes: Option<Panes>,
@@ -110,7 +109,7 @@ impl Focusable for MergeEditor {
 }
 
 impl MergeEditor {
-    /// A merge editor for repository-relative `rel` (`abs` is its absolute path).
+    /// A merge editor for repository-relative `rel` (`abs` is its absolute path, opened in the result pane).
     pub fn new(
         store: Entity<GitStore>,
         project: lector_workspace::Project,
@@ -145,7 +144,6 @@ impl MergeEditor {
         let mut editor = MergeEditor {
             store,
             rel,
-            abs,
             result,
             tracker,
             panes: None,
@@ -578,45 +576,22 @@ impl MergeEditor {
     }
 
     /// Modify/delete conflicts: deletes the working file (after asking) and stages the deletion.
+    /// Resolves a modify/delete conflict by deleting the file: backed up first, so it
+    /// runs at once and the Undo toast brings the file (and the conflict) back.
     fn delete_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ws) = self.store.read(cx).workspace.upgrade() else {
-            return;
-        };
-        let spec = ConfirmSpec {
-            title: format!("Delete {}?", split_path(&self.rel).0).into(),
-            message: vec![
-                "Resolves the conflict by deleting the file from disk and staging the deletion. \
-                 Its current content is lost."
-                    .into(),
-            ],
-            items: vec![self.rel.clone().into()],
-            confirm_label: "Delete".into(),
-        };
-        let this = cx.entity().downgrade();
-        confirm(&ws, spec, window, cx, move |window, cx| {
-            let _ = this.update(cx, |this, cx| {
-                let path = this.abs.clone();
-                if path.exists() {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        this.error = Some(format!("Could not delete: {e}").into());
-                        cx.notify();
-                        return;
-                    }
+        let staged = run_op(&self.store, GitOp::ResolveDelete(self.rel.clone()), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = staged.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(true) => this.after_resolved(window, cx),
+                Ok(false) => {}
+                Err(e) => {
+                    this.error = Some(e.into());
+                    cx.notify();
                 }
-                let staged = run_op(&this.store, GitOp::Stage(vec![this.rel.clone()]), cx);
-                cx.spawn_in(window, async move |this, cx| {
-                    let result = staged.await;
-                    let _ = this.update_in(cx, |this, window, cx| match result {
-                        Ok(_) => this.after_resolved(window, cx),
-                        Err(e) => {
-                            this.error = Some(e.into());
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
             });
-        });
+        })
+        .detach();
     }
 
     // Scrolling.
@@ -1047,7 +1022,7 @@ impl MergeEditor {
                                     })),
                             )
                             .child(
-                                Button::new("merge-delete-file", "Delete File…")
+                                Button::new("merge-delete-file", "Delete File")
                                     .icon(IconName::Trash)
                                     .style(ButtonStyle::Outlined)
                                     .tooltip(Tooltip::text(

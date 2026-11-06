@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{Context, EntityId, EventEmitter, SharedString};
+use lector_app::documents::{BufferView, DocHandle, EditOrigin, HistoryEntry};
 use lector_buffer::{Buffer, EditDelta, Transaction};
 use lector_text::sum_tree::Bias;
 use lector_text::{OffsetUtf16, Point, Rope};
@@ -26,7 +27,8 @@ use super::HighlightSpan;
 #[derive(Clone)]
 pub enum EditBufferEvent {
     /// The text changed. `origin` is the view that made the edit (`None`:
-    /// programmatic, e.g. reload or LSP edits).
+    /// programmatic, e.g. reload, LSP edits, or another front-end / agent
+    /// editing the shared document).
     Edited {
         /// Entity id of the editing view.
         origin: Option<EntityId>,
@@ -35,85 +37,340 @@ pub enum EditBufferEvent {
     },
 }
 
-/// A text buffer shared by the views editing it.
+/// Read access to the buffer state (an owned `Buffer`, or the mirror of a
+/// shared document at the last seq this front-end processed).
+pub enum BufferRef<'a> {
+    /// A private buffer.
+    Owned(&'a Buffer),
+    /// A shared document's buffer, as last synchronized.
+    Mirror(&'a BufferView),
+}
+
+impl BufferRef<'_> {
+    /// Text version.
+    pub fn version(&self) -> u64 {
+        match self {
+            BufferRef::Owned(b) => b.version(),
+            BufferRef::Mirror(v) => v.version,
+        }
+    }
+
+    /// Current text.
+    pub fn text(&self) -> &Rope {
+        match self {
+            BufferRef::Owned(b) => b.text(),
+            BufferRef::Mirror(v) => &v.text,
+        }
+    }
+
+    /// Selections as left by the last buffer operation.
+    pub fn selections(&self) -> &[lector_buffer::Selection] {
+        match self {
+            BufferRef::Owned(b) => b.selections(),
+            BufferRef::Mirror(v) => &v.selections,
+        }
+    }
+
+    /// Options.
+    pub fn options(&self) -> &lector_buffer::BufferOptions {
+        match self {
+            BufferRef::Owned(b) => b.options(),
+            BufferRef::Mirror(v) => &v.options,
+        }
+    }
+
+    /// Unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        match self {
+            BufferRef::Owned(b) => b.is_dirty(),
+            BufferRef::Mirror(v) => v.dirty,
+        }
+    }
+
+    /// Undo available.
+    pub fn can_undo(&self) -> bool {
+        match self {
+            BufferRef::Owned(b) => b.can_undo(),
+            BufferRef::Mirror(v) => v.can_undo,
+        }
+    }
+
+    /// Redo available.
+    pub fn can_redo(&self) -> bool {
+        match self {
+            BufferRef::Owned(b) => b.can_redo(),
+            BufferRef::Mirror(v) => v.can_redo,
+        }
+    }
+}
+
+enum Storage {
+    Owned(Box<Buffer>),
+    Shared {
+        handle: DocHandle,
+        origin: EditOrigin,
+        view: BufferView,
+    },
+}
+
+/// A text buffer shared by the views editing it: either private (scratch
+/// buffers) or a mirror of a `lector_app` document (file tabs), which other
+/// windows, agents and commands may edit too.
 pub struct EditBuffer {
-    buffer: Buffer,
+    storage: Storage,
 }
 
 impl EventEmitter<EditBufferEvent> for EditBuffer {}
 
 impl EditBuffer {
-    /// Wraps `buffer`.
+    /// Wraps a private `buffer`.
     pub fn new(buffer: Buffer) -> Self {
-        EditBuffer { buffer }
+        EditBuffer {
+            storage: Storage::Owned(Box::new(buffer)),
+        }
+    }
+
+    /// Mirrors the shared document `handle` (`None`: not editable).
+    pub fn shared(handle: DocHandle) -> Option<Self> {
+        let view = handle.buffer_view()?;
+        Some(EditBuffer {
+            storage: Storage::Shared {
+                handle,
+                origin: EditOrigin::new(),
+                view,
+            },
+        })
+    }
+
+    /// The shared document, if this buffer mirrors one.
+    pub fn handle(&self) -> Option<&DocHandle> {
+        match &self.storage {
+            Storage::Owned(_) => None,
+            Storage::Shared { handle, .. } => Some(handle),
+        }
+    }
+
+    /// The origin tag of this front-end's edits (shared buffers).
+    pub fn origin(&self) -> Option<EditOrigin> {
+        match &self.storage {
+            Storage::Owned(_) => None,
+            Storage::Shared { origin, .. } => Some(*origin),
+        }
     }
 
     /// The buffer (read access).
-    pub fn buffer(&self) -> &Buffer {
-        &self.buffer
+    pub fn buffer(&self) -> BufferRef<'_> {
+        match &self.storage {
+            Storage::Owned(b) => BufferRef::Owned(b),
+            Storage::Shared { view, .. } => BufferRef::Mirror(view),
+        }
     }
 
     /// Current text.
     pub fn text(&self) -> &Rope {
-        self.buffer.text()
+        match &self.storage {
+            Storage::Owned(b) => b.text(),
+            Storage::Shared { view, .. } => &view.text,
+        }
     }
 
     /// Whether the text differs from the last saved state.
     pub fn is_dirty(&self) -> bool {
-        self.buffer.is_dirty()
+        self.buffer().is_dirty()
     }
 
     /// Runs `f` on the buffer. When `selections` is given, the buffer's
     /// selections are replaced first (a view brings its carets). Emits
-    /// [`EditBufferEvent::Edited`] when the returned transaction is not empty.
+    /// [`EditBufferEvent::Edited`] when the returned transaction is not empty
+    /// (after edits other front-ends made meanwhile). `None` when the shared
+    /// document refused the edit (read-only).
     pub fn edit<R>(
         &mut self,
         origin: Option<EntityId>,
         selections: Option<Vec<lector_buffer::Selection>>,
         f: impl FnOnce(&mut Buffer) -> (R, Transaction),
         cx: &mut Context<Self>,
-    ) -> R {
-        if let Some(sels) = selections {
-            // Re-installing identical carets would end the current typing run
-            // (`set_selections` breaks undo coalescing), making every keystroke
-            // its own undo step.
-            if !same_selections(&self.buffer, &sels) {
-                self.buffer.set_selections(sels);
+    ) -> Option<R> {
+        let run = move |buffer: &mut Buffer| {
+            if let Some(sels) = selections {
+                // Re-installing identical carets would end the current typing run
+                // (`set_selections` breaks undo coalescing), making every keystroke
+                // its own undo step.
+                if !same_selections(buffer, &sels) {
+                    buffer.set_selections(sels);
+                }
+            }
+            f(buffer)
+        };
+        match &mut self.storage {
+            Storage::Owned(buffer) => {
+                let (result, transaction) = run(buffer);
+                if !transaction.deltas.is_empty() {
+                    cx.emit(EditBufferEvent::Edited {
+                        origin,
+                        transaction: Arc::new(transaction),
+                    });
+                    cx.notify();
+                }
+                Some(result)
+            }
+            Storage::Shared {
+                handle,
+                origin: me,
+                view,
+            } => {
+                let r = handle.edit_from(*me, view.seq, run).ok()?;
+                let before = std::mem::replace(view, r.view);
+                let me = *me;
+                let after = view.text.clone();
+                Self::emit_foreign(&before.text, &after, &r.catch_up, r.gap, me, cx);
+                if !r.transaction.deltas.is_empty() {
+                    cx.emit(EditBufferEvent::Edited {
+                        origin,
+                        transaction: r.transaction,
+                    });
+                }
+                cx.notify();
+                Some(r.value)
             }
         }
-        let (result, transaction) = f(&mut self.buffer);
-        if !transaction.deltas.is_empty() {
-            cx.emit(EditBufferEvent::Edited {
-                origin,
-                transaction: Arc::new(transaction),
-            });
-            cx.notify();
-        }
-        result
     }
 
     /// Applies external edits (LSP formatting, rename, code actions) as one
-    /// undo step. Offsets refer to the current text.
+    /// undo step. Offsets refer to the current text. Empty when nothing
+    /// changed or the shared document refused (read-only).
     pub fn apply_edits(
         &mut self,
         edits: Vec<lector_buffer::TextEdit>,
         cx: &mut Context<Self>,
     ) -> Arc<Transaction> {
-        let transaction = Arc::new(self.buffer.apply_edits(edits));
+        let transaction = match &mut self.storage {
+            Storage::Owned(buffer) => Arc::new(buffer.apply_edits(edits)),
+            Storage::Shared {
+                handle,
+                origin,
+                view,
+            } => match handle.edit_from(*origin, view.seq, |b| ((), b.apply_edits(edits))) {
+                Ok(r) => {
+                    let before = std::mem::replace(view, r.view);
+                    let me = *origin;
+                    let after = view.text.clone();
+                    Self::emit_foreign(&before.text, &after, &r.catch_up, r.gap, me, cx);
+                    r.transaction
+                }
+                Err(_) => Arc::new(Transaction::default()),
+            },
+        };
         if !transaction.deltas.is_empty() {
             cx.emit(EditBufferEvent::Edited {
                 origin: None,
                 transaction: transaction.clone(),
             });
-            cx.notify();
         }
+        cx.notify();
         transaction
     }
 
-    /// Mutable access without change tracking, for operations that do not
-    /// change the text (`mark_saved`, `set_options`).
-    pub fn buffer_mut(&mut self) -> &mut Buffer {
-        &mut self.buffer
+    /// Runs an operation that does not change the text (selections, copy,
+    /// options, undo grouping). Shared buffers catch up with other
+    /// front-ends' edits first.
+    pub fn update_buffer<R>(
+        &mut self,
+        f: impl FnOnce(&mut Buffer) -> R,
+        cx: &mut Context<Self>,
+    ) -> R {
+        self.catch_up(cx);
+        match &mut self.storage {
+            Storage::Owned(buffer) => f(buffer),
+            Storage::Shared { handle, view, .. } => {
+                let mut f = Some(f);
+                let mut out = None;
+                let res = handle.with_buffer_mut(|b| {
+                    if let Some(f) = f.take() {
+                        out = Some(f(b));
+                    }
+                });
+                if let Some(((), fresh)) = res {
+                    if fresh.seq == view.seq {
+                        *view = fresh;
+                    } else {
+                        // Another edit slipped in: the next catch-up brings the text.
+                        view.selections = fresh.selections;
+                        view.options = fresh.options;
+                    }
+                }
+                if let Some(f) = f.take() {
+                    // No longer editable: run on a scratch copy of the mirror.
+                    let mut scratch = Buffer::new(view.text.clone(), view.options.clone());
+                    return f(&mut scratch);
+                }
+                match out {
+                    Some(r) => r,
+                    None => unreachable!("the closure ran"),
+                }
+            }
+        }
+    }
+
+    /// Shared buffers: emits the edits other front-ends (agents, other
+    /// windows, reloads, save cleanups) made since this mirror was last
+    /// updated, and refreshes the dirty / undo state.
+    pub fn catch_up(&mut self, cx: &mut Context<Self>) {
+        let Storage::Shared {
+            handle,
+            origin,
+            view,
+        } = &mut self.storage
+        else {
+            return;
+        };
+        let Some(up) = handle.catch_up(view.seq) else {
+            return;
+        };
+        let changed = up.view.seq != view.seq
+            || up.view.dirty != view.dirty
+            || up.view.can_undo != view.can_undo
+            || up.view.can_redo != view.can_redo;
+        let before = std::mem::replace(view, up.view);
+        let me = *origin;
+        let after = view.text.clone();
+        Self::emit_foreign(&before.text, &after, &up.entries, up.gap, me, cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn emit_foreign(
+        before: &Rope,
+        after: &Rope,
+        entries: &[HistoryEntry],
+        gap: bool,
+        me: EditOrigin,
+        cx: &mut Context<Self>,
+    ) {
+        if gap {
+            // History did not reach back far enough: one whole-text replacement.
+            cx.emit(EditBufferEvent::Edited {
+                origin: None,
+                transaction: Arc::new(Transaction {
+                    deltas: vec![EditDelta {
+                        start_byte: 0,
+                        old_end_byte: before.len(),
+                        new_end_byte: after.len(),
+                        start: Point::new(0, 0),
+                        old_end: before.max_point(),
+                        new_end: after.max_point(),
+                    }],
+                }),
+            });
+            return;
+        }
+        for entry in entries.iter().filter(|e| e.origin != me) {
+            cx.emit(EditBufferEvent::Edited {
+                origin: None,
+                transaction: entry.transaction.clone(),
+            });
+        }
     }
 }
 

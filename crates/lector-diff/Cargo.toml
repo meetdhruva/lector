@@ -18,3 +18,7 @@ criterion = { workspace = true, features = ["cargo_bench_support"] }
 [[bench]]
 name = "diff_bench"
 harness = false
+
+[[bench]]
+name = "moves_bench"
+harness = false

@@ -712,3 +712,59 @@ fn typing_in_a_code_view_is_one_undo_step(cx: &mut TestAppContext) {
     cx.dispatch_action(Undo);
     assert_eq!(buffer_text(&view, cx), "fn a() {}// hix\n");
 }
+
+/// v0.4: the tab is a view of the shared store document. Edits an agent (or a
+/// command, or another window) makes through the store reach the open tab
+/// with carets mapped, typing continues after them, and a lock set from
+/// outside locks the tab.
+#[gpui::test]
+fn store_edits_reach_open_tabs(cx: &mut TestAppContext) {
+    init(cx, |_| {});
+    let fx = fixture(&[("a.txt", b"hello\n")]);
+    let (ws, cx) = open_workspace(cx, &fx.root);
+    let view = open_file(&ws, fx.root.join("a.txt"), cx);
+    let handle = view.read_with(cx, |v, cx| v.model().read(cx).handle().cloned().unwrap());
+    view.update(cx, |v, cx| {
+        v.code_view()
+            .update(cx, |c, cx| c.set_cursor(Pos::new(0, 5), cx))
+    });
+    // The store hands out the same document for the path.
+    let store = cx.update(|_, cx| crate::editor::document_store(cx));
+    assert!(store
+        .get(&fx.root.join("a.txt"))
+        .is_some_and(|h| h == handle));
+    handle
+        .apply_edits(vec![lector_buffer::TextEdit {
+            range: 0..0,
+            new_text: "agent: ".into(),
+        }])
+        .unwrap();
+    cx.run_until_parked();
+    view.read_with(cx, |v, cx| {
+        assert!(v.is_dirty(cx));
+        let text = v.live_document(cx).unwrap().text().unwrap().to_string();
+        assert_eq!(text, "agent: hello\n");
+        assert_eq!(
+            v.code_view().read(cx).cursor(),
+            Pos::new(0, 12),
+            "caret mapped"
+        );
+    });
+    cx.simulate_input("!");
+    assert_eq!(handle.text().unwrap().to_string(), "agent: hello!\n");
+    // Saving from the store (an agent's `document.save`) cleans the tab.
+    handle
+        .save(lector_app::documents::SaveRequest::default())
+        .unwrap();
+    cx.run_until_parked();
+    view.read_with(cx, |v, cx| assert!(!v.is_dirty(cx)));
+    assert_eq!(
+        std::fs::read_to_string(fx.root.join("a.txt")).unwrap(),
+        "agent: hello!\n"
+    );
+    handle.set_read_only(true);
+    cx.run_until_parked();
+    view.read_with(cx, |v, cx| assert!(v.is_read_only(cx)));
+    cx.simulate_input("x");
+    assert_eq!(handle.text().unwrap().to_string(), "agent: hello!\n");
+}

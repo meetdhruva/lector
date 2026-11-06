@@ -15,7 +15,7 @@ should be noticeably faster on every row.
 | Scroll | 120 fps, p99 frame < 8 ms | Code view CPU work per frame: layout median 0.97 ms / p99 7.3 ms, paint median 1.0 ms / p99 8.1 ms. Whole frame (draw + lavapipe present): median 43 ms, p99 88 ms | Inconclusive here | The code view's own work fits the budget on median; the full-frame number is software rasterization of a 1600×1000 window and says nothing about GPU frame times. Needs re-measuring on real hardware. |
 | Open 1 GB file → first paint | < 500 ms | `Project::load_document` + first 80 lines + highlights: **77–128 ms** warm, **607 ms** cold (page cache dropped); jump to last line 40 µs; 10.8 M lines. `lector-text` alone (`Text::open_mapped` + 80 lines): 91 ms warm | Pass (warm) / miss (cold) | `MappedText` builds the exact line index eagerly, so a cold open is bound by reading 1 GB from disk (~1.7 GB/s here). A background index (first screen from the first pages only) would fix the cold case — recommended for 0.1.1. |
 | git status, Linux-kernel-sized repo | < 300 ms | 85 k files: **224–289 ms** median (first call 284–317 ms; `git status` 137–160 ms). 50 k files: 92 ms median (first 136 ms; `git status` 101 ms) | Pass (barely, 85 k) | 5 modified + 3 untracked files, index older than the files. `Repo::changes(WorkingTree)` on 85 k: 145–151 ms (measured after `git status` refreshed the index). |
-| Fuzzy file finder, 1M paths, first results | < 50 ms | Results per keystroke typing `crate mod12`: `c` 252 ms, `cr` 447 ms, `cra` 217 ms, `crat`…`crate mod1` 101–152 ms, `crate mod12` 62 ms. Injecting 1 M paths: 142–158 ms | **Fail** on this 2-core VM | nucleo publishes results only when a full matching pass (incl. sorting every match) completes, so short queries matching ~90 % of paths are the worst case. Options for 0.1.1: cap/sort only the top N, prefilter by the previous query's results, or match the most recent/visible paths first. |
+| Fuzzy file finder, 1M paths, first results | < 50 ms | v0.4 top-k scorer, `crate mod12` typed key by key: first (partial) results **1.0–1.7 ms** on every keystroke; fully settled 43–137 ms, `cr` 324 ms and `sr` 288 ms (2-char fuzzy over ~875 k candidates); `src/mod999` settles in 26 ms. Backspace settles 42–106 ms (282 ms for `cr`). Injecting 1 M paths: 98–118 ms | Pass (first results) / settled misses for 1–2 char queries on this 2-core VM | Replaced the full-sort pass by a worker thread with a top-k heap (best 1000), progressive publishing every 12 ms and narrowing from the previous queries' match sets (history of 16). Partial results are the ranking of the items scanned so far, so "first results" are exact only once `tick` reports settled. Remaining: cheaper scoring for 1–2 char queries. |
 
 ## How to reproduce
 
@@ -44,4 +44,6 @@ LECTOR_PERF_STATUS_DIRS=850 cargo test -p lector-git --release --test perf -- --
 
 # Fuzzy finder over 1 M synthetic paths.
 cargo test -p lector-search --release --test picker release_gate -- --ignored --nocapture
+# Per-keystroke table with first/settled/backspace timings (what the row above quotes).
+cargo bench -p lector-search --bench picker_gate
 ```

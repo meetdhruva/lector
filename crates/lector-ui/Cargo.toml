@@ -27,6 +27,8 @@ lector-git.workspace = true
 lector-diff.workspace = true
 lector-lsp.workspace = true
 lector-buffer.workspace = true
+lector-app.workspace = true
+serde_json.workspace = true
 parking_lot.workspace = true
 futures = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -34,6 +36,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 resvg = { version = "0.45", default-features = false }
 
 [dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }
 dunce.workspace = true
 tempfile.workspace = true
 gpui = { version = "0.2.2", features = ["test-support"] }
