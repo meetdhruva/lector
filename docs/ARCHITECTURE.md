@@ -1039,6 +1039,116 @@ zdiff3 working files resolve to exactly stage :2 / :3 / :1, add/add, modify/dele
 state leaves the repository byte-for-byte unchanged), unit + proptests in `conflicts.rs` (generated conflicts with
 LF/CRLF round-trip through parse → resolve_all / side_view; arbitrary marker soup never panics).
 
+### v0.4 foundations — design goals
+
+Driven by four user jobs: *"what did the agent just do, and is it safe?"*, *"help me
+understand this code"*, *"fix this small thing and ship it"*, *"tell the agent what's
+wrong"*. Foundations so every later feature is cheap:
+
+1. **Headless core (`lector-app`).** Documents, git state, review state, diagnostics,
+   commands and history live in a UI-free crate. GPUI views render snapshots and dispatch
+   commands. Agents, the CLI, MCP and tests drive the exact same core.
+2. **Commands are the API.** Typed, parameterized commands with availability, preview,
+   apply and undo. Menus, palette, keys, CLI, MCP tools and agents are front-ends.
+3. **Undo instead of confirm.** Every write is recorded in an append-only **activity
+   journal** with an undo record; file contents are backed up first in a **shadow repo**
+   (Lector's own data dir, never the user's `.git`). Confirmation dialogs remain only for
+   things that cannot be undone (e.g. aborting a rebase, pushing).
+4. **One scheduler** with priorities, cancellation and keyed "latest wins" jobs.
+5. **Versioned derived data**: outline, folds, gutter, blame mapping, diagnostics are
+   queries over snapshot versions, cached — not ad-hoc debounced tasks.
+6. **Embedded database** (redb) for review state, comments, sessions, recents, caches.
+7. **Content-addressed caching** keyed by git blob id / content hash.
+
+### lector-app (v0.4; UI-free, no GPUI, no tokio)
+```rust
+// scheduler.rs (Agent APP)
+pub enum Priority { Interactive, Visible, Background, Idle }
+pub struct JobKey(pub String);                 // jobs with the same key: newest cancels older ("latest wins")
+pub struct Scheduler;                          // Clone; Scheduler::global(); fixed worker pool; priority queues
+impl Scheduler {
+    pub fn spawn<T: Send + 'static>(&self, prio: Priority, key: Option<JobKey>,
+        f: impl FnOnce(&CancelToken) -> T + Send + 'static) -> JobHandle<T>;
+    pub fn debounce(&self, key: JobKey, delay: Duration, prio: Priority, f: impl FnOnce(&CancelToken) + Send + 'static);
+}
+pub struct JobHandle<T>;   // cancel(), is_finished(), try_take(), into_future() -> impl Future<Output = Option<T>> (None = cancelled)
+
+// commands/ (Agent APP)
+pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'static str, pub category: &'static str,
+                         pub args_schema: serde_json::Value /* JSON Schema */, pub destructive: bool, pub undoable: bool,
+                         pub ui_action: Option<&'static str> /* "git::Stage" — the GPUI action that dispatches it */ }
+pub enum Availability { Available, Unavailable(String /* why, shown as tooltip */) }
+pub struct CommandContext { pub core: AppCore, pub project: Option<Project>, pub focus: Focus /* active path, selections, changeset, hunk */ }
+pub trait Command: Send + Sync {
+    fn spec(&self) -> &CommandSpec;
+    fn available(&self, cx: &CommandContext) -> Availability;
+    fn preview(&self, cx: &CommandContext, args: &Value) -> anyhow::Result<Option<String /* human text or unified diff */>> { Ok(None) }
+    fn apply(&self, cx: &CommandContext, args: &Value) -> anyhow::Result<Outcome>;
+}
+pub struct Outcome { pub summary: String, pub undo: Option<UndoRecord>, pub data: Value, pub ui: Vec<UiRequest> }
+pub enum UiRequest { OpenPath { path: PathBuf, point: Option<Point> }, OpenChangeset(Changeset), Toast(String), Refresh }
+pub struct CommandRegistry;  // register, get(id), list(), invoke(id, args, cx) -> Result<Outcome> — invoke records to the journal
+pub struct AppCore;          // Clone handle: scheduler, registry, journal, db, git service, document store
+
+// git_service.rs (Agent APP)
+pub struct GitService;       // process-wide; one RepoState per repository shared by all windows
+impl GitService { pub fn repo(&self, workdir: &Path) -> Option<Arc<RepoState>>; }
+pub struct RepoState;        // snapshot() -> Arc<GitSnapshot { head, status, operation, conflicts, generation }>;
+                             // subscribe(cb) -> Subscription; refresh() (coalesced); driven by the fs watcher, slow poll only as fallback
+
+// db/ (Agent APP) — redb file at data_dir()/lector.redb
+pub struct Db;               // open(path), tables: review (viewed marks), comments, sessions, recent, kv, cache (bytes by key, LRU-trimmed)
+                             // one-time import of the v0.3 JSON stores (review.json, sessions/*.json, recent.json); keep the public
+                             // ReviewStore / SessionStore / RecentProjects APIs working (backed by Db)
+
+// journal/ (Agent SAFE)
+pub struct Journal;          // append-only, persisted in Db; list(limit), get(id), undo(id) -> Result<ActivityEntry>, subscribe(cb)
+pub struct ActivityEntry { pub id: u64, pub time: SystemTime, pub command: String, pub summary: String,
+                           pub repo: Option<PathBuf>, pub paths: Vec<PathBuf>, pub undo: Option<UndoRecord>, pub undone: bool }
+pub enum UndoRecord {
+    RestoreFiles { shadow: ShadowSnapshot, paths: Vec<String> },     // discard, accept-all, revert file, merge resolution
+    Invoke { command: String, args: Value },                         // stage <-> unstage
+    RestoreIndex { shadow: ShadowSnapshot, paths: Vec<String> },     // staging that cannot be expressed as a simple inverse
+}
+
+// documents/ (Agent DOCS)
+pub struct DocumentStore;    // open(path) -> DocHandle (one per canonical path, shared by every view/window/agent)
+pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version, syntax?, dirty, disk: DiskState }; edit(|buffer|) -> Transaction;
+                             // apply_edits(Vec<TextEdit>); save(); reload(); subscribe(cb);
+                             // queries (cached per version, computed on the scheduler): outline(), folds(), gutter(), highlights(rows),
+                             // diagnostics() mapped through edits, blame_map()
+```
+
+### lector-git shadow repo (v0.4; Agent SAFE)
+```rust
+pub struct ShadowRepo;       // bare repo at data_dir()/shadow/<hash of workdir>.git, objects/info/alternates -> user repo's objects;
+                             // Lector writes only there, never into the user's .git
+impl ShadowRepo {
+    pub fn open(data_dir: &Path, repo: &Repo) -> Result<ShadowRepo>;
+    pub fn snapshot_paths(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;   // working-tree contents (missing = recorded as absent)
+    pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot>;
+    pub fn snapshot_worktree(&self, note: &str) -> Result<ShadowSnapshot>;                  // whole tree incl. untracked, honours .gitignore (agent checkpoints)
+    pub fn restore_paths(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()>;      // writes files — only from an explicit undo
+    pub fn changes_between(&self, a: &ShadowSnapshot, b: &ShadowSnapshot) -> Result<Vec<FileChange>>;
+    pub fn prune(&self, keep: Duration) -> Result<()>;
+}
+pub struct ShadowSnapshot { pub commit: Oid, pub time: i64, pub note: String }
+```
+
+### v0.4 algorithms (Agent ALGO; core crates)
+* `lector_diff::moves::detect_moved(old: &str, new: &str, diff: &LineDiff, min_lines: u32) -> Vec<MovedBlock { old: Range<u32>, new: Range<u32>, reindented: bool }>`
+  (git `--color-moved`-style: normalized-line hashes, greedy longest blocks).
+* `lector_diff::remap::LineMap::new(old, new, &LineDiff)` → `map(old_line) -> Mapped { Exact(u32) | Moved(u32) | Deleted { near: u32 } }`;
+  `reanchor(anchor: &Anchor { line, text, context_before, context_after }, new_text) -> Option<u32>` (fuzzy fallback) —
+  used so comments and "viewed" marks survive new revisions/agent turns.
+* `lector_workspace::risk::assess(diff: &FileDiff, langs: &LanguageRegistry) -> RiskReport { score: f32 (0..1), reasons: Vec<RiskReason> }`
+  — explainable signals: public signature/API change (tree-sitter), deleted logic, tests touched/missing, security-sensitive
+  paths/APIs, error-handling removed, large churn, generated/lock files (low).
+* `lector_workspace::cache::ContentCache` — LRU caches keyed by content hash / blob id for Syntax, outline, tags, line diffs.
+* `lector_workspace::structural::diff(old, new, budget) -> Option<StructuralDiff>` (difftastic-style, time/node budget, None on overflow).
+* `lector_search::TrigramIndex` (build/update per file/serialize/query regex+literal → candidate files) and picker top-k
+  (fuzzy finder < 50 ms first results at 1M paths).
+
 ### lector-ui (extension seams)
 ```rust
 // Data in through traits; integration plugs the core crates in here.

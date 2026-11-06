@@ -1,0 +1,33 @@
+[package]
+name = "lector-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Headless application core of Lector: documents, git state, commands, scheduler, activity journal, storage."
+
+[dependencies]
+lector-text.workspace = true
+lector-buffer.workspace = true
+lector-fs.workspace = true
+lector-syntax.workspace = true
+lector-diff.workspace = true
+lector-git.workspace = true
+lector-search.workspace = true
+lector-lsp.workspace = true
+lector-config.workspace = true
+lector-workspace.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+futures = "0.3"
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
