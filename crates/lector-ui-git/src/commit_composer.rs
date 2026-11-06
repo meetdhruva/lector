@@ -631,7 +631,7 @@ mod tests {
     fn tab_walks_the_message_then_the_options_and_shift_tab_walks_back(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().canonicalize().expect("canonical");
+        let root = dunce::canonicalize(dir.path()).expect("canonical");
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(&root)

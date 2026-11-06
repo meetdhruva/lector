@@ -142,7 +142,7 @@ fn rich() -> Fx {
     fx.write("src/lib.rs", "fn a() {}\nfn b() {}\n");
     fx.write("crlf.txt", "one\r\ntwo\r\nthree\r\n");
     fx.write("blob.bin", [0u8, 159, 146, 150, 0, 255, 10, 13, 0]);
-    fx.write("weird name \"q\".txt", "quoted\n");
+    fx.write("weird name 'q' é.txt", "quoted\n");
     fx.write("dir/nested/deep.txt", "deep\n");
     fx.write("run.sh", "#!/bin/sh\necho hi\n");
     #[cfg(unix)]
@@ -308,7 +308,7 @@ fn restores_exact_bytes_modes_links_and_absence() {
         ("src/lib.rs", fx.read("src/lib.rs")),
         ("crlf.txt", fx.read("crlf.txt")),
         ("blob.bin", fx.read("blob.bin")),
-        ("weird name \"q\".txt", fx.read("weird name \"q\".txt")),
+        ("weird name 'q' é.txt", fx.read("weird name 'q' é.txt")),
         ("dir/nested/deep.txt", fx.read("dir/nested/deep.txt")),
         ("run.sh", fx.read("run.sh")),
     ];
@@ -579,6 +579,8 @@ fn worktree_snapshot_honours_gitignore_and_includes_untracked() {
 #[test]
 fn awkward_names_survive() {
     let fx = Fx::new();
+    // Windows forbids tab, newline, backslash, quote and `*` in file names.
+    #[cfg(not(windows))]
     let names = [
         "with space.txt",
         "tab\there.txt",
@@ -588,6 +590,14 @@ fn awkward_names_survive() {
         "ünïcödé/файл.txt",
         "-leading-dash",
         "*glob[x].txt",
+    ];
+    #[cfg(windows)]
+    let names = [
+        "with space.txt",
+        "ünïcödé/файл.txt",
+        "-leading-dash",
+        "glob[x].txt",
+        "it's #1 & more%.txt",
     ];
     for n in names {
         fx.write(n, format!("content of {n}"));
@@ -634,7 +644,7 @@ fn shadow_location_is_stable_per_workdir_and_uses_alternates() {
     assert!(a.git_dir().starts_with(fx.data.path().join("shadow")));
     assert!(a.git_dir().extension().is_some_and(|e| e == "git"));
     let alternates = fs::read_to_string(a.git_dir().join("objects/info/alternates")).unwrap();
-    let user_objects = fs::canonicalize(fx.path().join(".git/objects")).unwrap();
+    let user_objects = dunce::canonicalize(fx.path().join(".git/objects")).unwrap();
     assert_eq!(alternates.trim(), user_objects.to_string_lossy());
     assert!(
         !a.git_dir().starts_with(fx.path()),
@@ -675,7 +685,7 @@ fn worktrees_use_the_main_repositorys_objects() {
     let repo = Repo::discover(&wt_path).unwrap();
     let shadow = ShadowRepo::open(fx.data.path(), &repo).unwrap();
     let alternates = fs::read_to_string(shadow.git_dir().join("objects/info/alternates")).unwrap();
-    let main_objects = fs::canonicalize(fx.path().join(".git/objects")).unwrap();
+    let main_objects = dunce::canonicalize(fx.path().join(".git/objects")).unwrap();
     assert_eq!(alternates.trim(), main_objects.to_string_lossy());
     fs::write(wt_path.join("src/lib.rs"), "wt edit").unwrap();
     let snap = shadow.snapshot_paths(&["src/lib.rs"], "wt").unwrap();

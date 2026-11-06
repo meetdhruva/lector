@@ -67,7 +67,7 @@ fn review_hint_is_stored_and_cleared(cx: &mut TestAppContext) {
     let data = tempfile::tempdir().expect("data dir");
     let dir = tempfile::tempdir().expect("dir");
     setup(cx, data.path());
-    let (ws, cx) = open_workspace(cx, &dir.path().canonicalize().expect("root"));
+    let (ws, cx) = open_workspace(cx, &dunce::canonicalize(dir.path()).expect("root"));
     assert!(ws.read_with(cx, |ws, _| ws.review_hint().is_none()));
     let hint = ReviewHint {
         uncommitted: 3,
@@ -93,7 +93,7 @@ fn install_banner_shows_once_per_server_and_can_be_turned_off(cx: &mut TestAppCo
     let data = tempfile::tempdir().expect("data dir");
     let dir = tempfile::tempdir().expect("dir");
     setup(cx, data.path());
-    let (ws, cx) = open_workspace(cx, &dir.path().canonicalize().expect("root"));
+    let (ws, cx) = open_workspace(cx, &dunce::canonicalize(dir.path()).expect("root"));
 
     // Unknown servers have no install hint, so no banner.
     ws.update(cx, |ws, cx| {
@@ -135,7 +135,7 @@ fn file_view_explains_changed_lines_only(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let data = tempfile::tempdir().expect("data dir");
     let dir = tempfile::tempdir().expect("dir");
-    let root = dir.path().canonicalize().expect("root");
+    let root = dunce::canonicalize(dir.path()).expect("root");
     git(&root, &["init", "-q"]);
     std::fs::write(root.join("a.txt"), "one\ntwo\nthree\nfour\n").expect("write");
     git(&root, &["add", "a.txt"]);

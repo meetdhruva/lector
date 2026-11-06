@@ -227,7 +227,7 @@ fn fixture(files: &[(&str, &[u8])]) -> Fixture {
         }
         std::fs::write(path, bytes).unwrap();
     }
-    let root = dir.path().canonicalize().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     Fixture { _dir: dir, root }
 }
 

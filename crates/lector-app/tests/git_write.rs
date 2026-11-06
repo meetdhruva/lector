@@ -45,7 +45,7 @@ impl Fx {
         hermetic();
         let work = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(work.path()).unwrap();
+        let root = dunce::canonicalize(work.path()).unwrap();
         let fx_git = |args: &[&str]| git_in(&root, args);
         fx_git(&["init", "-q", "-b", "main"]);
         fx_git(&["config", "user.name", "t"]);
@@ -66,7 +66,7 @@ impl Fx {
     }
 
     fn root(&self) -> PathBuf {
-        fs::canonicalize(self.work.path()).unwrap()
+        dunce::canonicalize(self.work.path()).unwrap()
     }
 
     fn git(&self, args: &[&str]) -> String {
@@ -633,7 +633,7 @@ fn journal_is_persisted_bounded_and_notifies() {
     let db_path = dir.path().join("lector.redb");
     let data = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
-    let root = fs::canonicalize(work.path()).unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
     git_in(&root, &["init", "-q", "-b", "main"]);
     fs::write(root.join("a.txt"), "a\n").unwrap();
     git_in(&root, &["add", "-A"]);

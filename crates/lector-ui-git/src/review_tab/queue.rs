@@ -530,7 +530,7 @@ mod tests {
     fn review_queue_orders_by_risk_tracks_progress_and_follows_moves(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let data = tempfile::tempdir().unwrap();
         git(&root, &["init", "-q"]);
         std::fs::create_dir_all(root.join("src")).unwrap();

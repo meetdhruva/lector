@@ -40,7 +40,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("main.rs"), "fn main() {}\nlet a = 1;\n").expect("write");
-    let root = dir.path().canonicalize().expect("canonical");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
     Fixture { _dir: dir, root }
 }
 

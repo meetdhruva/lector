@@ -525,7 +525,7 @@ mod tests {
     #[gpui::test]
     fn blame_follows_unsaved_edits_and_refreshes_after_save(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         git(&root, &["add", "a.txt"]);

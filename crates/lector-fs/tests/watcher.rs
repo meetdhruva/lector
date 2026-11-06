@@ -22,7 +22,7 @@ impl Harness {
     fn new() -> Harness {
         let dir = tempfile::tempdir().expect("tempdir");
         // Canonicalize so reported paths compare equal (macOS /private/var).
-        let root = dir.path().canonicalize().expect("canonicalize");
+        let root = dunce::canonicalize(dir.path()).expect("canonicalize");
         std::fs::create_dir_all(root.join(".git/refs/heads")).expect("git dirs");
         std::fs::create_dir_all(root.join(".git/objects/ab")).expect("git dirs");
         std::fs::create_dir_all(root.join("src")).expect("src");
@@ -141,7 +141,7 @@ fn dropping_the_watcher_stops_events() {
 #[test]
 fn symlinks_are_not_followed_into_large_trees() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().expect("canonicalize");
+    let root = dunce::canonicalize(dir.path()).expect("canonicalize");
     std::fs::create_dir_all(root.join("src")).expect("src");
     // A loop and a link to the filesystem root must not be crawled.
     std::os::unix::fs::symlink(&root, root.join("src/loop")).expect("symlink");

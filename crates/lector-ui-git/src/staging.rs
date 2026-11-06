@@ -374,7 +374,7 @@ mod tests {
     ) {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let data = tempfile::tempdir().unwrap();
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
@@ -439,8 +439,11 @@ mod tests {
         });
         let applied = wait(cx, task);
         assert_eq!(applied, Ok(true));
+        // git's checkout may convert line endings (core.autocrlf on Windows runners).
         assert_eq!(
-            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            std::fs::read_to_string(root.join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "one\ntwo\n"
         );
         assert!(!root.join("new.txt").exists());
