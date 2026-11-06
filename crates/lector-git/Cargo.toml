@@ -14,6 +14,7 @@ default = []
 serde = ["dep:serde"]
 
 [dependencies]
+dunce.workspace = true
 gix = { version = "0.90", default-features = false, features = [
     "sha1",
     "status",

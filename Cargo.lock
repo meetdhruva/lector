@@ -4588,6 +4588,7 @@ dependencies = [
 name = "lector-git"
 version = "0.6.0"
 dependencies = [
+ "dunce",
  "gix",
  "proptest",
  "serde",

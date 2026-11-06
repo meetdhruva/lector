@@ -570,8 +570,11 @@ fn ignored_files_are_backed_up_and_dangling_links_refused() {
         !outside.exists(),
         "write-through to a target outside the project"
     );
+    // Symlinks need privileges on Windows, so the dangling-link half is Unix-only.
     #[cfg(unix)]
     assert!(t.answer().contains("WRITE-ERROR:"), "{}", t.answer());
+    #[cfg(not(unix))]
+    let _ = t;
     let journal = Journal::of(&fx.core).unwrap();
     let entry = journal
         .list(20)

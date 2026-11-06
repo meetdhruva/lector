@@ -373,7 +373,11 @@ impl ShadowRepo {
         // Alternates: the user's objects are read-only here; keep the file in sync with
         // where the objects are now (the repository may have moved).
         let alternates = self.git_dir.join("objects").join("info").join("alternates");
-        let wanted = format!("{}\n", alternates_entry(user_objects));
+        // Canonical spelling (no `\\?\` on Windows): the entry keeps working if the repo
+        // was opened through a symlinked path (macOS /var -> /private/var).
+        let user_objects =
+            dunce::canonicalize(user_objects).unwrap_or_else(|_| user_objects.to_path_buf());
+        let wanted = format!("{}\n", alternates_entry(&user_objects));
         if fs::read_to_string(&alternates).ok().as_deref() != Some(wanted.as_str()) {
             if let Some(parent) = alternates.parent() {
                 fs::create_dir_all(parent)?;
