@@ -5,7 +5,21 @@ name: Release
 #   - run manually (Actions → Release → Run workflow) with a tag; the tag is created
 #     at the selected commit if it does not exist yet.
 #   - push a `release/**` branch for a dry run: everything is built and uploaded as
-#     workflow artifacts, nothing is published.
+#     workflow artifacts, nothing is published, and nothing is signed or notarized.
+#
+# Signing is optional and driven entirely by repository secrets (docs/RELEASING.md lists them):
+#   macOS    MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD [, MACOS_SIGNING_IDENTITY]
+#            + APPLE_API_KEY_P8_BASE64, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID  (notarization)
+#   Windows  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT,
+#            AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE            (Azure Artifact Signing), or
+#            WINDOWS_CERTIFICATE_PFX_BASE64, WINDOWS_CERTIFICATE_PASSWORD   (certificate file)
+#   Linux    LINUX_GPG_PRIVATE_KEY_BASE64 [, LINUX_GPG_PASSPHRASE]
+#   All      UPDATE_SIGNING_KEY [, UPDATE_SIGNING_KEY_PASSWORD]      (minisign signature of SHA256SUMS.txt)
+#   Package managers (optional pushes)   HOMEBREW_TAP_TOKEN, WINGET_TOKEN
+# Without a secret the matching step is skipped and that platform ships unsigned, clearly labelled
+# in the release notes. The workflow is green either way. Secrets cannot be tested in `if:`
+# expressions, so every job maps them to environment variables in a "Signing credentials" step that
+# publishes `enabled=true|false` as a step output.
 on:
   push:
     tags: ["v*"]
@@ -19,9 +33,18 @@ on:
         description: "Create the release as a draft"
         type: boolean
         default: false
+      dry_run:
+        description: "Build everything but publish nothing (like a release/** branch push)"
+        type: boolean
+        default: false
+      sign_dry_run:
+        description: "In a dry run, still sign and notarize (uses signing quota; off by default)"
+        type: boolean
+        default: false
 
+# Jobs get read access only; the publish job asks for write access itself.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -43,20 +66,36 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       publish: ${{ steps.meta.outputs.publish }}
+      sign: ${{ steps.meta.outputs.sign }}
     steps:
       - uses: actions/checkout@v4
       - name: Resolve version
         id: meta
         shell: bash
+        env:
+          # Passed through the environment, never interpolated into the script.
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          INPUT_SIGN_DRY_RUN: ${{ github.event.inputs.sign_dry_run }}
         run: |
           CARGO_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)"
           PUBLISH=true
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "branch" ]; then
+          SIGN=true
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "branch" ]; then
             # Dry run from a release/** branch.
             TAG="v$CARGO_VERSION"
             PUBLISH=false
           else
-            TAG="${{ github.event.inputs.tag || github.ref_name }}"
+            TAG="${INPUT_TAG:-$REF_NAME}"
+            if [ "$INPUT_DRY_RUN" = "true" ]; then PUBLISH=false; fi
+          fi
+          if [ "$PUBLISH" = false ]; then
+            # Dry runs never sign or notarize (quota, and secrets stay unused), unless asked explicitly.
+            SIGN=false
+            if [ "$INPUT_SIGN_DRY_RUN" = "true" ]; then SIGN=true; fi
           fi
           VERSION="${TAG#v}"
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
@@ -70,7 +109,22 @@ jobs:
             echo "version=$VERSION"
             echo "prerelease=$PRERELEASE"
             echo "publish=$PUBLISH"
+            echo "sign=$SIGN"
           } >> "$GITHUB_OUTPUT"
+      - name: Update key sanity check
+        # A signing key without a matching committed public key would produce signatures that
+        # Lector cannot verify: stop now instead of after a two-hour build.
+        shell: bash
+        env:
+          SIGN: ${{ steps.meta.outputs.sign }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ "$SIGN" = true ] && [ -n "$UPDATE_SIGNING_KEY" ]; then
+            if ! grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*#' -e '^untrusted comment:' packaging/update-key.pub | grep -q .; then
+              echo "::error::UPDATE_SIGNING_KEY is set but packaging/update-key.pub is still the placeholder. Run scripts/gen-update-key.sh --install-public-key and commit it (docs/RELEASING.md)."
+              exit 1
+            fi
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -80,7 +134,10 @@ jobs:
       - name: Third-party crate licenses
         run: cargo about generate --workspace about.hbs -o THIRD_PARTY_CRATES.md
       - name: Release notes
-        run: scripts/release-notes.sh "${{ steps.meta.outputs.version }}" > RELEASE_NOTES.md
+        # Preview without signing information (the publish job regenerates them from what the build jobs recorded).
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: scripts/release-notes.sh "$VERSION" > RELEASE_NOTES.md
       - uses: actions/upload-artifact@v4
         with:
           name: release-meta
@@ -147,10 +204,42 @@ jobs:
           rpm -qip dist/*.rpm
           APPIMAGE="$(ls dist/*.AppImage)"
           APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --version | grep -F "${{ needs.prepare.outputs.version }}"
+      - name: Signing credentials
+        id: signing
+        shell: bash
+        env:
+          ALLOWED: ${{ needs.prepare.outputs.sign }}
+          GPG_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY_BASE64 }}
+        run: |
+          if [ "$ALLOWED" = true ] && [ -n "$GPG_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Linux packages are not GPG-signed (signing disabled for this run or LINUX_GPG_PRIVATE_KEY_BASE64 not set)."
+          fi
+      - name: Sign packages (GPG)
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          LINUX_GPG_PRIVATE_KEY_BASE64: ${{ secrets.LINUX_GPG_PRIVATE_KEY_BASE64 }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          LECTOR_SIGNING_STATUS: signing-status/linux-${{ matrix.arch }}.txt
+        run: |
+          scripts/sign-linux.sh dist
+          ls -la dist
+      - name: Record signing status (unsigned)
+        if: steps.signing.outputs.enabled != 'true'
+        run: |
+          mkdir -p signing-status
+          printf 'platform=linux\nsigned=false\n' > "signing-status/linux-${{ matrix.arch }}.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-linux-${{ matrix.arch }}
           path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-linux-${{ matrix.arch }}
+          path: signing-status/*.txt
           if-no-files-found: error
 
   macos:
@@ -184,14 +273,75 @@ jobs:
             target/aarch64-apple-darwin/dist/lector target/x86_64-apple-darwin/dist/lector
           lipo -info target/universal/lector
           target/universal/lector --version | grep -F "${{ needs.prepare.outputs.version }}"
+      - name: Signing credentials
+        id: signing
+        shell: bash
+        env:
+          ALLOWED: ${{ needs.prepare.outputs.sign }}
+          CERT: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          API_KEY: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          sign=false
+          notarize=false
+          if [ "$ALLOWED" = true ] && [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ]; then
+            sign=true
+            if [ -n "$API_KEY" ] && [ -n "$API_KEY_ID" ] && [ -n "$API_ISSUER" ]; then notarize=true; fi
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          if [ "$sign" != true ]; then
+            echo "::notice::macOS build is not Developer ID signed (signing disabled for this run or certificate secrets not set)."
+          elif [ "$notarize" != true ]; then
+            echo "::warning::macOS build is signed but NOT notarized (APPLE_API_KEY_P8_BASE64, APPLE_API_KEY_ID and APPLE_API_ISSUER_ID are not all set)."
+          fi
+      - name: Import signing certificate
+        if: steps.signing.outputs.sign == 'true'
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: scripts/sign-macos.sh setup
       - name: Package
+        env:
+          LECTOR_MACOS_SIGN: ${{ steps.signing.outputs.sign == 'true' && '1' || '0' }}
+          LECTOR_MACOS_NOTARIZE: ${{ steps.signing.outputs.notarize == 'true' && '1' || '0' }}
+          LECTOR_SIGNING_STATUS: signing-status/macos.txt
         run: |
           scripts/package-macos.sh target/universal/lector "${{ needs.prepare.outputs.version }}" universal dist
           ls -la dist
+      - name: Verify signed artifacts
+        # Checks what users actually get: the app inside the .zip and the .dmg, not the intermediate files.
+        if: steps.signing.outputs.sign == 'true'
+        env:
+          VERIFY_MODE: ${{ steps.signing.outputs.notarize == 'true' && 'notarized' || '' }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          check="$RUNNER_TEMP/verify"
+          rm -rf "$check"; mkdir -p "$check/zip" "$check/dmg"
+          ditto -x -k "dist/Lector-$VERSION-macos-universal.zip" "$check/zip"
+          scripts/sign-macos.sh verify "$check/zip/Lector.app" "$VERIFY_MODE"
+          hdiutil attach -nobrowse -readonly -mountpoint "$check/dmg" "dist/Lector-$VERSION-macos-universal.dmg"
+          scripts/sign-macos.sh verify "$check/dmg/Lector.app" "$VERIFY_MODE"
+          hdiutil detach "$check/dmg"
+          scripts/sign-macos.sh verify "dist/Lector-$VERSION-macos-universal.dmg" "$VERIFY_MODE"
+      - name: Remove signing material
+        if: always() && steps.signing.outputs.sign == 'true'
+        run: scripts/sign-macos.sh cleanup
       - uses: actions/upload-artifact@v4
         with:
           name: dist-macos-universal
           path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-macos
+          path: signing-status/macos.txt
           if-no-files-found: error
 
   windows:
@@ -237,6 +387,53 @@ jobs:
           if ($cli -notmatch [regex]::Escape("${{ needs.prepare.outputs.version }}")) { throw "unexpected lector-cli version output" }
           $status = (& "target\${{ matrix.target }}\dist\lector-cli.exe" status . --json | Out-String)
           if ($status -notmatch '"schema"') { throw "lector-cli status produced no JSON" }
+      - name: Signing credentials
+        id: signing
+        shell: bash
+        env:
+          ALLOWED: ${{ needs.prepare.outputs.sign }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          provider=none
+          if [ "$ALLOWED" = true ]; then
+            if [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] \
+               && [ -n "$AZURE_SIGNING_ENDPOINT" ] && [ -n "$AZURE_SIGNING_ACCOUNT" ] && [ -n "$AZURE_SIGNING_PROFILE" ]; then
+              provider=azure
+            elif [ -n "$PFX" ] && [ -n "$PFX_PASSWORD" ]; then
+              provider=pfx
+            fi
+          fi
+          echo "provider=$provider" >> "$GITHUB_OUTPUT"
+          if [ "$provider" = none ]; then
+            echo "::notice::Windows binaries and installers are not Authenticode-signed (signing disabled for this run or no signing secrets set)."
+          fi
+      - name: Sign binaries
+        # Before packaging, so the portable zip, the installer and the MSI all contain signed binaries.
+        # lector.com is a byte-for-byte copy of the signed lector-cli.exe.
+        if: steps.signing.outputs.provider != 'none'
+        shell: pwsh
+        env:
+          SIGN_PROVIDER: ${{ steps.signing.outputs.provider }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          & scripts/sign-windows.ps1 -Files @(
+            "target\${{ matrix.target }}\dist\lector.exe",
+            "target\${{ matrix.target }}\dist\lector-cli.exe")
       - name: Installer tools
         shell: pwsh
         run: |
@@ -252,18 +449,65 @@ jobs:
             -CliBinary "target\${{ matrix.target }}\dist\lector-cli.exe" `
             -Version "${{ needs.prepare.outputs.version }}" -Arch ${{ matrix.arch }} -OutDir dist
           Get-ChildItem dist
+      - name: Sign installers
+        if: steps.signing.outputs.provider != 'none'
+        shell: pwsh
+        env:
+          SIGN_PROVIDER: ${{ steps.signing.outputs.provider }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $installers = @(Get-ChildItem dist -File | Where-Object { $_.Name -like "*-setup.exe" -or $_.Name -like "*.msi" } | ForEach-Object { $_.FullName })
+          if ($installers.Count -lt 2) { throw "expected a setup.exe and an .msi in dist, found $($installers.Count) installer(s)" }
+          & scripts/sign-windows.ps1 -Files $installers
+      - name: Verify signatures
+        if: steps.signing.outputs.provider != 'none'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist -File | Where-Object { $_.Name -like "*-setup.exe" -or $_.Name -like "*.msi" } | ForEach-Object { $_.FullName })
+          $files += "target\${{ matrix.target }}\dist\lector.exe"
+          $files += "target\${{ matrix.target }}\dist\lector-cli.exe"
+          & scripts/sign-windows.ps1 -Files $files -Verify
+      - name: Record signing status
+        shell: bash
+        env:
+          PROVIDER: ${{ steps.signing.outputs.provider }}
+        run: |
+          mkdir -p signing-status
+          if [ "$PROVIDER" = none ]; then
+            printf 'platform=windows\nsigned=false\n' > "signing-status/windows-${{ matrix.arch }}.txt"
+          else
+            printf 'platform=windows\nsigned=true\nprovider=%s\n' "$PROVIDER" > "signing-status/windows-${{ matrix.arch }}.txt"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: dist-windows-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-windows-${{ matrix.arch }}
+          path: signing-status/*.txt
+          if-no-files-found: error
 
+  # Checksums, package-manager manifests and the release itself. Runs in dry runs too (everything
+  # except the final publishing steps), so a release/** branch exercises checksum and manifest
+  # generation and uploads the result as the `release-preview` artifact.
   publish:
-    name: Publish release
+    name: Checksums and publish
     needs: [prepare, linux, macos, windows]
-    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-*
@@ -271,20 +515,127 @@ jobs:
           merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
-          name: release-meta
-          path: meta
+          pattern: signing-*
+          path: signing
+          merge-multiple: true
+      - name: Package-manager manifests
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          notarized=""
+          if grep -qx 'notarized=true' signing/macos.txt; then notarized="--notarized"; fi
+          scripts/gen-package-manifests.sh "$VERSION" dist manifests --require-all $notarized
+          cp manifests/lector.rb manifests/io.github.meetdhruva.Lector.yml "manifests/Lector-$VERSION-winget-manifests.zip" dist/
       - name: Checksums
         working-directory: dist
         run: |
-          sha256sum -- * > SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
+      - name: Signing credentials
+        id: signing
+        env:
+          ALLOWED: ${{ needs.prepare.outputs.sign }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ "$ALLOWED" = true ] && [ -n "$UPDATE_SIGNING_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SHA256SUMS.txt is not signed (signing disabled for this run or UPDATE_SIGNING_KEY not set); Lector will not report downloads as verified."
+          fi
+      - name: Sign SHA256SUMS.txt (minisign)
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_KEY_PASSWORD: ${{ secrets.UPDATE_SIGNING_KEY_PASSWORD }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          LECTOR_SIGNING_STATUS: signing/checksums.txt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          minisign -v | head -n 1
+          scripts/sign-checksums.sh "$TAG" dist
+      - name: Record checksum signing status (unsigned)
+        if: steps.signing.outputs.enabled != 'true'
+        run: printf 'platform=checksums\nsigned=false\n' > signing/checksums.txt
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          scripts/release-notes.sh "$VERSION" --signing-dir signing > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+      - name: Dry run preview
+        if: needs.prepare.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-preview
+          path: |
+            dist/SHA256SUMS.txt*
+            dist/lector.rb
+            dist/io.github.meetdhruva.Lector.yml
+            dist/*-winget-manifests.zip
+            RELEASE_NOTES.md
+          if-no-files-found: error
+      - name: Publish release
+        if: needs.prepare.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: Lector ${{ needs.prepare.outputs.version }}
-          body_path: meta/RELEASE_NOTES.md
+          body_path: RELEASE_NOTES.md
           draft: ${{ github.event.inputs.draft == 'true' }}
           prerelease: ${{ needs.prepare.outputs.prerelease }}
           fail_on_unmatched_files: true
           files: dist/*
+      - name: Homebrew tap
+        # Only with a token (HOMEBREW_TAP_TOKEN: contents write on meetdhruva/homebrew-tap), only for
+        # final, non-draft releases. Without the secret this step does nothing.
+        if: needs.prepare.outputs.publish == 'true' && needs.prepare.outputs.prerelease != 'true' && github.event.inputs.draft != 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN not set: lector.rb is attached to the release but the tap was not updated."
+            exit 0
+          fi
+          auth="$(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.extraheader=Authorization: Basic $auth" clone --depth 1 https://github.com/meetdhruva/homebrew-tap.git tap
+          mkdir -p tap/Casks
+          cp dist/lector.rb tap/Casks/lector.rb
+          cd tap
+          git add Casks/lector.rb
+          if git diff --cached --quiet; then
+            echo "tap already up to date"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "lector $VERSION"
+          git -c "http.extraheader=Authorization: Basic $auth" push origin HEAD
+
+  # Optional: opens a pull request on microsoft/winget-pkgs for the new version. Needs WINGET_TOKEN
+  # (a classic personal access token with public_repo) and a first manifest already accepted in
+  # winget-pkgs (docs/RELEASING.md, "winget"). Without the secret the job only prints a notice.
+  winget:
+    name: winget submission
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.publish == 'true' && needs.prepare.outputs.prerelease != 'true' && github.event.inputs.draft != 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Submit with wingetcreate
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Host "::notice::WINGET_TOKEN not set: winget manifests are attached to the release but no pull request was opened."
+            return
+          }
+          Invoke-WebRequest -UseBasicParsing -Uri "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
+          $base = "https://github.com/meetdhruva/lector/releases/download/v$($env:VERSION)"
+          .\wingetcreate.exe update meetdhruva.Lector --version $env:VERSION `
+            --urls "$base/Lector-$($env:VERSION)-windows-x64-setup.exe|x64" "$base/Lector-$($env:VERSION)-windows-arm64-setup.exe|arm64" `
+            --submit --token $env:WINGET_TOKEN

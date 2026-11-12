@@ -374,6 +374,28 @@ impl AgentPanel {
         }
         // Footer: what changed, review, undo.
         if finished && turn.before.is_some() {
+            // The summary card: counts, the riskiest file and the files in review order.
+            let summary = match self.summaries.get(&id) {
+                Some(crate::panel::SummaryState::Ready(s)) if n > 0 => Some(s.clone()),
+                _ => None,
+            };
+            if let Some(summary) = &summary {
+                let panel = cx.entity().downgrade();
+                let open: crate::summary_ui::OpenFile = Rc::new(move |target, window, cx| {
+                    let panel = panel.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = panel
+                            .update(cx, |p, cx| p.review_turn_at(id, Some(target), window, cx));
+                    });
+                });
+                col = col.child(crate::summary_ui::summary_card(
+                    id.0 as usize * 1000,
+                    summary,
+                    crate::summary_ui::PANEL_FILES,
+                    open,
+                    cx,
+                ));
+            }
             let footer = h_flex()
                 .flex_wrap()
                 .gap(px(4.))
@@ -396,7 +418,7 @@ impl AgentPanel {
                 .child(div().flex_1())
                 .when(n > 0, |el| {
                     el.child(
-                        Button::new(("agent-review", id.0 as usize), "Review")
+                        Button::new(("agent-review", id.0 as usize), "Review changes")
                             .icon(IconName::GitPullRequest)
                             .compact()
                             .tooltip(Tooltip::text("Open this turn's changes in a review tab"))
@@ -426,7 +448,7 @@ impl AgentPanel {
             if let Some(conflict) = self.undo_conflict.clone().filter(|c| c.turn == id) {
                 col = col.child(self.render_undo_conflict(conflict, cx));
             }
-            if n > 0 {
+            if n > 0 && summary.is_none() {
                 col = col.child(
                     v_flex().gap(px(1.)).pl(px(8.)).children(
                         turn.changed_files

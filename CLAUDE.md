@@ -30,6 +30,8 @@ Read `docs/ARCHITECTURE.md` first: it defines crate boundaries and public API co
 - Add crate-specific dependencies to that crate's own `Cargo.toml` with explicit versions;
   shared ones are in `[workspace.dependencies]` (`foo.workspace = true`).
 - `vendor/xattr` patches a libc incompatibility in GPUI's dependency tree. Keep it.
+- Perf regressions: `scripts/perf-gate.sh` (valgrind instruction counts vs `perf/baseline.json`, Linux;
+  `--update` to re-record, see `docs/PERFORMANCE.md`). `lector health` shows the local crash log.
 - Run the app headless for screenshots: `scripts/screenshot.sh <path> <out.png>`.
 
 ## Commits

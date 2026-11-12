@@ -3,3 +3,5 @@
 .DS_Store
 *.pending-snap
 __pycache__/
+# Real PRs imported by scripts/risk-eval-import.sh (see crates/lector-app/tests/risk_eval/README.md)
+/crates/lector-app/tests/risk_eval/local/

@@ -866,6 +866,7 @@ mod tests {
                 mark: Mark::Moved,
             }],
             states: 0,
+            skipped: Vec::new(),
         };
         let marks = StructuralMarks::from_diff(None, Some(&text), &diff);
         assert_eq!(marks.line(false, 0), &[(1..2, Mark::Moved)]);

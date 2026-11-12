@@ -25,6 +25,7 @@ gix = { version = "0.90", default-features = false, features = [
 ] }
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
+lector-process.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

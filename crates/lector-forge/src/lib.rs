@@ -19,6 +19,7 @@ mod github;
 mod gitlab;
 mod http;
 pub mod mock;
+pub mod releases;
 mod remote;
 mod time;
 

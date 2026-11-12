@@ -1,0 +1,32 @@
+{
+  "id": "hn-new-api-vs-gutted-sanitizer",
+  "split": "holdout",
+  "category": "hard-negative",
+  "language": "typescript",
+  "description": "Six new exported helpers look big; the real risk is a sanitizer whose body is gutted without a signature change.",
+  "risky": [
+    "src/util/sanitize.ts"
+  ],
+  "files": [
+    {
+      "path": "src/api/helpers.ts",
+      "base": "export function helperBase(x: number): number {\n  return x + 1;\n}\n",
+      "head": "export function helperBase(x: number): number {\n  return x + 1;\n}\n\nexport function helper0(x: number): number {\n  return helperBase(x) * 2;\n}\n\nexport function helper1(x: number): number {\n  return helperBase(x) * 3;\n}\n\nexport function helper2(x: number): number {\n  return helperBase(x) * 4;\n}\n\nexport function helper3(x: number): number {\n  return helperBase(x) * 5;\n}\n\nexport function helper4(x: number): number {\n  return helperBase(x) * 6;\n}\n\nexport function helper5(x: number): number {\n  return helperBase(x) * 7;\n}\n"
+    },
+    {
+      "path": "src/api/more.ts",
+      "base": "export function moreBase(x: number): number {\n  return x + 1;\n}\n",
+      "head": "export function moreBase(x: number): number {\n  return x + 1;\n}\n\nexport function more0(x: number): number {\n  return moreBase(x) * 2;\n}\n\nexport function more1(x: number): number {\n  return moreBase(x) * 3;\n}\n\nexport function more2(x: number): number {\n  return moreBase(x) * 4;\n}\n\nexport function more3(x: number): number {\n  return moreBase(x) * 5;\n}\n\nexport function more4(x: number): number {\n  return moreBase(x) * 6;\n}\n\nexport function more5(x: number): number {\n  return moreBase(x) * 7;\n}\n"
+    },
+    {
+      "path": "src/util/sanitize.ts",
+      "base": "export function sanitize(input: string): string {\n  if (input.includes('<script')) {\n    return '';\n  }\n  if (input.length > 200) {\n    return input.slice(0, 200);\n  }\n  return input.replace(/[<>]/g, '');\n}\n",
+      "head": "export function sanitize(input: string): string {\n  return input;\n}\n"
+    },
+    {
+      "path": "tests/helpers.test.ts",
+      "base": "import { runCase } from '../src/app';\n\ndescribe('app', () => {\n  it('smokes', () => {\n    expect(runCase(0)).toBe(0);\n  });\n});\n",
+      "head": "import { runCase } from '../src/app';\n\ndescribe('app', () => {\n  it('smokes', () => {\n    expect(runCase(0)).toBe(0);\n  });\n  it('case 0', () => {\n    expect(runCase(0)).toBe(0);\n  });\n  it('case 1', () => {\n    expect(runCase(1)).toBe(2);\n  });\n  it('case 2', () => {\n    expect(runCase(2)).toBe(4);\n  });\n  it('case 3', () => {\n    expect(runCase(3)).toBe(6);\n  });\n  it('case 4', () => {\n    expect(runCase(4)).toBe(8);\n  });\n  it('case 5', () => {\n    expect(runCase(5)).toBe(10);\n  });\n});\n"
+    }
+  ]
+}

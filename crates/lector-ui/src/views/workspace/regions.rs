@@ -22,6 +22,8 @@ pub enum Region {
     Sidebar,
     /// Editor pane `n` (layout order).
     Pane(usize),
+    /// The panel below the editor area (Terminal), when shown.
+    BottomPanel,
     /// The status bar.
     StatusBar,
 }
@@ -35,6 +37,9 @@ impl Workspace {
             out.push(Region::Sidebar);
         }
         out.extend((0..self.center.panes().len()).map(Region::Pane));
+        if self.is_bottom_panel_visible() {
+            out.push(Region::BottomPanel);
+        }
         out.push(Region::StatusBar);
         let _ = cx;
         out
@@ -60,6 +65,12 @@ impl Workspace {
             if pane.read(cx).region_handle().contains_focused(window, cx) {
                 return Some(Region::Pane(ix));
             }
+        }
+        if self
+            .bottom_panel_focus()
+            .is_some_and(|f| f.contains_focused(window, cx))
+        {
+            return Some(Region::BottomPanel);
         }
         if self.status_focus.contains_focused(window, cx) {
             return Some(Region::StatusBar);
@@ -95,6 +106,11 @@ impl Workspace {
                 } else {
                     let handle = pane.focus_handle(cx);
                     window.focus(&handle);
+                }
+            }
+            Region::BottomPanel => {
+                if let Some(focus) = self.bottom_panel_focus() {
+                    window.focus(&focus);
                 }
             }
             Region::StatusBar => {

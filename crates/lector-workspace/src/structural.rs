@@ -24,31 +24,79 @@
 //!    Novel subtrees that exist unchanged on the other side (and are not
 //!    trivial) are `Moved`.
 //!
-//! The work is bounded by a [`Budget`] (states and time); over budget the
-//! result is `None` and the caller falls back to the line diff.
+//! # Scaling (v0.7)
+//!
+//! The shortest-path search is quadratic in the size of what it compares, so it
+//! only ever sees small pieces:
+//!
+//! * **Anchors first.** At every nesting level the sibling subtrees of both
+//!   sides are compared by their structural hash with a linear diff
+//!   (histogram, via `lector_diff`). Hash-identical siblings are settled at
+//!   once, however many there are; only the runs between them (the changed
+//!   regions) go on, aligned to the smallest enclosing syntax nodes. The work
+//!   therefore scales with the size of the change, not of the file.
+//! * **Pairing.** A changed run with as many siblings on one side as on the
+//!   other is paired position by position (lists of the same kind are entered
+//!   and compared recursively, the rest goes to the search).
+//! * **Budgets per region.** Every search has its own state cap
+//!   ([`Budget::max_region_states`]); the whole diff has a state and a time
+//!   cap. A region that exceeds a cap is *skipped*: it is reported in
+//!   [`StructuralDiff::skipped`] and its marks come from the line diff refined
+//!   with the word diff, so nothing is hidden and nothing is worse than the
+//!   plain line diff. Only when no region could be solved at all (or the trees
+//!   are too big) the result is `None`.
+//! * **Cancellation** through a [`CancelToken`] (`None` result).
 
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use lector_diff::{diff_lines, refine_inline, DiffOptions};
+use lector_search::CancelToken;
 use lector_syntax::{Syntax, TextInput, TreeNode};
 
 /// Limits of a structural diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
-    /// Maximum number of graph states expanded.
+    /// Maximum number of graph states expanded, summed over all regions.
     pub max_states: usize,
+    /// Maximum number of graph states one region may expand before it is skipped.
+    pub max_region_states: usize,
     /// Maximum wall-clock time.
     pub max_time: Duration,
     /// Trees with more nodes than this are refused outright.
     pub max_nodes: usize,
 }
 
+/// Why a region was left to the line + word diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The region alone exceeded [`Budget::max_region_states`].
+    RegionBudget,
+    /// The state budget of the whole diff ran out.
+    TotalBudget,
+    /// The time budget of the whole diff ran out.
+    Time,
+}
+
+/// A changed region the structural search did not solve. Its marks are those
+/// of the line diff refined with the word diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedRegion {
+    /// Byte range in the old text (empty at the insertion point when the region only exists in the new text).
+    pub old: Range<usize>,
+    /// Byte range in the new text.
+    pub new: Range<usize>,
+    /// Why it was skipped.
+    pub reason: SkipReason,
+}
+
 impl Default for Budget {
     fn default() -> Self {
         Self {
             max_states: 400_000,
+            max_region_states: 60_000,
             max_time: Duration::from_millis(750),
             max_nodes: 1_000_000,
         }
@@ -86,6 +134,8 @@ pub struct StructuralDiff {
     pub new: Vec<Marked>,
     /// Graph states expanded (a measure of the work done).
     pub states: usize,
+    /// Regions that fell back to the line + word diff; empty for a fully structural result.
+    pub skipped: Vec<SkippedRegion>,
 }
 
 impl StructuralDiff {
@@ -105,6 +155,8 @@ const COST_NOVEL: u32 = 300;
 const COST_DEPTH: u32 = 40;
 const MOVE_MIN_LEAVES: u32 = 3;
 const MOVE_MIN_BYTES: usize = 12;
+/// A run of paired lists with more leaves than this is paired without trying the search first.
+const PAIR_FIRST_LEAVES: u32 = 24;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -365,12 +417,29 @@ enum Part {
     Close,
 }
 
+/// Why a search stopped early.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// The caller cancelled: the whole diff is abandoned.
+    Cancelled,
+    /// A region (or everything that follows) is left to the line + word diff.
+    Skip(SkipReason),
+}
+
 struct Solver<'a> {
     l: &'a Tree,
     r: &'a Tree,
     budget: &'a Budget,
+    cancel: &'a CancelToken,
     started: Instant,
     states: usize,
+    /// `states` when the current search began.
+    region_base: usize,
+    /// Searches (and atom pairs) that completed.
+    solved: usize,
+    skipped: Vec<SkippedRegion>,
+    /// Set once a whole-diff budget ran out: later regions are skipped at once.
+    exhausted: Option<SkipReason>,
     last_l: u32,
     last_r: u32,
     /// Items to mark: (is_left, node, part, mark).
@@ -417,9 +486,13 @@ impl Solver<'_> {
         }
     }
 
-    /// Compares sibling lists `ls` / `rs` (children of `pl` / `pr`), trimming
-    /// identical prefixes and suffixes. `None` when over budget.
-    fn solve_level(&mut self, pl: u32, ls: &[u32], pr: u32, rs: &[u32]) -> Option<()> {
+    /// Compares sibling lists `ls` / `rs` (children of `pl` / `pr`): trims
+    /// identical prefixes and suffixes, anchors the rest on identical
+    /// siblings and solves the runs between the anchors one by one.
+    fn solve_level(&mut self, pl: u32, ls: &[u32], pr: u32, rs: &[u32]) -> Result<(), Stop> {
+        if self.cancel.is_cancelled() {
+            return Err(Stop::Cancelled);
+        }
         let max = ls.len().min(rs.len());
         let mut pre = 0;
         while pre < max && self.l.hash[ls[pre] as usize] == self.r.hash[rs[pre] as usize] {
@@ -434,7 +507,7 @@ impl Solver<'_> {
         }
         let (lm, rm) = (&ls[pre..ls.len() - suf], &rs[pre..rs.len() - suf]);
         if lm.is_empty() && rm.is_empty() {
-            return Some(());
+            return Ok(());
         }
         if let ([x], [y]) = (lm, rm) {
             let (xi, yi) = (*x as usize, *y as usize);
@@ -443,10 +516,163 @@ impl Solver<'_> {
                 return self.solve_level(*x, &cx, *y, &cy);
             }
         }
-        self.dijkstra(pl, lm, pr, rm)
+        let hunks = if lm.len() > 1 && rm.len() > 1 {
+            let lh: Vec<u64> = lm.iter().map(|&n| self.l.hash[n as usize]).collect();
+            let rh: Vec<u64> = rm.iter().map(|&n| self.r.hash[n as usize]).collect();
+            sibling_hunks(&lh, &rh)
+        } else {
+            vec![(0..lm.len(), 0..rm.len())]
+        };
+        for (a, b) in hunks {
+            let before_l = (pre + a.start).checked_sub(1).map(|k| ls[k]);
+            let before_r = (pre + b.start).checked_sub(1).map(|k| rs[k]);
+            self.solve_run(pl, &lm[a], before_l, pr, &rm[b], before_r)?;
+        }
+        Ok(())
     }
 
-    fn dijkstra(&mut self, pl: u32, lm: &[u32], pr: u32, rm: &[u32]) -> Option<()> {
+    /// Solves one run of siblings that has no identical sibling on the other
+    /// side; a budget overrun skips just this run.
+    fn solve_run(
+        &mut self,
+        pl: u32,
+        lm: &[u32],
+        before_l: Option<u32>,
+        pr: u32,
+        rm: &[u32],
+        before_r: Option<u32>,
+    ) -> Result<(), Stop> {
+        // Pairing is an alternative to the search for runs whose siblings
+        // correspond one to one: same number, all lists of the same kind
+        // (e.g. a row of changed functions).
+        let pairable = !lm.is_empty()
+            && lm.len() == rm.len()
+            && lm.iter().zip(rm).all(|(&x, &y)| {
+                self.l.is_list[x as usize]
+                    && self.r.is_list[y as usize]
+                    && self.l.key[x as usize] == self.r.key[y as usize]
+            });
+        let size: u32 = lm
+            .iter()
+            .map(|&n| self.l.leaves[n as usize])
+            .chain(rm.iter().map(|&n| self.r.leaves[n as usize]))
+            .sum();
+        let result = if let Some(reason) = self.exhausted {
+            Err(Stop::Skip(reason))
+        } else if pairable && size > PAIR_FIRST_LEAVES {
+            self.solve_pairs(pl, lm, before_l, pr, rm, before_r)
+        } else {
+            match self.dijkstra(pl, lm, pr, rm) {
+                Err(Stop::Skip(SkipReason::RegionBudget)) if pairable => {
+                    self.solve_pairs(pl, lm, before_l, pr, rm, before_r)
+                }
+                other => other,
+            }
+        };
+        match result {
+            Err(Stop::Skip(reason)) => {
+                self.skip_region(pl, lm, before_l, pr, rm, before_r, reason);
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    /// Pairs the siblings of a run position by position.
+    fn solve_pairs(
+        &mut self,
+        pl: u32,
+        lm: &[u32],
+        before_l: Option<u32>,
+        pr: u32,
+        rm: &[u32],
+        before_r: Option<u32>,
+    ) -> Result<(), Stop> {
+        for (k, (&x, &y)) in lm.iter().zip(rm).enumerate() {
+            let (bl, br) = (
+                k.checked_sub(1).map(|k| lm[k]).or(before_l),
+                k.checked_sub(1).map(|k| rm[k]).or(before_r),
+            );
+            self.solve_pair(pl, x, bl, pr, y, br)?;
+        }
+        Ok(())
+    }
+
+    /// One sibling against one sibling (inside a paired run).
+    fn solve_pair(
+        &mut self,
+        pl: u32,
+        x: u32,
+        before_l: Option<u32>,
+        pr: u32,
+        y: u32,
+        before_r: Option<u32>,
+    ) -> Result<(), Stop> {
+        let (xi, yi) = (x as usize, y as usize);
+        if self.l.is_list[xi] == self.r.is_list[yi] && self.l.hash[xi] == self.r.hash[yi] {
+            return Ok(());
+        }
+        if self.l.is_list[xi] && self.r.is_list[yi] && self.l.key[xi] == self.r.key[yi] {
+            let (cx, cy) = (self.l.children(x), self.r.children(y));
+            return self.solve_level(x, &cx, y, &cy);
+        }
+        // Atoms, or lists of different kinds: a search of its own (a pair
+        // that exhausts the budget is skipped on its own).
+        match self.exhausted {
+            Some(reason) => {
+                self.skip_region(pl, &[x], before_l, pr, &[y], before_r, reason);
+                Ok(())
+            }
+            None => match self.dijkstra(pl, &[x], pr, &[y]) {
+                Err(Stop::Skip(reason)) => {
+                    self.skip_region(pl, &[x], before_l, pr, &[y], before_r, reason);
+                    Ok(())
+                }
+                other => other,
+            },
+        }
+    }
+
+    /// Records a skipped region (and stops all further searching when a
+    /// whole-diff budget is what ran out).
+    #[allow(clippy::too_many_arguments)]
+    fn skip_region(
+        &mut self,
+        pl: u32,
+        lm: &[u32],
+        before_l: Option<u32>,
+        pr: u32,
+        rm: &[u32],
+        before_r: Option<u32>,
+        reason: SkipReason,
+    ) {
+        if reason != SkipReason::RegionBudget {
+            self.exhausted = Some(reason);
+        }
+        let span = |t: &Tree, parent: u32, nodes: &[u32], before: Option<u32>| -> Range<usize> {
+            match (nodes.first(), nodes.last()) {
+                (Some(&a), Some(&z)) => t.range[a as usize].start..t.range[z as usize].end,
+                _ => {
+                    let at = match before {
+                        Some(b) => t.range[b as usize].end,
+                        None => t.open[parent as usize]
+                            .as_ref()
+                            .map_or(t.range[parent as usize].start, |o| o.end),
+                    };
+                    at..at
+                }
+            }
+        };
+        let region = SkippedRegion {
+            old: span(self.l, pl, lm, before_l),
+            new: span(self.r, pr, rm, before_r),
+            reason,
+        };
+        self.skipped.push(region);
+    }
+
+    fn dijkstra(&mut self, pl: u32, lm: &[u32], pr: u32, rm: &[u32]) -> Result<(), Stop> {
+        self.region_base = self.states;
         self.last_l = lm.last().copied().unwrap_or(NONE);
         self.last_r = rm.last().copied().unwrap_or(NONE);
         let start_l = lm.first().map_or(end(pl), |&n| at(n));
@@ -482,10 +708,19 @@ impl Solver<'_> {
                 break;
             }
             self.states += 1;
-            if self.states > self.budget.max_states
-                || (self.states % 256 == 0 && self.started.elapsed() > self.budget.max_time)
-            {
-                return None;
+            if self.states > self.budget.max_states {
+                return Err(Stop::Skip(SkipReason::TotalBudget));
+            }
+            if self.states - self.region_base > self.budget.max_region_states {
+                return Err(Stop::Skip(SkipReason::RegionBudget));
+            }
+            if self.states % 256 == 0 {
+                if self.cancel.is_cancelled() {
+                    return Err(Stop::Cancelled);
+                }
+                if self.started.elapsed() > self.budget.max_time {
+                    return Err(Stop::Skip(SkipReason::Time));
+                }
             }
             let top = stacks[st as usize].1;
             let mut moves: Vec<(u32, u32, u32, u32, Edge)> = Vec::with_capacity(6); // (cost, lc, rc, stack, edge)
@@ -657,7 +892,7 @@ impl Solver<'_> {
         }
         if found == NONE {
             // Unreachable goal cannot happen for well-formed trees.
-            return None;
+            return Err(Stop::Skip(SkipReason::RegionBudget));
         }
         // Reconstruct the path.
         let mut path = Vec::new();
@@ -668,7 +903,8 @@ impl Solver<'_> {
         }
         path.reverse();
         self.collect_marks(&path);
-        Some(())
+        self.solved += 1;
+        Ok(())
     }
 
     fn collect_marks(&mut self, path: &[Edge]) {
@@ -719,18 +955,25 @@ impl Solver<'_> {
     }
 }
 
-/// Structural diff of two parsed texts; `None` when over `budget` (the caller
-/// should fall back to the line diff). `old_text`/`new_text` must be the texts
-/// the syntaxes were parsed from.
-pub fn diff<A: TextInput + ?Sized, B: TextInput + ?Sized>(
+/// Structural diff of two parsed texts; `None` when the trees are too big,
+/// when no region could be solved within `budget` (the caller should fall back
+/// to the line diff) or when `cancel` fired. Regions that exceed a budget on
+/// their own are reported in [`StructuralDiff::skipped`] and marked from the
+/// line + word diff. `old_text`/`new_text` must be the texts the syntaxes were
+/// parsed from.
+pub fn diff_cancellable<A: TextInput + ?Sized, B: TextInput + ?Sized>(
     old_syntax: &Syntax,
     old_text: &A,
     new_syntax: &Syntax,
     new_text: &B,
     budget: &Budget,
+    cancel: &CancelToken,
 ) -> Option<StructuralDiff> {
     let started = Instant::now();
     let l = Tree::build(old_syntax, old_text, budget.max_nodes)?;
+    if cancel.is_cancelled() {
+        return None;
+    }
     let r = Tree::build(new_syntax, new_text, budget.max_nodes)?;
     if l.hash[0] == r.hash[0] {
         return Some(StructuralDiff::default());
@@ -739,8 +982,13 @@ pub fn diff<A: TextInput + ?Sized, B: TextInput + ?Sized>(
         l: &l,
         r: &r,
         budget,
+        cancel,
         started,
         states: 0,
+        region_base: 0,
+        solved: 0,
+        skipped: Vec::new(),
+        exhausted: None,
         last_l: NONE,
         last_r: NONE,
         items: Vec::new(),
@@ -748,7 +996,13 @@ pub fn diff<A: TextInput + ?Sized, B: TextInput + ?Sized>(
         novel_r: vec![false; r.hash.len()],
     };
     let (ls, rs) = (l.children(0), r.children(0));
-    solver.solve_level(0, &ls, 0, &rs)?;
+    match solver.solve_level(0, &ls, 0, &rs) {
+        Ok(()) => {}
+        Err(_) => return None,
+    }
+    if !solver.skipped.is_empty() && solver.solved == 0 {
+        return None;
+    }
 
     // Moves: maximal fully-novel subtrees that exist on both sides.
     let fully = |t: &Tree, novel: &[bool]| -> Vec<bool> {
@@ -844,11 +1098,121 @@ pub fn diff<A: TextInput + ?Sized, B: TextInput + ?Sized>(
             }
         }
     }
+    for region in &solver.skipped {
+        let (o, n) = fallback_marks(&old_full, &new_full, region);
+        old_marks.extend(o);
+        new_marks.extend(n);
+    }
     Some(StructuralDiff {
         old: merge(old_marks, &old_full),
         new: merge(new_marks, &new_full),
         states: solver.states,
+        skipped: solver.skipped,
     })
+}
+
+/// [`diff_cancellable`] without cancellation.
+pub fn diff<A: TextInput + ?Sized, B: TextInput + ?Sized>(
+    old_syntax: &Syntax,
+    old_text: &A,
+    new_syntax: &Syntax,
+    new_text: &B,
+    budget: &Budget,
+) -> Option<StructuralDiff> {
+    diff_cancellable(
+        old_syntax,
+        old_text,
+        new_syntax,
+        new_text,
+        budget,
+        &CancelToken::new(),
+    )
+}
+
+/// Hunks (index ranges in `lh` / `rh`) of a linear diff of two hash sequences;
+/// everything outside the hunks is identical.
+fn sibling_hunks(lh: &[u64], rh: &[u64]) -> Vec<(Range<usize>, Range<usize>)> {
+    use std::fmt::Write;
+    let encode = |h: &[u64]| {
+        let mut s = String::with_capacity(h.len() * 17);
+        for x in h {
+            let _ = writeln!(s, "{x:016x}");
+        }
+        s
+    };
+    let d = diff_lines(&encode(lh), &encode(rh), &DiffOptions::default());
+    d.hunks
+        .iter()
+        .map(|h| {
+            (
+                (h.old.start as usize).min(lh.len())..(h.old.end as usize).min(lh.len()),
+                (h.new.start as usize).min(rh.len())..(h.new.end as usize).min(rh.len()),
+            )
+        })
+        .filter(|(a, b)| !(a.is_empty() && b.is_empty()))
+        .collect()
+}
+
+/// Marks of a skipped region from the line diff of its two texts, refined
+/// with the word diff inside changed line pairs.
+fn fallback_marks(
+    old_src: &str,
+    new_src: &str,
+    region: &SkippedRegion,
+) -> (Vec<Marked>, Vec<Marked>) {
+    let o = old_src.get(region.old.clone()).unwrap_or("");
+    let n = new_src.get(region.new.clone()).unwrap_or("");
+    let d = diff_lines(o, n, &DiffOptions::default());
+    let starts = |s: &str| -> Vec<usize> {
+        let mut v = vec![0];
+        v.extend(s.match_indices('\n').map(|(i, _)| i + 1));
+        v
+    };
+    let (os, ns) = (starts(o), starts(n));
+    // Byte range of a line range, without the final line break.
+    let span = |s: &str, st: &[usize], lines: &Range<u32>| -> Range<usize> {
+        let a = st.get(lines.start as usize).copied().unwrap_or(s.len());
+        let mut z = st.get(lines.end as usize).copied().unwrap_or(s.len());
+        if z > a && s.as_bytes().get(z - 1) == Some(&b'\n') {
+            z -= 1;
+        }
+        a.min(z)..z
+    };
+    let (mut old_marks, mut new_marks) = (Vec::new(), Vec::new());
+    for h in &d.hunks {
+        let (or, nr) = (span(o, &os, &h.old), span(n, &ns, &h.new));
+        let (ot, nt) = (&o[or.clone()], &n[nr.clone()]);
+        let blank = |t: &str| t.chars().all(char::is_whitespace);
+        match (blank(ot), blank(nt)) {
+            (false, false) => {
+                let ic = refine_inline(ot, nt);
+                for r in ic.old {
+                    old_marks.push(Marked {
+                        range: region.old.start + or.start + r.start
+                            ..region.old.start + or.start + r.end,
+                        mark: Mark::Changed,
+                    });
+                }
+                for r in ic.new {
+                    new_marks.push(Marked {
+                        range: region.new.start + nr.start + r.start
+                            ..region.new.start + nr.start + r.end,
+                        mark: Mark::Changed,
+                    });
+                }
+            }
+            (false, true) => old_marks.push(Marked {
+                range: region.old.start + or.start..region.old.start + or.end,
+                mark: Mark::Removed,
+            }),
+            (true, false) => new_marks.push(Marked {
+                range: region.new.start + nr.start..region.new.start + nr.end,
+                mark: Mark::Added,
+            }),
+            (true, true) => {}
+        }
+    }
+    (old_marks, new_marks)
 }
 
 /// Sorts marks and merges neighbours with the same mark separated only by whitespace.
@@ -1044,70 +1408,343 @@ mod tests {
         assert!(!d.old.is_empty());
     }
 
-    #[test]
-    fn budget_exceeded_returns_none() {
-        let old: String = (0..12)
+    fn many_changes(n: usize) -> (String, String) {
+        let old: String = (0..n)
             .map(|i| format!("fn f{i}() {{ a{i}(); b({i}); }}\n"))
             .collect();
-        let new: String = (0..12)
+        let new: String = (0..n)
             .map(|i| format!("fn g{i}() {{ c{i}(); d({}); }}\n", i + 1))
             .collect();
+        (old, new)
+    }
+
+    fn parse_rust(old: &str, new: &str) -> (Syntax, Syntax) {
         let reg = LanguageRegistry::new();
         let l = reg.by_name("rust").unwrap();
-        let (so, sn) = (
-            Syntax::parse(&l, &old[..]).unwrap(),
-            Syntax::parse(&l, &new[..]).unwrap(),
-        );
+        (
+            Syntax::parse(&l, old).unwrap(),
+            Syntax::parse(&l, new).unwrap(),
+        )
+    }
+
+    #[test]
+    fn budget_exceeded_returns_none_or_reports_skipped_regions() {
+        let (old, new) = many_changes(12);
+        let (so, sn) = parse_rust(&old, &new);
         let tiny = Budget {
             max_states: 20,
             ..Budget::default()
         };
-        assert!(diff(&so, &old[..], &sn, &new[..], &tiny).is_none());
+        match diff(&so, &old, &sn, &new, &tiny) {
+            None => {}
+            Some(d) => assert!(!d.skipped.is_empty(), "{d:?}"),
+        }
         let nodes = Budget {
             max_nodes: 10,
             ..Budget::default()
         };
-        assert!(diff(&so, &old[..], &sn, &new[..], &nodes).is_none());
+        assert!(diff(&so, &old, &sn, &new, &nodes).is_none());
         let generous = Budget {
             max_states: 50_000_000,
             max_time: Duration::from_secs(120),
             ..Budget::default()
         };
-        assert!(diff(&so, &old[..], &sn, &new[..], &generous).is_some());
+        let d = diff(&so, &old, &sn, &new, &generous).expect("fits a generous budget");
+        assert!(d.skipped.is_empty());
+    }
+
+    #[test]
+    fn cancelled_token_aborts() {
+        let (old, new) = many_changes(4);
+        let (so, sn) = parse_rust(&old, &new);
+        let token = CancelToken::new();
+        token.cancel();
+        assert!(diff_cancellable(&so, &old, &sn, &new, &Budget::default(), &token).is_none());
+        let live = CancelToken::new();
+        assert!(diff_cancellable(&so, &old, &sn, &new, &Budget::default(), &live).is_some());
+    }
+
+    #[test]
+    fn comment_only_change_marks_only_the_comment() {
+        let a = "fn f() {\n    // explains the step\n    step();\n    other();\n}\n";
+        let b = "fn f() {\n    // explains the step in more detail\n    step();\n    other();\n}\n";
+        let d = run("rust", a, b).unwrap();
+        assert_eq!(
+            texts(a, &d.old, Mark::Changed),
+            vec!["// explains the step"],
+            "{d:?}"
+        );
+        assert_eq!(d.old.len(), 1);
+        assert_eq!(d.new.len(), 1);
+        assert!(texts(b, &d.new, Mark::Changed)[0].contains("more detail"));
+        // A block comment between statements.
+        let a = "fn f() { one(); /* old note */ two(); }\n";
+        let b = "fn f() { one(); /* new note */ two(); }\n";
+        let d = run("rust", a, b).unwrap();
+        assert_eq!(texts(a, &d.old, Mark::Changed), vec!["/* old note */"]);
+    }
+
+    #[test]
+    fn reformatted_block_is_no_change() {
+        let a = "fn f(x: i32) -> i32 { if x > 1 { x * 2 } else { x - 1 } }\n";
+        let b = "fn f(x: i32) -> i32 {\n    if x > 1 {\n        x * 2\n    } else {\n        x - 1\n    }\n}\n";
+        assert!(run("rust", a, b).unwrap().is_empty());
+        let py_a = "def f(x):\n    return [x, x + 1, x + 2]\n";
+        let py_b = "def f(x):\n    return [\n        x,\n        x + 1,\n        x + 2,\n    ]\n";
+        let d = run("python", py_a, py_b).unwrap();
+        // Only the trailing comma is new.
+        assert!(d.old.is_empty(), "{d:?}");
+    }
+
+    /// A file of `n` functions of ten lines.
+    fn big_file(n: usize) -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "fn work_{i}(input: &[u32]) -> u32 {{\n    let mut total = 0;\n    for v in input {{\n        if *v > {i} {{\n            total += v;\n        }} else {{\n            total += 1;\n        }}\n    }}\n    total\n}}\n\n"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn work_scales_with_the_change_not_the_file() {
+        for n in [20usize, 400] {
+            let old = big_file(n);
+            let mut new = old.clone();
+            let at = new.find(&format!("fn work_{}", n / 2)).unwrap();
+            let edit = new[at..].find("total += v;").unwrap() + at;
+            new.replace_range(edit..edit + 11, "total += v * 2;");
+            let (so, sn) = parse_rust(&old, &new);
+            let d = diff(&so, &old, &sn, &new, &Budget::default()).unwrap();
+            assert!(d.skipped.is_empty());
+            assert!(d.states < 200, "{n} functions: {} states", d.states);
+            // `v` becomes `v * 2`: only the new operator and operand are marked.
+            assert!(d.old.is_empty(), "{d:?}");
+            assert_eq!(d.new.len(), 1, "{d:?}");
+            assert_eq!(d.new[0].mark, Mark::Added, "{d:?}");
+            assert_eq!(&new[d.new[0].range.clone()], "* 2");
+        }
+    }
+
+    #[test]
+    fn a_region_over_its_budget_falls_back_to_line_and_word_diff() {
+        // Region 1 is a one-token edit; region 2 replaces a whole function by
+        // a differently shaped one, which the tiny region budget cannot solve.
+        let old = "fn a() { one(1); }\n\nfn b(x: i32) -> i32 {\n    let y = x + 1;\n    let z = y * 2;\n    if z > 10 { z } else { y }\n}\n\nfn c() { three(3); }\n";
+        let new = "fn a() { one(2); }\n\nfn b(x: i32) -> i32 {\n    match x {\n        0 => 1,\n        n if n > 5 => n * 2,\n        _ => x,\n    }\n}\n\nfn c() { three(3); }\n";
+        let (so, sn) = parse_rust(old, new);
+        let budget = Budget {
+            max_region_states: 40,
+            ..Budget::default()
+        };
+        let d = diff(&so, old, &sn, new, &budget).unwrap();
+        assert_eq!(d.skipped.len(), 1, "{d:?}");
+        assert_eq!(d.skipped[0].reason, SkipReason::RegionBudget);
+        // The small edit is still structural and exact.
+        assert_eq!(texts(old, &d.old, Mark::Changed).first(), Some(&"1"));
+        // The skipped region is marked from the line diff: nothing in it is hidden.
+        let region_old = &old[d.skipped[0].old.clone()];
+        assert!(region_old.contains("let y = x + 1;"));
+        assert!(
+            d.old.iter().any(|m| old[m.range.clone()].contains("let y")),
+            "{d:?}"
+        );
+        assert!(
+            d.new.iter().any(|m| new[m.range.clone()].contains("match")),
+            "{d:?}"
+        );
+        assert_eq!(unmarked(old, &d.old), unmarked(new, &d.new));
+        // With the default budget the same input is fully structural.
+        let full = diff(&so, old, &sn, new, &Budget::default()).unwrap();
+        assert!(full.skipped.is_empty());
+        assert_eq!(unmarked(old, &full.old), unmarked(new, &full.new));
+    }
+
+    #[test]
+    fn exhausted_total_budget_skips_the_remaining_regions() {
+        let (old, new) = many_changes(30);
+        let (so, sn) = parse_rust(&old, &new);
+        let budget = Budget {
+            max_states: 300,
+            ..Budget::default()
+        };
+        let d = diff(&so, &old, &sn, &new, &budget).expect("some regions fit");
+        assert!(!d.skipped.is_empty());
+        assert!(d
+            .skipped
+            .iter()
+            .all(|r| r.reason == SkipReason::TotalBudget));
+        assert_eq!(unmarked(&old, &d.old), unmarked(&new, &d.new));
+        for pair in d.skipped.windows(2) {
+            assert!(
+                pair[0].old.end <= pair[1].old.start,
+                "regions overlap: {:?}",
+                d.skipped
+            );
+        }
+    }
+
+    /// The text of a side without its marked ranges and without whitespace.
+    fn unmarked(src: &str, marks: &[Marked]) -> String {
+        let mut out = String::new();
+        let mut at = 0;
+        for m in marks {
+            out.push_str(&src[at..m.range.start]);
+            at = m.range.end;
+        }
+        out.push_str(&src[at..]);
+        out.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn stmt(n: u8) -> &'static str {
+        match n {
+            0 => "let a = 1;",
+            1 => "let b = foo(2, 3);",
+            2 => "if x { y(); }",
+            3 => "return bar;",
+            4 => "baz.qux(1);",
+            5 => "let c = [1, 2];",
+            6 => "for i in 0..n { total += i * 2; }",
+            7 => "let d = compute(a, b) + helper(c);",
+            8 => "match v { Some(w) => w, None => 0 };",
+            _ => "while ok { step(); }",
+        }
+    }
+
+    /// A function made of statements; `mutations` tweak the new side.
+    fn program(funcs: &[Vec<u8>]) -> String {
+        funcs
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                format!(
+                    "fn f{i}() {{\n{}\n}}\n\n",
+                    body.iter().map(|n| stmt(*n)).collect::<Vec<_>>().join("\n")
+                )
+            })
+            .collect()
+    }
+
+    fn mutate(src: &str, how: u8, at: usize) -> String {
+        let mut out = src.to_string();
+        let pick = |pat: &str, out: &str| -> Option<usize> {
+            let hits: Vec<usize> = out.match_indices(pat).map(|(i, _)| i).collect();
+            (!hits.is_empty()).then(|| hits[at % hits.len()])
+        };
+        match how % 6 {
+            0 => {
+                if let Some(i) = pick("foo", &out) {
+                    out.replace_range(i..i + 3, "renamed");
+                }
+            }
+            1 => {
+                if let Some(i) = pick("1", &out) {
+                    out.replace_range(i..i + 1, "77");
+                }
+            }
+            2 => {
+                if let Some(i) = pick("\n    ", &out) {
+                    out.insert_str(i, "\n    inserted_call(9);");
+                }
+            }
+            3 => {
+                if let Some(i) = pick("compute(a, b)", &out) {
+                    out.replace_range(i..i + 13, "Some(compute(a, b))");
+                }
+            }
+            4 => {
+                if let Some(i) = pick("helper(c)", &out) {
+                    out.replace_range(i..i + 9, "");
+                }
+            }
+            _ => {
+                if let Some(i) = pick("y();", &out) {
+                    out.replace_range(i..i + 4, "y(); z();");
+                }
+            }
+        }
+        out
+    }
+
+    /// Whitespace-only reformatting: random breaks and indentation between tokens.
+    fn reformat(src: &str, seed: u64) -> String {
+        let mut out = String::new();
+        let mut x = seed | 1;
+        for ch in src.chars() {
+            if ch == ' ' || ch == '\n' {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                out.push_str(match x % 4 {
+                    0 => "\n        ",
+                    1 => "  ",
+                    2 => "\n",
+                    _ => " ",
+                });
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    fn funcs() -> impl Strategy<Value = Vec<Vec<u8>>> {
+        proptest::collection::vec(proptest::collection::vec(0u8..10, 1..8), 1..6)
     }
 
     proptest! {
-        /// Marks are in-bounds, sorted, disjoint; identical inputs give no marks; swapping
-        /// the sides swaps added/removed.
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        /// Whitespace reformatting never changes anything; identical token
+        /// sequences are never marked.
         #[test]
-        fn marks_are_well_formed(
-            a in proptest::collection::vec(0u8..6, 0..12),
-            b in proptest::collection::vec(0u8..6, 0..12),
-        ) {
-            let stmt = |n: u8| match n {
-                0 => "let a = 1;",
-                1 => "let b = foo(2, 3);",
-                2 => "if x { y(); }",
-                3 => "return bar;",
-                4 => "baz.qux(1);",
-                _ => "let c = [1, 2];",
-            };
-            let mk = |v: &[u8]| format!("fn f() {{\n{}\n}}\n", v.iter().map(|n| stmt(*n)).collect::<Vec<_>>().join("\n"));
-            let (old, new) = (mk(&a), mk(&b));
+        fn reformatting_marks_nothing(f in funcs(), seed in any::<u64>()) {
+            let old = program(&f);
+            let new = reformat(&old, seed);
             let d = run("rust", &old, &new).unwrap();
+            prop_assert!(d.is_empty(), "{d:?}\n{new}");
+        }
+
+        /// The marked ranges of both sides cover everything that differs and
+        /// nothing else: what remains unmarked is identical (modulo
+        /// whitespace), in order. Marks are sorted, disjoint and in bounds,
+        /// and the unmarked remainder stays identical for every budget (also
+        /// when regions fall back to the line + word diff).
+        #[test]
+        fn unmarked_remainders_are_identical(
+            f in funcs(),
+            edits in proptest::collection::vec((any::<u8>(), any::<usize>()), 0..6),
+            region_budget in prop_oneof![Just(1usize), Just(60), Just(2_000), Just(60_000)],
+            total_budget in prop_oneof![Just(30usize), Just(5_000), Just(400_000)],
+        ) {
+            let old = program(&f);
+            let mut new = old.clone();
+            for (how, at) in edits {
+                new = mutate(&new, how, at);
+            }
+            let (so, sn) = parse_rust(&old, &new);
+            let budget = Budget { max_region_states: region_budget, max_states: total_budget, ..Budget::default() };
+            let Some(d) = diff(&so, &old, &sn, &new, &budget) else {
+                // Nothing could be solved within the budget: the caller shows the line diff.
+                return Ok(());
+            };
             for (marks, src) in [(&d.old, &old), (&d.new, &new)] {
                 let mut prev = 0;
                 for m in marks {
                     prop_assert!(m.range.start >= prev && m.range.start < m.range.end && m.range.end <= src.len());
+                    prop_assert!(src.is_char_boundary(m.range.start) && src.is_char_boundary(m.range.end));
                     prev = m.range.end;
                 }
             }
-            if a == b {
+            prop_assert_eq!(unmarked(&old, &d.old), unmarked(&new, &d.new), "{:?}", d);
+            if old == new || old.split_whitespace().collect::<Vec<_>>() == new.split_whitespace().collect::<Vec<_>>() {
                 prop_assert!(d.is_empty());
             }
-            let r = run("rust", &new, &old).unwrap();
-            let count = |marks: &[Marked], k: Mark| marks.iter().filter(|m| m.mark == k).count();
-            prop_assert_eq!(count(&d.old, Mark::Removed) > 0, count(&r.new, Mark::Added) > 0);
+            if budget.max_region_states >= 60_000 && budget.max_states >= 400_000 {
+                // A generous budget never skips on these small inputs.
+                prop_assert!(d.skipped.is_empty(), "{:?}", d.skipped);
+            }
         }
     }
 }

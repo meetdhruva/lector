@@ -24,6 +24,23 @@
   <launchable type="desktop-id">io.github.meetdhruva.Lector.desktop</launchable>
   <url type="homepage">https://github.com/meetdhruva/lector</url>
   <url type="bugtracker">https://github.com/meetdhruva/lector/issues</url>
+  <url type="vcs-browser">https://github.com/meetdhruva/lector</url>
+  <url type="help">https://github.com/meetdhruva/lector#readme</url>
+  <keywords>
+    <keyword>code</keyword>
+    <keyword>viewer</keyword>
+    <keyword>git</keyword>
+    <keyword>diff</keyword>
+    <keyword>review</keyword>
+    <keyword>source</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
   <screenshots>
     <screenshot type="default">
       <image>https://raw.githubusercontent.com/meetdhruva/lector/main/docs/screenshots/reader-dark.png</image>
@@ -40,21 +57,27 @@
   <content_rating type="oars-1.1"/>
   <releases>
     <release version="0.6.0" date="2026-11-06">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.6.0</url>
       <description><p>Review GitHub and GitLab pull requests locally, and comments that follow the code through edits and rebases.</p></description>
     </release>
     <release version="0.5.0" date="2026-11-06">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.5.0</url>
       <description><p>Drive coding agents from the Agent panel with a reviewable, undoable checkpoint per turn; command line and MCP server.</p></description>
     </release>
     <release version="0.4.0" date="2026-11-06">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.4.0</url>
       <description><p>Undo and an Activity log instead of confirmation dialogs, a risk-ordered review queue, moved-code detection and keyboard accessibility.</p></description>
     </release>
     <release version="0.3.0" date="2026-11-04">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.3.0</url>
       <description><p>Light editing (multiple carets, save, find and replace), language server diagnostics, formatting, code actions and rename, and merge-conflict resolution.</p></description>
     </release>
     <release version="0.2.0" date="2026-11-04">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.2.0</url>
       <description><p>Menu bar and window controls on every platform, welcome screen, staging by file, hunk or line, and a commit composer.</p></description>
     </release>
     <release version="0.1.0" date="2026-11-03">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.1.0</url>
       <description><p>First release: a complete read-only reader and git review tool.</p></description>
     </release>
   </releases>

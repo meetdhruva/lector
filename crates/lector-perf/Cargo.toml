@@ -1,0 +1,66 @@
+[package]
+name = "lector-perf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Deterministic (instruction-count) performance gates for Lector's hot paths. Not shipped."
+publish = false
+
+[lib]
+name = "lector_perf"
+path = "src/lib.rs"
+
+# Each gate depends on its own crate only through an optional feature, so that a crate that does
+# not compile right now (an API in flux) cannot block the other gates or the runner:
+# `scripts/perf-gate.sh` builds each with `--no-default-features --features <gate>`.
+[features]
+default = ["text", "buffer", "diff", "search", "syntax"]
+text = ["dep:lector-text"]
+buffer = ["dep:lector-buffer", "dep:lector-text"]
+diff = ["dep:lector-diff"]
+search = ["dep:lector-search"]
+syntax = ["dep:lector-syntax"]
+
+# One small binary per crate under gate: each runs a named, fixed-input workload.
+# `scripts/perf-gate.sh` runs them under `valgrind --tool=callgrind` via the `perf-gate` runner.
+[[bin]]
+name = "gate_text"
+path = "src/bin/gate_text.rs"
+required-features = ["text"]
+
+[[bin]]
+name = "gate_buffer"
+path = "src/bin/gate_buffer.rs"
+required-features = ["buffer"]
+
+[[bin]]
+name = "gate_diff"
+path = "src/bin/gate_diff.rs"
+required-features = ["diff"]
+
+[[bin]]
+name = "gate_search"
+path = "src/bin/gate_search.rs"
+required-features = ["search"]
+
+[[bin]]
+name = "gate_syntax"
+path = "src/bin/gate_syntax.rs"
+required-features = ["syntax"]
+
+[[bin]]
+name = "perf-gate"
+path = "src/bin/perf_gate.rs"
+
+[dependencies]
+lector-text = { workspace = true, optional = true }
+lector-buffer = { workspace = true, optional = true }
+lector-diff = { workspace = true, optional = true }
+lector-search = { workspace = true, optional = true }
+lector-syntax = { workspace = true, optional = true }
+serde_json.workspace = true
+anyhow.workspace = true
+tempfile.workspace = true

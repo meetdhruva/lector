@@ -15,6 +15,7 @@ pub mod edit;
 mod element;
 pub mod layers;
 mod line_cache;
+pub mod popup;
 pub mod selection;
 pub mod source;
 
@@ -36,6 +37,7 @@ pub use display_map::DisplayMap;
 pub use edit::{EditBuffer, EditBufferEvent, RopeSource};
 pub use element::CodeElement;
 pub use layers::{RowBackground, RowWidget, WidgetAnchor};
+pub use popup::{place_popup, EditorPopup, Placement, Vertical};
 pub use selection::{Pos, Selection};
 pub use source::{
     CodeSource, DecorationColor, GutterMark, GutterMarkKind, HighlightSpan, InMemorySource,
@@ -45,7 +47,6 @@ pub use source::{
 use crate::actions::editor::*;
 use crate::components::context_menu::{ContextMenu, ContextMenuState};
 use crate::icons::IconName;
-use crate::keymap::contexts;
 use line_cache::LineCache;
 use selection::LineAccess;
 
@@ -309,6 +310,8 @@ pub struct CodeView {
     inline_marks: Rc<InlineMarks>,
     on_gutter_icon_click: Option<GutterIconCallback>,
     overlay: Option<(gpui::AnyView, Point<Pixels>, gpui::Corner, Subscription)>,
+    /// Non-focusing popups (completion, signature help), key context flags, typing hooks.
+    popups: popup::PopupState,
 }
 
 type AnnotationClickCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -419,6 +422,7 @@ impl CodeView {
             inline_marks: Rc::new(InlineMarks::default()),
             on_gutter_icon_click: None,
             overlay: None,
+            popups: popup::PopupState::default(),
         }
     }
 
@@ -2198,6 +2202,13 @@ impl CodeView {
                     Some(IconName::Lightbulb),
                     Box::new(CodeActions),
                 );
+                menu = item(
+                    menu,
+                    editable,
+                    "Edit with Agent…",
+                    Some(IconName::Sparkles),
+                    Box::new(crate::actions::agent::EditWithAgent),
+                );
             }
             menu = menu
                 .separator()
@@ -2345,7 +2356,7 @@ impl EntityInputHandler for CodeView {
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.is_editable() {
@@ -2363,6 +2374,13 @@ impl EntityInputHandler for CodeView {
             }
             (None, None) => {
                 // Plain typing: every caret, with auto-close/type-over.
+                // An owner (completion: commit characters) may take the text over.
+                if let Some(hook) = self.popups.interceptor() {
+                    if hook(text, window, cx) {
+                        return;
+                    }
+                }
+                self.popups.set_typed(text);
                 let text = text.to_string();
                 self.edit_buffer(cx, move |b| b.insert(&text));
             }
@@ -2462,9 +2480,11 @@ impl EntityInputHandler for CodeView {
 impl Render for CodeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_blink(window, cx);
+        self.ensure_popup_hooks(window, cx);
+        let popups = self.render_popups(window, cx);
         div()
             .id("code-view")
-            .key_context(contexts::CODE_VIEW)
+            .key_context(self.key_context())
             .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
@@ -2537,6 +2557,7 @@ impl Render for CodeView {
             .child(CodeElement::new(cx.entity()))
             .children(self.context_menu.render())
             .children(self.render_overlay())
+            .children(popups)
     }
 }
 

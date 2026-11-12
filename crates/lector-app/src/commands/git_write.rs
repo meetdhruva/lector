@@ -102,7 +102,7 @@ fn data_dir(core: &AppCore) -> PathBuf {
 // Shared helpers
 // ---------------------------------------------------------------------------------------------
 
-fn needs_repo(cx: &CommandContext) -> Availability {
+pub(super) fn needs_repo(cx: &CommandContext) -> Availability {
     match &cx.project {
         None => Availability::no("No folder is open"),
         Some(p) if p.repo().is_none() => Availability::no("Not a git repository"),
@@ -225,7 +225,7 @@ fn files_phrase(rels: &[String]) -> String {
 }
 
 /// A backup taken before a write.
-struct Backup {
+pub(super) struct Backup {
     shadow: ShadowRepo,
     snap: ShadowSnapshot,
 }
@@ -233,7 +233,7 @@ struct Backup {
 /// Backs up the working-tree contents of `rels` before a destructive write. Without a
 /// backup: `Err(BackupUnavailable)`, or `Ok(None)` when `allow_without` says the user
 /// accepted it.
-fn backup_files(
+pub(super) fn backup_files(
     cx: &CommandContext,
     repo: &Repo,
     rels: &[String],
@@ -257,14 +257,19 @@ fn backup_files(
 }
 
 /// Best-effort index backup (staging is not destructive; no backup = no undo record).
-fn backup_index(cx: &CommandContext, repo: &Repo, rels: &[String], note: &str) -> Option<Backup> {
+pub(super) fn backup_index(
+    cx: &CommandContext,
+    repo: &Repo,
+    rels: &[String],
+    note: &str,
+) -> Option<Backup> {
     let shadow = open_shadow(&cx.core, repo).ok()?;
     let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
     let snap = shadow.snapshot_index(&refs, note).ok()?;
     Some(Backup { shadow, snap })
 }
 
-fn files_undo(backup: Option<Backup>, rels: &[String]) -> Option<UndoRecord> {
+pub(super) fn files_undo(backup: Option<Backup>, rels: &[String]) -> Option<UndoRecord> {
     let b = backup?;
     let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
     Some(UndoRecord::RestoreFiles {
@@ -274,7 +279,7 @@ fn files_undo(backup: Option<Backup>, rels: &[String]) -> Option<UndoRecord> {
     })
 }
 
-fn index_undo(backup: Option<Backup>, rels: &[String]) -> Option<UndoRecord> {
+pub(super) fn index_undo(backup: Option<Backup>, rels: &[String]) -> Option<UndoRecord> {
     let b = backup?;
     let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
     Some(UndoRecord::RestoreIndex {

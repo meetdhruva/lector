@@ -11,6 +11,7 @@ authors.workspace = true
 ignore = "0.4"
 globset.workspace = true
 nucleo = "0.5"
+memchr.workspace = true
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"

@@ -98,6 +98,16 @@ pub trait TreeDelegate: 'static {
     ) -> Option<gpui::Entity<ContextMenu>> {
         None
     }
+
+    /// Optional context menu for the empty area below the nodes (e.g. actions on the
+    /// project root).
+    fn background_context_menu(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<gpui::Entity<ContextMenu>> {
+        None
+    }
 }
 
 /// Events emitted by [`TreeView`].
@@ -542,6 +552,7 @@ impl<D: TreeDelegate> TreeView<D> {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
                         this.deploy_context_menu(ix, event.position, window, cx)
                     }),
                 );
@@ -581,6 +592,22 @@ impl<D: TreeDelegate> Render for TreeView<D> {
                     }
                 },
             ))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let Some(menu) = this.delegate.background_context_menu(window, cx) else {
+                        return;
+                    };
+                    this.context_menu.deploy(
+                        menu,
+                        event.position,
+                        window,
+                        cx,
+                        |this: &mut Self| &mut this.context_menu,
+                    );
+                    cx.notify();
+                }),
+            )
             .size_full()
             .child(list)
             .children(self.context_menu.render())

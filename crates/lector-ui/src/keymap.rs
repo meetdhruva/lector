@@ -45,6 +45,11 @@ pub mod contexts {
     pub const LIST_PANEL: &str = "ListPanel";
     /// The commit message editor.
     pub const COMMIT_EDITOR: &str = "CommitEditor";
+    /// A focused terminal (v0.7, `lector-ui-terminal`): keys bound in `Workspace` are not seen
+    /// here (they reach the shell) except a reserved few.
+    pub const TERMINAL: &str = "Terminal";
+    /// The terminal find bar.
+    pub const TERMINAL_FIND: &str = "TerminalFind";
 }
 
 const fn mac() -> bool {
@@ -302,6 +307,29 @@ pub fn default_keymap() -> Vec<KeySpec> {
     add("down".into(), "picker::SelectNext", cp);
     add("enter".into(), "picker::Confirm", cp);
     out
+}
+
+/// Extra bindings derived from the effective keymap (e.g. the terminal's pass-through
+/// `zed::NoAction` entries); see [`add_keymap_extension`].
+pub type KeymapExtension = fn(&[KeySpec]) -> Vec<KeySpec>;
+
+#[derive(Default)]
+struct KeymapExtensions(Vec<KeymapExtension>);
+
+impl gpui::Global for KeymapExtensions {}
+
+/// Registers `f`: every time the keymap is (re)bound, `f` sees the effective bindings and
+/// returns more to bind after them. Used by extension crates whose key contexts depend on
+/// what the user bound elsewhere.
+pub fn add_keymap_extension(cx: &mut App, f: KeymapExtension) {
+    cx.default_global::<KeymapExtensions>().0.push(f);
+}
+
+/// The bindings the registered extensions add for `specs`.
+pub fn extension_bindings(cx: &App, specs: &[KeySpec]) -> Vec<KeySpec> {
+    cx.try_global::<KeymapExtensions>()
+        .map(|e| e.0.iter().flat_map(|f| f(specs)).collect())
+        .unwrap_or_default()
 }
 
 /// Binds `specs`, skipping (and returning) entries whose action is unknown

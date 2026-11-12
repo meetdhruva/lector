@@ -22,7 +22,7 @@ use lector_ui::{OpenRequest, ThemeMode};
     name = "lector",
     version,
     about = "A fast, reading-first code viewer and git review tool.",
-    after_help = "Command line (no window): lector status | changes | diff | commands | run | activity | undo | mcp\n\
+    after_help = "Command line (no window): lector status | changes | diff | commands | run | activity | undo | mcp | health\n\
                   Run `lector <subcommand> --help` for details. `lector mcp` is the Model Context Protocol server."
 )]
 struct Cli {
@@ -204,13 +204,24 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // dispatched before anything else. A directory named like a subcommand can still be
     // opened as `lector ./status`.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // git / ssh asking for credentials through Lector's askpass server (no GUI).
+    if let Some(code) = lector_cli::run_askpass_helper(&args) {
+        return Ok(code);
+    }
     if lector_cli::is_cli_invocation(&args) {
         return Ok(lector_cli::run_args(args));
     }
+    // Local crash reports (nothing leaves the machine): installed before anything that could panic.
+    lector_app::health::install_panic_hook();
     lector_ui::startup::mark_process_start();
     let cli = Cli::parse();
     logging::init();
     let mut request = build_request(&cli)?;
+    // The session marker: written now, cleared by `end_clean` on an orderly quit, so a crash, a
+    // kill or a power loss shows up as an abnormal session at the next start. After
+    // `build_request`: a bad path is a plain error exit, not a crash.
+    let session = lector_app::health::SessionHealth::begin();
+    let quit_session = session.clone();
     // Settings, the project (git discovery, LSP config) and themes load on a
     // background thread while GPUI starts up.
     let root = request.as_ref().map(|r| r.root.clone());
@@ -244,6 +255,16 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         }
     });
     app.run(move |cx| {
+        // On macOS `quit` ends in `[NSApp terminate:]`, which exits the process without
+        // returning from `run`, so the clean shutdown is also recorded here (idempotent).
+        cx.on_app_quit(move |_| {
+            quit_session.end_clean();
+            // Every child Lector started (git, language servers, agents, terminals): TERM to
+            // each process tree, KILL after the grace period (see lector-process).
+            lector_process::Supervisor::global().shutdown(std::time::Duration::from_millis(1500));
+            async {}
+        })
+        .detach();
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(urls) = open_rx.next().await {
@@ -276,6 +297,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         lector_ui::init(cx, registry, mode, (settings, warnings));
         lector_ui_git::init(cx);
         lector_ui_agent::init(cx);
+        lector_ui_terminal::init(cx);
         lector_ui::startup::log("ui initialized");
         let opened = match request {
             Some(request) => lector_ui::open_workspace_window(cx, request),
@@ -287,6 +309,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         lector_ui::startup::log("window opened");
     });
+    session.end_clean();
     Ok(std::process::ExitCode::SUCCESS)
 }
 

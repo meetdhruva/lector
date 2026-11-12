@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod activity;
+pub mod askpass_ui;
 pub mod blame;
 pub mod branches_panel;
 pub mod changes_panel;
@@ -22,7 +23,13 @@ pub mod review_model;
 pub mod review_tab;
 pub mod staging;
 pub mod store;
+pub mod sync;
+pub mod sync_dialogs;
+pub mod sync_model;
 pub mod util;
+
+#[cfg(test)]
+mod sync_tests;
 
 use std::rc::Rc;
 
@@ -128,6 +135,13 @@ fn review_working_tree_action() -> Box<dyn gpui::Action> {
 /// Registers the git views with every new workspace window.
 pub fn init(cx: &mut App) {
     init_command_hooks(cx);
+    // The askpass server starts with the first network operation; its socket directory goes
+    // when the app quits.
+    cx.on_app_quit(|cx| {
+        askpass_ui::shutdown(cx);
+        async {}
+    })
+    .detach();
     cx.observe_new(|ws: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -142,6 +156,13 @@ pub fn init(cx: &mut App) {
         cx.default_global::<StoresByWorkspace>()
             .0
             .insert(ws_id, store.downgrade());
+        // v0.7: sync with the remote (status bar control, Changes panel bar, actions).
+        let window_handle = window.window_handle();
+        let controller = cx.new(|cx| sync::SyncController::new(store.clone(), window_handle, cx));
+        store.update(cx, |s, _| s.sync = Some(controller.clone()));
+        let control = cx.new(|cx| sync::SyncControl::new(controller.clone(), cx));
+        ws.set_branch_status_view(Some(control.clone().into()), cx);
+        sync::register(ws, &controller, &control);
         let changes = cx.new(|cx| ChangesPanel::new(store.clone(), cx));
         let history = cx.new(|cx| HistoryPanel::new(store.clone(), window, cx));
         let branches = cx.new(|cx| BranchesPanel::new(store.clone(), cx));

@@ -163,6 +163,10 @@ pub struct Workspace {
     name: SharedString,
     branch: Option<SharedString>,
     branch_status: Option<SharedString>,
+    /// Replaces the status-bar branch button when set (lector-ui-git's sync control).
+    branch_status_view: Option<gpui::AnyView>,
+    /// Quiet status bar items other crates put left of the editor status (v0.7: the update notice).
+    extra_status_views: Vec<(&'static str, gpui::AnyView)>,
     sidebar: Entity<Sidebar>,
     sidebar_visible: bool,
     /// Logical (unscaled) width; multiplied by the UI scale when drawn.
@@ -191,7 +195,19 @@ pub struct Workspace {
     title_drag_pending: bool,
     chrome_menu: crate::components::ContextMenuState,
     lsp_popover: crate::components::popover::Popover<super::lsp_status::LspStatusPopover>,
+    /// A panel below the editor area (the Terminal panel), set by an extension crate.
+    bottom_panel: Option<BottomPanel>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A panel below the editor area (v0.7: the Terminal panel), installed with
+/// [`Workspace::set_bottom_panel`].
+struct BottomPanel {
+    view: gpui::AnyView,
+    focus: FocusHandle,
+    visible: bool,
+    /// Logical (unscaled) height.
+    height: Pixels,
 }
 
 impl gpui::EventEmitter<WorkspaceEvent> for Workspace {}
@@ -258,6 +274,8 @@ impl Workspace {
             name,
             branch,
             branch_status: None,
+            branch_status_view: None,
+            extra_status_views: Vec::new(),
             sidebar,
             sidebar_visible: true,
             sidebar_width: gpui::px(272.),
@@ -282,6 +300,7 @@ impl Workspace {
             title_drag_pending: false,
             chrome_menu: Default::default(),
             lsp_popover: Default::default(),
+            bottom_panel: None,
             _subscriptions: subscriptions,
         };
         if !has_folder {
@@ -468,6 +487,56 @@ impl Workspace {
         }
     }
 
+    /// Installs the panel shown below the editor area (hidden until
+    /// [`Workspace::set_bottom_panel_visible`]). `focus` must contain the panel's focus: it is
+    /// the panel's F6 region.
+    pub fn set_bottom_panel(
+        &mut self,
+        view: gpui::AnyView,
+        focus: FocusHandle,
+        cx: &mut Context<Self>,
+    ) {
+        self.bottom_panel = Some(BottomPanel {
+            view,
+            focus,
+            visible: false,
+            height: gpui::px(260.),
+        });
+        cx.notify();
+    }
+
+    /// Shows or hides the bottom panel. Hiding it while it holds the focus moves the focus
+    /// back to the active pane.
+    pub fn set_bottom_panel_visible(
+        &mut self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self.bottom_panel.as_mut() else {
+            return;
+        };
+        if panel.visible == visible {
+            return;
+        }
+        panel.visible = visible;
+        if !visible && panel.focus.contains_focused(window, cx) {
+            let focus = self.active_pane.focus_handle(cx);
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    /// Whether the bottom panel is installed and shown.
+    pub fn is_bottom_panel_visible(&self) -> bool {
+        self.bottom_panel.as_ref().is_some_and(|p| p.visible)
+    }
+
+    /// The bottom panel's focus handle, when one is installed.
+    pub fn bottom_panel_focus(&self) -> Option<FocusHandle> {
+        self.bottom_panel.as_ref().map(|p| p.focus.clone())
+    }
+
     /// The modal layer.
     pub fn modal_layer(&self) -> &Entity<ModalLayer> {
         &self.modal_layer
@@ -496,6 +565,36 @@ impl Workspace {
             self.branch_status = status_label;
             cx.notify();
         }
+    }
+
+    /// Sets a view drawn in the status bar in place of the branch button (v0.7: the git sync
+    /// control of lector-ui-git: branch, ahead/behind, state, progress, dropdown); `None`
+    /// brings the plain branch button back.
+    pub fn set_branch_status_view(&mut self, view: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        self.branch_status_view = view;
+        cx.notify();
+    }
+
+    /// Puts (or, with `None`, removes) a view in the status bar's right group under `key`
+    /// (v0.7: the update notice of lector-ui-agent). Views appear in the order they were first set.
+    pub fn set_status_view(
+        &mut self,
+        key: &'static str,
+        view: Option<gpui::AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        match (
+            self.extra_status_views.iter().position(|(k, _)| *k == key),
+            view,
+        ) {
+            (Some(ix), Some(view)) => self.extra_status_views[ix].1 = view,
+            (Some(ix), None) => {
+                self.extra_status_views.remove(ix);
+            }
+            (None, Some(view)) => self.extra_status_views.push((key, view)),
+            (None, None) => return,
+        }
+        cx.notify();
     }
 
     /// Sets what the welcome view and the status bar tell about uncommitted changes (v0.4 review
@@ -924,7 +1023,13 @@ impl Workspace {
                     .min_w_0()
                     .overflow_hidden()
                     .gap(px(2.))
-                    .when_some(self.branch_status.clone().or(self.branch.clone()), |el, branch| {
+                    .when_some(self.branch_status_view.clone(), |el, view| el.child(view))
+                    .when_some(
+                        self.branch_status
+                            .clone()
+                            .or(self.branch.clone())
+                            .filter(|_| self.branch_status_view.is_none()),
+                        |el, branch| {
                         el.child(
                             item("status-branch", branch)
                                 .icon(IconName::GitBranch)
@@ -987,6 +1092,24 @@ impl Workspace {
                 h_flex()
                     .flex_none()
                     .gap(px(2.))
+                    .when(self.bottom_panel.is_some(), |el| {
+                        el.child(
+                            item("status-terminal", "Terminal".into())
+                                .icon(IconName::Terminal)
+                                .selected(self.is_bottom_panel_visible())
+                                .tooltip(Tooltip::for_action(
+                                    "Toggle Terminal",
+                                    &crate::actions::terminal::TogglePanel,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(crate::actions::terminal::TogglePanel),
+                                        cx,
+                                    )
+                                }),
+                        )
+                    })
+                    .children(self.extra_status_views.iter().map(|(_, v)| v.clone()))
                     .children(self.render_edit_status(cx))
                     .children(crate::lsp::problems::status_item(self, cx))
                     .when_some(selection, |el, text| {
@@ -1071,6 +1194,30 @@ impl Workspace {
                         )
                     }),
             )
+    }
+
+    fn render_bottom_panel(&self, cx: &App) -> Option<impl IntoElement> {
+        let panel = self.bottom_panel.as_ref().filter(|p| p.visible)?;
+        Some(
+            div()
+                .id("bottom-panel")
+                .relative()
+                .flex_none()
+                .w_full()
+                .h(panel.height * crate::scale::scale())
+                .border_t_1()
+                .border_color(cx.theme().ui.border.hsla())
+                .child(
+                    panel
+                        .view
+                        .clone()
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                )
+                .child(crate::components::split::panel_resize_handle_top(
+                    "bottom-panel-edge",
+                    cx,
+                )),
+        )
     }
 
     fn render_resize_edges(&self, window: &mut Window) -> Vec<AnyElement> {
@@ -1322,6 +1469,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings_file))
             .on_drag_move(
                 cx.listener(|this, e: &DragMoveEvent<DraggedPanelEdge>, window, cx| {
+                    if e.drag(cx).id == "bottom-panel-edge" {
+                        if let Some(panel) = this.bottom_panel.as_mut() {
+                            let h = e.bounds.bottom()
+                                - metrics::status_bar_height()
+                                - e.event.position.y;
+                            panel.height =
+                                clamp_width(h, px(80.), window.viewport_size().height * 0.8)
+                                    / crate::scale::scale();
+                            cx.notify();
+                        }
+                    }
                     if e.drag(cx).id == "sidebar-edge" {
                         let w = e.event.position.x - e.bounds.left();
                         this.sidebar_width =
@@ -1353,7 +1511,14 @@ impl Render for Workspace {
                                 .child(panel_resize_handle("sidebar-edge", cx)),
                         )
                     })
-                    .child(div().flex_1().min_w_0().h_full().child(center)),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(div().flex_1().min_h_0().w_full().child(center))
+                            .children(self.render_bottom_panel(cx)),
+                    ),
             )
             .child(self.render_status_bar(cx))
             .children(self.render_toast(cx))

@@ -17,6 +17,12 @@ tracing.workspace = true
 ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
 # OS keychain (macOS Keychain, Windows Credential Manager, Linux kernel keyutils).
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+# Update check (v0.7): semver ordering and minisign (Ed25519) signature verification, both pure Rust.
+semver = "1.0"
+minisign-verify = "0.2.5"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: sign fixtures with a throw-away minisign-compatible keypair (ring is already in the tree via rustls).
+ring = "0.17"
+blake2 = "0.10"

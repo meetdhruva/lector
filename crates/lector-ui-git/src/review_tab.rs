@@ -56,6 +56,8 @@ pub struct ReviewView {
     )>,
     /// Risk order, reviewed hunks and progress (v0.4).
     queue: queue::QueueState,
+    /// A view drawn above the review (v0.7: the agent turn's summary card), set by its owner.
+    header_view: Option<gpui::AnyView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -156,6 +158,7 @@ impl ReviewView {
             list_mode: comments::ListMode::Files,
             comment_cache: None,
             queue: queue::QueueState::new(risk_order),
+            header_view: None,
             _subscriptions: subs,
         };
         this.load(with_commit_header, cx);
@@ -234,6 +237,33 @@ impl ReviewView {
                 cx.notify();
             });
         }));
+    }
+
+    /// Puts a view above the review (or removes it with `None`): the summary card of an agent turn.
+    pub fn set_header_view(&mut self, view: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        self.header_view = view;
+        cx.notify();
+    }
+
+    /// Opens `path` in this review and scrolls its diff to `line` (0-based) of the old or new
+    /// side. Returns whether the file is part of the review (it may still be loading: then
+    /// `false` and nothing moves).
+    pub fn show_file_at(
+        &mut self,
+        path: &str,
+        old_side: bool,
+        line: u32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ix) = self.view.as_ref().and_then(|v| v.index_of(path)) else {
+            return false;
+        };
+        self.selected = ix;
+        self.queue_user_selected();
+        self.show_selected(cx);
+        self.diff
+            .update(cx, |d, cx| d.show_line_when_loaded(old_side, line, cx));
+        true
     }
 
     fn show_selected(&mut self, cx: &mut Context<Self>) {
@@ -964,6 +994,7 @@ impl Render for ReviewView {
                     this.on_viewed_toggled(&path.0, path.1, cx);
                 }
             }))
+            .when_some(self.header_view.clone(), |el, header| el.child(header))
             .when_some(commit, |el, c| el.child(self.render_commit_header(&c, cx)))
             .child(body)
             .children(self.menu.render())
@@ -1112,6 +1143,22 @@ pub fn restore_item(
 /// Opens (or activates) a review tab for `cs`.
 pub fn open_review(store: &Entity<GitStore>, cs: Changeset, window: &mut Window, cx: &mut App) {
     open_item(store, cs, false, false, window, cx);
+}
+
+/// Like [`open_review`], returning the review view (to give it a header or move it to a file).
+pub fn open_review_view(
+    store: &Entity<GitStore>,
+    cs: Changeset,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<ReviewView>> {
+    open_item(store, cs.clone(), false, false, window, cx);
+    let ws = store.read(cx).workspace.upgrade()?;
+    let key = format!("review:{}", changeset_key(&cs));
+    let pane = ws.read(cx).active_pane().clone();
+    let pane = pane.read(cx);
+    let ix = pane.index_for_key(&key, cx)?;
+    pane.items().nth(ix)?.view().downcast::<ReviewView>().ok()
 }
 
 /// Opens (or activates) a commit tab.

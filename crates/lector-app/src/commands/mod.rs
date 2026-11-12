@@ -10,7 +10,8 @@
 //!   ([`schema::validate`]), runs the command and records writes to the activity
 //!   journal through [`ActivitySink`].
 //!
-//! Read/navigation commands live in [`read`]; git writes in `git_write` (Agent SAFE),
+//! Read/navigation commands live in [`read`]; git writes in `git_write` (Agent SAFE), git
+//! network / branch / stash commands in [`git_sync`] (v0.7),
 //! document commands in `documents` (Agent DOCS).
 
 use std::collections::BTreeMap;
@@ -29,6 +30,7 @@ pub use crate::core::AppCore;
 pub use crate::journal::UndoRecord;
 
 pub mod documents;
+pub mod git_sync;
 pub mod git_write;
 pub mod read;
 pub mod schema;
@@ -38,6 +40,7 @@ pub fn register_builtin(registry: &CommandRegistry) {
     read::register(registry);
     documents::register(registry);
     git_write::register(registry);
+    git_sync::register(registry);
     crate::comments::register_commands(registry);
 }
 

@@ -21,6 +21,8 @@ use crate::types::{
 };
 use crate::PointUtf16;
 
+mod completion_api;
+
 /// Tunables; the defaults suit real servers, tests shorten them.
 #[derive(Debug, Clone)]
 pub struct LspOptions {
@@ -126,6 +128,8 @@ struct Events {
     diagnostics: Mutex<HashMap<PathBuf, StoredDiagnostics>>,
     listeners: Mutex<Vec<DiagnosticsListener>>,
     apply_edit: Mutex<Option<ApplyEditHandler>>,
+    /// Completion / signature help: in-flight requests and the snippets setting.
+    completion: completion_api::CompletionState,
 }
 
 impl Events {
@@ -431,6 +435,10 @@ impl Slot {
             "capabilities": client_capabilities(),
             "trace": "off",
         });
+        crate::completion::extend_client_capabilities(
+            &mut params["capabilities"],
+            self.events.completion.snippets(),
+        );
         if let Some(options) = crate::config::read_only_settings(&self.config.name) {
             params["initializationOptions"] = options;
         }

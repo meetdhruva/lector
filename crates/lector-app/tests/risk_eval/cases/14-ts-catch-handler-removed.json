@@ -1,0 +1,32 @@
+{
+  "id": "ts-catch-handler-removed",
+  "split": "tune",
+  "category": "error-handling",
+  "language": "typescript",
+  "description": "The .catch fallback of a promise chain is removed.",
+  "risky": [
+    "src/api/user.ts"
+  ],
+  "files": [
+    {
+      "path": "src/api/extras.ts",
+      "base": "export function extraBase(x: number): number {\n  return x + 1;\n}\n",
+      "head": "export function extraBase(x: number): number {\n  return x + 1;\n}\n\nexport function extra0(x: number): number {\n  return extraBase(x) * 2;\n}\n\nexport function extra1(x: number): number {\n  return extraBase(x) * 3;\n}\n\nexport function extra2(x: number): number {\n  return extraBase(x) * 4;\n}\n\nexport function extra3(x: number): number {\n  return extraBase(x) * 5;\n}\n\nexport function extra4(x: number): number {\n  return extraBase(x) * 6;\n}\n"
+    },
+    {
+      "path": "src/api/user.ts",
+      "base": "export function loadUser(id: string): Promise<User> {\n  return fetch(`/api/users/${id}`)\n    .then((r) => r.json())\n    .catch((err) => {\n      reportError(err);\n      return defaultUser();\n    });\n}\n\ndeclare function reportError(e: unknown): void;\ndeclare function defaultUser(): User;\ninterface User { id: string }\n",
+      "head": "export function loadUser(id: string): Promise<User> {\n  return fetch(`/api/users/${id}`)\n    .then((r) => r.json());\n}\n\ndeclare function reportError(e: unknown): void;\ndeclare function defaultUser(): User;\ninterface User { id: string }\n"
+    },
+    {
+      "path": "src/api/legacy.ts",
+      "base": "function legacy0(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 0) {\n      acc += v * 1;\n    }\n  }\n  return acc;\n}\n\nfunction legacy1(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 1) {\n      acc += v * 2;\n    }\n  }\n  return acc;\n}\n\nfunction legacy2(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 2) {\n      acc += v * 3;\n    }\n  }\n  return acc;\n}\n\nfunction legacy3(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 3) {\n      acc += v * 4;\n    }\n  }\n  return acc;\n}\n\nfunction legacy4(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 4) {\n      acc += v * 5;\n    }\n  }\n  return acc;\n}\n\nfunction legacy5(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 5) {\n      acc += v * 6;\n    }\n  }\n  return acc;\n}\n\nfunction legacy6(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 6) {\n      acc += v * 7;\n    }\n  }\n  return acc;\n}\n\nfunction legacy7(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 7) {\n      acc += v * 8;\n    }\n  }\n  return acc;\n}\n\nfunction legacy8(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 8) {\n      acc += v * 9;\n    }\n  }\n  return acc;\n}\n\nfunction legacy9(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 9) {\n      acc += v * 10;\n    }\n  }\n  return acc;\n}\n\n",
+      "head": "function legacy0(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 0) {\n      total += value * 1;\n    }\n  }\n  return total;\n}\n\nfunction legacy1(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 1) {\n      total += value * 2;\n    }\n  }\n  return total;\n}\n\nfunction legacy2(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 2) {\n      total += value * 3;\n    }\n  }\n  return total;\n}\n\nfunction legacy3(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 3) {\n      total += value * 4;\n    }\n  }\n  return total;\n}\n\nfunction legacy4(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 4) {\n      total += value * 5;\n    }\n  }\n  return total;\n}\n\nfunction legacy5(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 5) {\n      total += value * 6;\n    }\n  }\n  return total;\n}\n\nfunction legacy6(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 6) {\n      total += value * 7;\n    }\n  }\n  return total;\n}\n\nfunction legacy7(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 7) {\n      total += value * 8;\n    }\n  }\n  return total;\n}\n\nfunction legacy8(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 8) {\n      total += value * 9;\n    }\n  }\n  return total;\n}\n\nfunction legacy9(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 9) {\n      total += value * 10;\n    }\n  }\n  return total;\n}\n\n"
+    },
+    {
+      "path": "web/styles.css",
+      "base": ".card-0 {\n  margin: 4px;\n  color: #333;\n}\n.card-1 {\n  margin: 4px;\n  color: #333;\n}\n.card-2 {\n  margin: 4px;\n  color: #333;\n}\n.card-3 {\n  margin: 4px;\n  color: #333;\n}\n.card-4 {\n  margin: 4px;\n  color: #333;\n}\n.card-5 {\n  margin: 4px;\n  color: #333;\n}\n.card-6 {\n  margin: 4px;\n  color: #333;\n}\n.card-7 {\n  margin: 4px;\n  color: #333;\n}\n.card-8 {\n  margin: 4px;\n  color: #333;\n}\n.card-9 {\n  margin: 4px;\n  color: #333;\n}\n",
+      "head": ".card-0 {\n  margin: 8px;\n  color: #222;\n}\n.card-1 {\n  margin: 8px;\n  color: #222;\n}\n.card-2 {\n  margin: 8px;\n  color: #222;\n}\n.card-3 {\n  margin: 8px;\n  color: #222;\n}\n.card-4 {\n  margin: 8px;\n  color: #222;\n}\n.card-5 {\n  margin: 8px;\n  color: #222;\n}\n.card-6 {\n  margin: 8px;\n  color: #222;\n}\n.card-7 {\n  margin: 8px;\n  color: #222;\n}\n.card-8 {\n  margin: 8px;\n  color: #222;\n}\n.card-9 {\n  margin: 8px;\n  color: #222;\n}\n"
+    }
+  ]
+}

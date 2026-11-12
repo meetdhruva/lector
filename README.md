@@ -21,6 +21,7 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 - Sticky scroll headers, breadcrumbs, outline panel, symbol pickers
 - Go to definition, find references and hover — via your installed language servers,
   with a tags-based fallback that works with zero setup
+- Code completion and signature help from your language servers (Ctrl+Space, Ctrl+Shift+Space); snippets are off by default
 - Fuzzy file finder (nucleo), command palette, project search (ripgrep's engine)
 - Markdown preview, image preview, binary detection, instant opening of 1 GB+ files
 - Live reload when files change on disk (e.g. while an agent works)
@@ -266,7 +267,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
 | ✅ 0.4 | Headless core and command API, undo/Activity log, review queue, moved code, accessibility |
 | ✅ 0.5 | Agents (ACP), per-turn checkpoints, CLI and MCP server |
 | ✅ 0.6 | Pull request review (GitHub, GitLab), comments that survive rebases |
-| next | Screen readers (needs a GPUI version with AccessKit), WASM plugins, stacked changes, code completion |
+| next | Screen readers (needs a GPUI version with AccessKit), WASM plugins, stacked changes |
 
 ## License
 

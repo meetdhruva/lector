@@ -1,5 +1,5 @@
 //! Headless command line of Lector (v0.5): `lector status | changes | diff | commands | run |
-//! activity | undo | mcp`.
+//! activity | undo | mcp | health`.
 //!
 //! This crate has no GUI dependencies. It is used by two binaries:
 //!
@@ -23,6 +23,7 @@ use clap::Parser as _;
 
 mod args;
 mod changes;
+mod health;
 mod journal;
 mod mcp;
 mod out;
@@ -39,7 +40,7 @@ pub const JSON_SCHEMA_VERSION: u32 = 1;
 
 /// The subcommand names (first argument of `lector <subcommand>`).
 pub const SUBCOMMANDS: &[&str] = &[
-    "status", "changes", "diff", "commands", "run", "activity", "undo", "mcp",
+    "status", "changes", "diff", "commands", "run", "activity", "undo", "mcp", "health",
 ];
 
 /// Whether `arg` (the first argument after the program name) selects a CLI subcommand
@@ -66,6 +67,19 @@ pub fn is_cli_invocation(args: &[OsString]) -> bool {
     first.is_some_and(|a| is_subcommand(a))
 }
 
+/// Askpass helper mode: when git or ssh run Lector's askpass helper program (the Unix shim
+/// passes the hidden `--lector-askpass-helper` flag first; on Windows the hard link is named
+/// `lector-askpass.exe`), forwards the prompt to the running app's askpass server, prints the
+/// answer and returns the exit code. The environment alone never selects this mode, so a git
+/// hook that runs `lector <path>` during a sync opens Lector as usual.
+/// `None` for every other invocation. Both binaries call it first thing in `main`, before
+/// [`is_cli_invocation`]; it never touches GUI code. See `lector_process::askpass`.
+pub fn run_askpass_helper(args: &[OsString]) -> Option<ExitCode> {
+    let prompt = lector_process::askpass::askpass_prompt_from_args(args)?;
+    let code = lector_process::askpass::run_askpass_client(&prompt);
+    Some(ExitCode::from(u8::try_from(code).unwrap_or(2)))
+}
+
 /// Runs the CLI with the process's real streams. `args` includes the program name.
 pub fn run_args<I, T>(args: I) -> ExitCode
 where
@@ -73,6 +87,9 @@ where
     T: Into<OsString> + Clone,
 {
     // No `lock()`: the MCP server writes from its own thread and the lock is not shared.
+    // Crash reports for the headless paths too (CLI and `lector mcp`): local files only.
+    // Not in `run`, which tests call in-process.
+    lector_app::health::install_panic_hook();
     let mut out = io::stdout();
     let tty = out.is_terminal();
     let mut err = io::stderr();
@@ -122,6 +139,7 @@ where
         Command::Activity(a) => journal::run_activity(a, &mut io),
         Command::Undo(a) => journal::run_undo(a, &mut io),
         Command::Mcp(a) => mcp::run(a),
+        Command::Health(a) => health::run(a, &mut io),
     };
     match result {
         Ok(()) => 0,

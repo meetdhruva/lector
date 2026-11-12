@@ -169,7 +169,9 @@ pub fn effective_keymap() -> (Vec<KeySpec>, Vec<String>) {
 
 /// (Re)binds all keys from [`effective_keymap`]. Returns problems found.
 pub fn bind_effective_keymap(cx: &mut App) -> Vec<String> {
-    let (specs, mut warnings) = effective_keymap();
+    let (mut specs, mut warnings) = effective_keymap();
+    let extra = keymap::extension_bindings(cx, &specs);
+    specs.extend(extra);
     cx.clear_key_bindings();
     warnings.extend(keymap::bind_keymap(cx, &specs));
     for w in &warnings {

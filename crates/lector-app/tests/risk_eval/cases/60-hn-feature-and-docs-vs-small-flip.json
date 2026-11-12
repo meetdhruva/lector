@@ -1,0 +1,32 @@
+{
+  "id": "hn-feature-and-docs-vs-small-flip",
+  "split": "tune",
+  "category": "hard-negative",
+  "language": "rust",
+  "description": "A feature with new public API and tests plus doc updates must not outrank a one-line change that grants every role the admin limit.",
+  "risky": [
+    "src/limits.rs"
+  ],
+  "files": [
+    {
+      "path": "src/features/export.rs",
+      "base": "pub fn export_base(x: u32) -> u32 {\n    x + 1\n}\n",
+      "head": "pub fn export_base(x: u32) -> u32 {\n    x + 1\n}\n\npub fn export_0(x: u32) -> u32 {\n    export_base(x) * 2\n}\n\npub fn export_1(x: u32) -> u32 {\n    export_base(x) * 3\n}\n\npub fn export_2(x: u32) -> u32 {\n    export_base(x) * 4\n}\n\npub fn export_3(x: u32) -> u32 {\n    export_base(x) * 5\n}\n\npub fn export_4(x: u32) -> u32 {\n    export_base(x) * 6\n}\n\npub fn export_5(x: u32) -> u32 {\n    export_base(x) * 7\n}\n"
+    },
+    {
+      "path": "tests/export.rs",
+      "base": "use super::*;\n\n#[test]\nfn smoke() {\n    assert_eq!(1 + 1, 2);\n}\n",
+      "head": "use super::*;\n\n#[test]\nfn smoke() {\n    assert_eq!(1 + 1, 2);\n}\n\n#[test]\nfn case_0() {\n    let got = run_case(0).unwrap();\n    assert_eq!(got, 0);\n}\n\n#[test]\nfn case_1() {\n    let got = run_case(1).unwrap();\n    assert_eq!(got, 2);\n}\n\n#[test]\nfn case_2() {\n    let got = run_case(2).unwrap();\n    assert_eq!(got, 4);\n}\n\n#[test]\nfn case_3() {\n    let got = run_case(3).unwrap();\n    assert_eq!(got, 6);\n}\n\n#[test]\nfn case_4() {\n    let got = run_case(4).unwrap();\n    assert_eq!(got, 8);\n}\n\n#[test]\nfn case_5() {\n    let got = run_case(5).unwrap();\n    assert_eq!(got, 10);\n}\n"
+    },
+    {
+      "path": "src/limits.rs",
+      "base": "pub fn limit_for(role: &str) -> u32 {\n    match role {\n        \"admin\" => 1000,\n        \"member\" => 100,\n        _ => 10,\n    }\n}\n",
+      "head": "pub fn limit_for(role: &str) -> u32 {\n    match role {\n        \"admin\" => 1000,\n        \"member\" => 1000,\n        _ => 1000,\n    }\n}\n"
+    },
+    {
+      "path": "docs/export.md",
+      "base": "# Export\n\nStep 0: configure the Export option and restart the service.\n\nStep 1: configure the Export option and restart the service.\n\nStep 2: configure the Export option and restart the service.\n\nStep 3: configure the Export option and restart the service.\n\nStep 4: configure the Export option and restart the service.\n\nStep 5: configure the Export option and restart the service.\n\nStep 6: configure the Export option and restart the service.\n\nStep 7: configure the Export option and restart the service.\n\n",
+      "head": "# Export guide\n\nStep 0: configure the Export option, then restart the service and check the logs.\n\nStep 1: configure the Export option, then restart the service and check the logs.\n\nStep 2: configure the Export option, then restart the service and check the logs.\n\nStep 3: configure the Export option, then restart the service and check the logs.\n\nStep 4: configure the Export option, then restart the service and check the logs.\n\nStep 5: configure the Export option, then restart the service and check the logs.\n\nStep 6: configure the Export option, then restart the service and check the logs.\n\nStep 7: configure the Export option, then restart the service and check the logs.\n\n"
+    }
+  ]
+}

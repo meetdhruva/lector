@@ -36,3 +36,7 @@ criterion = { workspace = true, features = ["cargo_bench_support"] }
 [[bench]]
 name = "algo_bench"
 harness = false
+
+[[bench]]
+name = "structural_bench"
+harness = false

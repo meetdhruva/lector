@@ -15,6 +15,7 @@ lector-fs.workspace = true
 lector-syntax.workspace = true
 lector-diff.workspace = true
 lector-git = { workspace = true, features = ["serde"] }
+lector-process.workspace = true
 lector-search.workspace = true
 lector-lsp.workspace = true
 lector-config.workspace = true

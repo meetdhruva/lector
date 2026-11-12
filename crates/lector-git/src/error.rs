@@ -45,6 +45,16 @@ pub enum Error {
     /// Error reported by gitoxide while reading repository data.
     #[error("git: {0}")]
     Git(String),
+    /// A sync or branch operation (fetch, pull, push, switch, stash, ...) failed for a
+    /// reason the UI can act on (authentication, rejected push, local changes, ...).
+    #[error("{0}")]
+    Sync(Box<crate::sync::SyncError>),
+    /// The operation was cancelled; the git process tree was terminated.
+    #[error("cancelled")]
+    Cancelled,
+    /// The operation exceeded its timeout; the git process tree was terminated.
+    #[error("git timed out")]
+    TimedOut,
 }
 
 /// Result alias for this crate.

@@ -1,0 +1,32 @@
+{
+  "id": "go-test-skip-added",
+  "split": "tune",
+  "category": "tests-removed",
+  "language": "go",
+  "description": "The negative-path test is skipped.",
+  "risky": [
+    "internal/web/auth_test.go"
+  ],
+  "files": [
+    {
+      "path": "internal/stats/stats.go",
+      "base": "package util\n\nfunc Stat0(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 0 {\n\t\t\tacc += v * 1\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat1(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 1 {\n\t\t\tacc += v * 2\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat2(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 2 {\n\t\t\tacc += v * 3\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat3(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 3 {\n\t\t\tacc += v * 4\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat4(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 4 {\n\t\t\tacc += v * 5\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat5(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 5 {\n\t\t\tacc += v * 6\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat6(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 6 {\n\t\t\tacc += v * 7\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat7(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 7 {\n\t\t\tacc += v * 8\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat8(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 8 {\n\t\t\tacc += v * 9\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat9(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 9 {\n\t\t\tacc += v * 10\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat10(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 10 {\n\t\t\tacc += v * 11\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat11(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 11 {\n\t\t\tacc += v * 12\n\t\t}\n\t}\n\treturn acc\n}\n\n",
+      "head": "package util\n\nfunc Stat0(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 0 {\n\t\t\ttotal += value * 1\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat1(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 1 {\n\t\t\ttotal += value * 2\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat2(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 2 {\n\t\t\ttotal += value * 3\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat3(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 3 {\n\t\t\ttotal += value * 4\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat4(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 4 {\n\t\t\ttotal += value * 5\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat5(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 5 {\n\t\t\ttotal += value * 6\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat6(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 6 {\n\t\t\ttotal += value * 7\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat7(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 7 {\n\t\t\ttotal += value * 8\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat8(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 8 {\n\t\t\ttotal += value * 9\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat9(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 9 {\n\t\t\ttotal += value * 10\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat10(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 10 {\n\t\t\ttotal += value * 11\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat11(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 11 {\n\t\t\ttotal += value * 12\n\t\t}\n\t}\n\treturn total\n}\n\n"
+    },
+    {
+      "path": "pkg/extra/extra.go",
+      "base": "package extra\n\nfunc Base(x int) int {\n\treturn x + 1\n}\n",
+      "head": "package extra\n\nfunc Base(x int) int {\n\treturn x + 1\n}\n\nfunc Scale0(x int) int {\n\treturn Base(x) * 2\n}\n\nfunc Scale1(x int) int {\n\treturn Base(x) * 3\n}\n\nfunc Scale2(x int) int {\n\treturn Base(x) * 4\n}\n\nfunc Scale3(x int) int {\n\treturn Base(x) * 5\n}\n\nfunc Scale4(x int) int {\n\treturn Base(x) * 6\n}\n"
+    },
+    {
+      "path": "internal/web/auth_test.go",
+      "base": "package auth\n\nimport \"testing\"\n\nfunc TestLoginRejectsBadPassword(t *testing.T) {\n\tif _, err := Login(\"bob\", \"wrong\"); err == nil {\n\t\tt.Fatal(\"expected error\")\n\t}\n}\n\nfunc TestLoginAcceptsGoodPassword(t *testing.T) {\n\tif _, err := Login(\"bob\", \"right\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n",
+      "head": "package auth\n\nimport \"testing\"\n\nfunc TestLoginRejectsBadPassword(t *testing.T) {\n\tt.Skip(\"flaky\")\n\tif _, err := Login(\"bob\", \"wrong\"); err == nil {\n\t\tt.Fatal(\"expected error\")\n\t}\n}\n\nfunc TestLoginAcceptsGoodPassword(t *testing.T) {\n\tif _, err := Login(\"bob\", \"right\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "base": "# Changelog\n\n## 1.4.0\n\n- Added caching\n",
+      "head": "# Changelog\n\n## 1.5.0\n\n- Fixed typos\n- Improved logging\n\n## 1.4.0\n\n- Added caching\n"
+    }
+  ]
+}

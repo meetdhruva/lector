@@ -1,0 +1,10 @@
+# PLACEHOLDER: no update-signing key has been generated yet.
+#
+# This file is compiled into Lector (crates/lector-forge/src/releases.rs) and holds the minisign
+# PUBLIC key that verifies SHA256SUMS.txt.minisig of every release. While it contains no key line
+# (a line that is not blank, not a '#' comment and not an "untrusted comment:" line), Lector can
+# not verify downloads and never reports one as verified.
+#
+# To create the key pair run `scripts/gen-update-key.sh`, replace this file with the two lines of
+# the generated .pub file, store the secret key as the GitHub secret UPDATE_SIGNING_KEY and read
+# docs/RELEASING.md ("Update signing key"). Never commit the secret key.

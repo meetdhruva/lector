@@ -124,6 +124,7 @@ pub struct ChangesPanel {
     pending_select: Option<usize>,
     composer: Entity<CommitComposer>,
     banner: Entity<OperationBanner>,
+    sync_bar: Option<Entity<crate::sync::SyncPanelBar>>,
     menu: ContextMenuState,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -172,8 +173,14 @@ impl ChangesPanel {
             let (store, composer) = (store.clone(), composer.clone());
             cx.new(|cx| OperationBanner::new(store, composer, cx))
         };
+        let sync_bar = store
+            .read(cx)
+            .sync
+            .clone()
+            .map(|c| cx.new(|cx| crate::sync::SyncPanelBar::new(c, cx)));
         let mut panel = ChangesPanel {
             store,
+            sync_bar,
             mode: ChangesMode::WorkingTree,
             content: None,
             rows: Rc::new(Vec::new()),
@@ -1481,6 +1488,7 @@ impl Render for ChangesPanel {
                     .gap(px(6.))
                     .border_b_1()
                     .border_color(ui.border_variant.hsla())
+                    .children(self.sync_bar.clone())
                     .child(
                         h_flex()
                             .gap(px(4.))

@@ -15,7 +15,8 @@ lector-ui.workspace = true
 lector-app.workspace = true
 futures = "0.3"
 lector-workspace.workspace = true
-lector-git.workspace = true
+lector-git = { workspace = true, features = ["serde"] }
+lector-process.workspace = true
 lector-diff.workspace = true
 lector-text.workspace = true
 lector-buffer.workspace = true

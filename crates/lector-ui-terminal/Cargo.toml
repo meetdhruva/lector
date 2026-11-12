@@ -1,0 +1,27 @@
+[package]
+name = "lector-ui-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "GPUI terminal view and panel for Lector."
+
+[dependencies]
+gpui = "0.2.2"
+lector-ui.workspace = true
+lector-terminal.workspace = true
+lector-config.workspace = true
+lector-theme.workspace = true
+futures = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+lector-config = { workspace = true, features = ["test-support"] }
+gpui = { version = "0.2.2", features = ["test-support"] }
+tempfile.workspace = true
+lector-workspace.workspace = true

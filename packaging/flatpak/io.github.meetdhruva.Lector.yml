@@ -1,0 +1,61 @@
+# Flatpak manifest for Lector, built from the release tarball (prebuilt binaries).
+#
+# Template: scripts/gen-package-manifests.sh fills the version and the two tarball checksums
+# (the three @...@ placeholders below) from a release and attaches the result to it as io.github.meetdhruva.Lector.yml.
+#   flatpak-builder --user --install --force-clean build-dir io.github.meetdhruva.Lector.yml
+#
+# NOT TESTED by the maintainers' CI yet (flatpak-builder is not run there), and not suitable for
+# Flathub as is: Flathub builds from source (cargo vendored sources, no network during the build).
+# This manifest is for local/sideloaded installs and as the starting point for a Flathub submission.
+# docs/RELEASING.md ("Flatpak") lists what is known and unknown.
+app-id: io.github.meetdhruva.Lector
+# Check https://docs.flathub.org/docs/for-app-authors/runtimes for the current runtime; the
+# release binaries are built on Ubuntu 22.04 (glibc 2.35) and use libxcb, libxkbcommon(-x11),
+# libvulkan, fontconfig and (optionally, via dlopen) libwayland-client, all part of the runtime.
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: lector
+
+finish-args:
+  # Windowing: Wayland when available, X11 (with shared memory) as the fallback.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # GPU: Lector renders with Vulkan (GPUI/blade); needs the DRI render nodes.
+  - --device=dri
+  # Network: pull-request review talks to GitHub/GitLab, and the (opt-in) update check to GitHub.
+  - --share=network
+  # Files: a code viewer must open projects anywhere, so this asks for the whole host filesystem
+  # (what editors such as VS Code and Zed do). Trade-off: the sandbox no longer protects your files
+  # from Lector. Narrower alternatives: --filesystem=home, or no filesystem permission and open
+  # folders through the file chooser portal (each folder is then granted individually, but git
+  # worktrees, symlinks out of the folder and sibling repositories are not reachable).
+  - --filesystem=host
+  # Deliberately NOT granted: --talk-name=org.freedesktop.Flatpak (flatpak-spawn --host). It would
+  # let Lector run the host's git and language servers, but it is a complete sandbox escape: any
+  # code in the sandbox could then run arbitrary host commands. Enable it yourself only if you
+  # accept that: `flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.meetdhruva.Lector`
+  # (Lector does not use flatpak-spawn today, so that alone changes nothing).
+
+modules:
+  # Lector shells out to `git` for everything git related, and to language servers (rust-analyzer,
+  # gopls, ...) for code intelligence. Neither exists inside this sandbox: the freedesktop runtime
+  # has no git, and the host's programs are invisible. Without git most review features fail. To add
+  # git to the sandbox, add a module that builds it from a release tarball (kernel.org or GitHub)
+  # with `make prefix=/app NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 install`, with a sha256 you
+  # have checked; it is not included because it could not be built and tested here.
+  - name: lector
+    buildsystem: simple
+    build-commands:
+      # The tarball's installer lays out bin/, share/applications, share/metainfo and share/icons.
+      - ./install.sh /app
+    sources:
+      - type: archive
+        url: https://github.com/meetdhruva/lector/releases/download/v@VERSION@/lector-@VERSION@-linux-x86_64.tar.gz
+        sha256: @X86_64_SHA256@
+        only-arches: [x86_64]
+      - type: archive
+        url: https://github.com/meetdhruva/lector/releases/download/v@VERSION@/lector-@VERSION@-linux-aarch64.tar.gz
+        sha256: @AARCH64_SHA256@
+        only-arches: [aarch64]

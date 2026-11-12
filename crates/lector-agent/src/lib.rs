@@ -22,11 +22,13 @@ pub mod commands;
 pub mod config;
 pub mod context;
 mod error;
+pub mod inline_edit;
 pub mod manager;
 pub mod model;
 pub mod paths;
 pub mod rpc;
 pub mod session;
+pub mod summary;
 
 pub use config::{available_configs, AgentConfig};
 pub use error::AgentError;

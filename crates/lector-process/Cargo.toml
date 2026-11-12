@@ -1,0 +1,42 @@
+[package]
+name = "lector-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Child process supervision for Lector: spawn, stream, cancel and kill whole process trees; askpass prompts."
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+# Process groups / sessions (Unix) and Job Objects (Windows) without `unsafe` in this crate.
+# 8.2.x supports Rust 1.77 (10.x needs 1.87, above the workspace MSRV). `tracing` is required:
+# the Windows job-object code uses its macros unconditionally.
+process-wrap = { version = "8.2.2", default-features = false, features = [
+    "std",
+    "process-group",
+    "process-session",
+    "job-object",
+    "creation-flags",
+    "tracing",
+] }
+# Askpass session token.
+getrandom = "0.3.4"
+# Askpass answers and frames are wiped from memory after use.
+zeroize = "1.8"
+
+[target.'cfg(windows)'.dependencies]
+# `CREATE_NO_WINDOW` for `process_wrap::std::CreationFlags`; same version process-wrap uses.
+windows = { version = "0.61.3", features = ["Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[test]]
+name = "askpass_git"
+path = "tests/askpass_git.rs"
+# Own `main`: the test binary doubles as the askpass helper that git invokes.
+harness = false

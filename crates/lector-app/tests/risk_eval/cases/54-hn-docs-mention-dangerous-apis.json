@@ -1,0 +1,32 @@
+{
+  "id": "hn-docs-mention-dangerous-apis",
+  "split": "tune",
+  "category": "hard-negative",
+  "language": "typescript",
+  "description": "Docs that mention eval() and unsafe must not outrank a real innerHTML injection.",
+  "risky": [
+    "src/render.ts"
+  ],
+  "files": [
+    {
+      "path": "docs/security.md",
+      "base": "# Security\n\nNever call eval(userInput). In Rust avoid unsafe blocks and .unwrap() on user data.\n",
+      "head": "# Security\n\nNever call eval(userInput) or new Function(userInput). In Rust avoid unsafe blocks and .unwrap() on user data.\nShell commands built with child_process.exec(`${name}`) are injection risks.\n"
+    },
+    {
+      "path": "src/render.ts",
+      "base": "export function show(el: HTMLElement, text: string): void {\n  el.textContent = text;\n}\n",
+      "head": "export function show(el: HTMLElement, text: string): void {\n  el.innerHTML = text;\n}\n"
+    },
+    {
+      "path": "src/format.ts",
+      "base": "function fmt0(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 0) {\n      acc += v * 1;\n    }\n  }\n  return acc;\n}\n\nfunction fmt1(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 1) {\n      acc += v * 2;\n    }\n  }\n  return acc;\n}\n\nfunction fmt2(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 2) {\n      acc += v * 3;\n    }\n  }\n  return acc;\n}\n\nfunction fmt3(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 3) {\n      acc += v * 4;\n    }\n  }\n  return acc;\n}\n\nfunction fmt4(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 4) {\n      acc += v * 5;\n    }\n  }\n  return acc;\n}\n\nfunction fmt5(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 5) {\n      acc += v * 6;\n    }\n  }\n  return acc;\n}\n\nfunction fmt6(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 6) {\n      acc += v * 7;\n    }\n  }\n  return acc;\n}\n\nfunction fmt7(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 7) {\n      acc += v * 8;\n    }\n  }\n  return acc;\n}\n\nfunction fmt8(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 8) {\n      acc += v * 9;\n    }\n  }\n  return acc;\n}\n\nfunction fmt9(values: number[]): number {\n  let acc = 0;\n  for (const v of values) {\n    if (v > 9) {\n      acc += v * 10;\n    }\n  }\n  return acc;\n}\n\n",
+      "head": "function fmt0(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 0) {\n      total += value * 1;\n    }\n  }\n  return total;\n}\n\nfunction fmt1(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 1) {\n      total += value * 2;\n    }\n  }\n  return total;\n}\n\nfunction fmt2(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 2) {\n      total += value * 3;\n    }\n  }\n  return total;\n}\n\nfunction fmt3(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 3) {\n      total += value * 4;\n    }\n  }\n  return total;\n}\n\nfunction fmt4(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 4) {\n      total += value * 5;\n    }\n  }\n  return total;\n}\n\nfunction fmt5(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 5) {\n      total += value * 6;\n    }\n  }\n  return total;\n}\n\nfunction fmt6(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 6) {\n      total += value * 7;\n    }\n  }\n  return total;\n}\n\nfunction fmt7(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 7) {\n      total += value * 8;\n    }\n  }\n  return total;\n}\n\nfunction fmt8(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 8) {\n      total += value * 9;\n    }\n  }\n  return total;\n}\n\nfunction fmt9(values: number[]): number {\n  let total = 0;\n  for (const value of values) {\n    if (value > 9) {\n      total += value * 10;\n    }\n  }\n  return total;\n}\n\n"
+    },
+    {
+      "path": "web/styles.css",
+      "base": ".card-0 {\n  margin: 4px;\n  color: #333;\n}\n.card-1 {\n  margin: 4px;\n  color: #333;\n}\n.card-2 {\n  margin: 4px;\n  color: #333;\n}\n.card-3 {\n  margin: 4px;\n  color: #333;\n}\n.card-4 {\n  margin: 4px;\n  color: #333;\n}\n.card-5 {\n  margin: 4px;\n  color: #333;\n}\n.card-6 {\n  margin: 4px;\n  color: #333;\n}\n.card-7 {\n  margin: 4px;\n  color: #333;\n}\n.card-8 {\n  margin: 4px;\n  color: #333;\n}\n.card-9 {\n  margin: 4px;\n  color: #333;\n}\n",
+      "head": ".card-0 {\n  margin: 8px;\n  color: #222;\n}\n.card-1 {\n  margin: 8px;\n  color: #222;\n}\n.card-2 {\n  margin: 8px;\n  color: #222;\n}\n.card-3 {\n  margin: 8px;\n  color: #222;\n}\n.card-4 {\n  margin: 8px;\n  color: #222;\n}\n.card-5 {\n  margin: 8px;\n  color: #222;\n}\n.card-6 {\n  margin: 8px;\n  color: #222;\n}\n.card-7 {\n  margin: 8px;\n  color: #222;\n}\n.card-8 {\n  margin: 8px;\n  color: #222;\n}\n.card-9 {\n  margin: 8px;\n  color: #222;\n}\n"
+    }
+  ]
+}

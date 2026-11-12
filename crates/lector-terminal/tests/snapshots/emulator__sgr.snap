@@ -1,0 +1,21 @@
+---
+source: crates/lector-terminal/tests/emulator.rs
+expression: dump(&e.snapshot())
+---
+00|red bold-ul 256|
+   col 0 +3 "red" fg=Indexed(1) bg=Background attrs=0x00 ul=None
+   col 4 +7 "bold-ul" fg=Foreground bg=Background attrs=0x01 ul=Single
+   col 12 +3 "256" fg=Indexed(208) bg=Background attrs=0x00 ul=None
+01|true ital inv|
+   col 0 +4 "true" fg=Rgb(10, 20, 30) bg=Rgb(200, 100, 0) attrs=0x00 ul=None
+   col 5 +4 "ital" fg=Foreground bg=Background attrs=0x26 ul=None
+   col 10 +3 "inv" fg=Foreground bg=Background attrs=0x08 ul=None
+02|curl dbl hid bright|
+   col 0 +4 "curl" fg=Foreground bg=Background attrs=0x00 ul=Curly
+   col 5 +3 "dbl" fg=Foreground bg=Background attrs=0x00 ul=Double
+   col 9 +3 "hid" fg=Foreground bg=Background attrs=0x10 ul=None
+   col 13 +6 "bright" fg=Indexed(12) bg=Indexed(9) attrs=0x00 ul=None
+03||
+04||
+05||
+cursor 2,19 visible=true

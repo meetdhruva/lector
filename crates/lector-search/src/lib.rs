@@ -15,6 +15,8 @@ mod cancel;
 mod globs;
 mod grep;
 mod picker;
+mod picker_plan;
+mod picker_store;
 mod trigram;
 mod walk;
 
@@ -23,7 +25,7 @@ pub use grep::{
     find_in_text, replacements_in_text, search_files, search_project, CaseMode, FileMatches,
     LineMatch, SearchError, SearchEvent, SearchQuery,
 };
-pub use picker::{Picker, PickerInjector, PickerMatch, MAX_RESULTS};
+pub use picker::{Picker, PickerInjector, PickerMatch, PickerProgress, MAX_RESULTS};
 pub use trigram::{
     Candidates, RefreshStats, TrigramError, TrigramIndex, UpdateOutcome, FORMAT_VERSION,
     MAX_INDEXED_FILE_SIZE,

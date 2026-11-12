@@ -43,6 +43,8 @@ pub struct GitStore {
     pub generation: u64,
     /// The git views of this window (set by `init`).
     pub views: Option<crate::GitViews>,
+    /// Fetch / pull / push, branches and stash of this window (v0.7, set by `init`).
+    pub sync: Option<Entity<crate::sync::SyncController>>,
     /// Risk analysis of the working tree and the "new changes" state (v0.4 review UX).
     pub review_model: Entity<ReviewModel>,
     state: Option<Arc<RepoState>>,
@@ -119,6 +121,7 @@ impl GitStore {
             review: core.review_store(),
             generation: 0,
             views: None,
+            sync: None,
             review_model: cx.new(|_| ReviewModel::new()),
             state,
             _subscriptions: subscriptions,

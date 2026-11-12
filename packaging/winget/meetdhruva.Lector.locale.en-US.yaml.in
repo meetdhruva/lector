@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+# Template: scripts/gen-package-manifests.sh fills the @...@ values from a release.
+PackageIdentifier: meetdhruva.Lector
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Lector contributors
+PublisherUrl: https://github.com/meetdhruva
+PublisherSupportUrl: https://github.com/meetdhruva/lector/issues
+Author: Lector contributors
+PackageName: Lector
+PackageUrl: https://github.com/meetdhruva/lector
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/meetdhruva/lector/blob/main/LICENSE-MIT
+Copyright: Copyright (c) Lector contributors
+ShortDescription: Fast, reading-first code viewer and git review tool.
+Description: Lector is built for reading and reviewing code rather than typing it - understanding an unfamiliar codebase, following definitions, and reviewing changes made by people or AI agents. Syntax highlighting, symbol navigation, project search, side-by-side diffs, review checklists, history graph and blame.
+Moniker: lector
+Tags:
+  - code-viewer
+  - code-review
+  - diff
+  - git
+  - developer-tools
+ReleaseNotesUrl: https://github.com/meetdhruva/lector/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

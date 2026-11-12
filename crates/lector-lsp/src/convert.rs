@@ -394,7 +394,7 @@ pub(crate) fn publish_diagnostics(
     Some((path, version, diags))
 }
 
-fn command(v: &Value) -> Option<Command> {
+pub(crate) fn command(v: &Value) -> Option<Command> {
     Some(Command {
         title: str_field(v, "title").unwrap_or_default(),
         command: str_field(v, "command")?,
@@ -534,6 +534,8 @@ pub(crate) fn server_capabilities(init_result: &Value) -> ServerCapabilities {
                     .collect()
             })
             .unwrap_or_default(),
+        completion: crate::completion::completion_capabilities(caps),
+        signature_help: crate::completion::signature_capabilities(caps),
     }
 }
 

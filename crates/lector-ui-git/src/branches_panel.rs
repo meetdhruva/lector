@@ -9,7 +9,7 @@ use gpui::{
     MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
 };
 use lector_git::{Branch, Changeset, LogQuery, Oid, Repo, Stash, Tag};
-use lector_ui::actions::picker as picker_actions;
+use lector_ui::actions::{git as git_actions, picker as picker_actions};
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::list::{virtual_list, VirtualListState};
 use lector_ui::components::{h_flex, metrics, IconButton, Tooltip};
@@ -22,6 +22,14 @@ use lector_ui::{ActiveTheme, ColorExt};
 use crate::history_panel::HistoryScope;
 use crate::store::{GitStore, GitStoreEvent};
 use crate::util::{now_secs, short_relative_time};
+
+/// Which kind of ref a context menu is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefRow {
+    Local,
+    Remote,
+    Tag,
+}
 
 /// A local branch with its upstream divergence.
 #[derive(Clone, Debug)]
@@ -287,41 +295,133 @@ impl BranchesPanel {
             return;
         };
         let position = self.list.row_anchor(ix, metrics::row_height());
-        let (name, oid, is_branch) = match self.rows.get(ix).cloned() {
+        let (name, oid, kind) = match self.rows.get(ix).cloned() {
             Some(Row::Local(i)) => {
                 let b = &self.data.local[i].branch;
-                (b.name.clone(), b.oid, true)
+                (b.name.clone(), b.oid, RefRow::Local)
             }
             Some(Row::Remote(i)) => {
                 let b = &self.data.remote[i];
-                (b.name.clone(), b.oid, true)
+                (b.name.clone(), b.oid, RefRow::Remote)
             }
             Some(Row::Tag(i)) => {
                 let t = &self.data.tags[i];
-                (t.name.clone(), t.oid, false)
+                (t.name.clone(), t.oid, RefRow::Tag)
+            }
+            Some(Row::Stash(i)) => {
+                let oid = self.data.stashes[i].oid;
+                self.deploy_stash_menu(oid, position, window, cx);
+                return;
             }
             _ => return,
         };
-        self.deploy_ref_menu(name, oid, is_branch, position, window, cx);
+        self.deploy_ref_menu(name, oid, kind, position, window, cx);
+    }
+
+    /// Apply / Pop / Drop (undoable) / Open for a stash row.
+    fn deploy_stash_menu(
+        &mut self,
+        oid: Oid,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let sync = self.store.read(cx).sync.clone();
+        let menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
+            let s = store.clone();
+            menu = menu.icon_entry("Open Stash", IconName::Archive, move |window, cx| {
+                crate::review_tab::open_commit_tab(&s, oid, false, window, cx);
+            });
+            if let Some(sync) = sync {
+                menu = menu.separator();
+                for (label, verb, command) in [
+                    ("Apply Stash", "Apply", "git.stash_apply"),
+                    ("Pop Stash", "Pop", "git.stash_pop"),
+                    ("Drop Stash", "Drop", "git.stash_drop"),
+                ] {
+                    let sync = sync.clone();
+                    menu = menu.entry(label, move |_, cx| {
+                        sync.update(cx, |c, cx| c.stash_op(verb, command, oid.to_string(), cx))
+                    });
+                }
+            }
+            menu
+        });
+        self.menu
+            .deploy(menu, position, window, cx, |this: &mut Self| &mut this.menu);
+        cx.notify();
     }
 
     fn deploy_ref_menu(
         &mut self,
         name: String,
         oid: Oid,
-        is_branch: bool,
+        kind: RefRow,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let is_branch = kind != RefRow::Tag;
         let this = cx.entity().downgrade();
         let current = self.current_branch(cx);
         let store = self.store.clone();
+        let sync = self.store.read(cx).sync.clone();
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
             let (t1, t2, n1, n2) = (this.clone(), this.clone(), name.clone(), name.clone());
             let n3 = name.clone();
             let s = store.clone();
-            let mut menu = menu.icon_entry("Show Log", IconName::History, move |window, cx| {
+            let mut menu = menu;
+            let is_current = current.as_deref() == Some(name.as_str());
+            if let Some(sync) = sync.clone() {
+                match kind {
+                    RefRow::Local if !is_current => {
+                        let (c1, b1) = (sync.clone(), name.clone());
+                        menu = menu.icon_entry(
+                            format!("Switch to {name}"),
+                            IconName::GitBranch,
+                            move |window, cx| {
+                                c1.update(cx, |c, cx| c.switch_branch(b1.clone(), window, cx))
+                            },
+                        );
+                    }
+                    RefRow::Local => {
+                        menu = menu
+                            .icon_action("Push", IconName::ArrowUp, Box::new(git_actions::Push))
+                            .action("Publish Branch", Box::new(git_actions::PublishBranch))
+                            .action("Set Upstream…", Box::new(git_actions::SetUpstream));
+                    }
+                    RefRow::Remote => {
+                        let (c1, b1) = (sync.clone(), name.clone());
+                        menu = menu.icon_entry(
+                            "Check Out as Local Branch",
+                            IconName::GitBranch,
+                            move |window, cx| {
+                                c1.update(cx, |c, cx| c.checkout_remote(b1.clone(), window, cx))
+                            },
+                        );
+                    }
+                    RefRow::Tag => {}
+                }
+                if kind == RefRow::Local {
+                    let (c2, b2) = (sync.clone(), name.clone());
+                    menu = menu.entry("Rename…", move |window, cx| {
+                        c2.update(cx, |c, cx| {
+                            c.rename_branch_dialog(Some(b2.clone()), window, cx)
+                        })
+                    });
+                    if !is_current {
+                        let (c3, b3) = (sync.clone(), name.clone());
+                        menu = menu.entry("Delete…", move |window, cx| {
+                            c3.update(cx, |c, cx| c.delete_branch(b3.clone(), window, cx))
+                        });
+                    }
+                }
+                if kind != RefRow::Tag {
+                    menu = menu.separator();
+                }
+            }
+            menu = menu.icon_entry("Show Log", IconName::History, move |window, cx| {
                 let _ = t1.update(cx, |p, cx| p.show_log(n1.clone(), window, cx));
             });
             if current.as_deref() != Some(name.as_str()) && current.is_some() {
@@ -510,7 +610,14 @@ impl BranchesPanel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            this.deploy_ref_menu(n2.clone(), oid, true, e.position, window, cx);
+                            this.deploy_ref_menu(
+                                n2.clone(),
+                                oid,
+                                RefRow::Local,
+                                e.position,
+                                window,
+                                cx,
+                            );
                             cx.stop_propagation();
                         }),
                     )
@@ -536,7 +643,14 @@ impl BranchesPanel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            this.deploy_ref_menu(n2.clone(), oid, true, e.position, window, cx);
+                            this.deploy_ref_menu(
+                                n2.clone(),
+                                oid,
+                                RefRow::Remote,
+                                e.position,
+                                window,
+                                cx,
+                            );
                             cx.stop_propagation();
                         }),
                     )
@@ -562,7 +676,14 @@ impl BranchesPanel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            this.deploy_ref_menu(n2.clone(), oid, false, e.position, window, cx);
+                            this.deploy_ref_menu(
+                                n2.clone(),
+                                oid,
+                                RefRow::Tag,
+                                e.position,
+                                window,
+                                cx,
+                            );
                             cx.stop_propagation();
                         }),
                     )
@@ -589,6 +710,13 @@ impl BranchesPanel {
                             cx,
                         );
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            this.deploy_stash_menu(oid, e.position, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
                     .into_any_element()
             }
             None => div().into_any_element(),
@@ -676,6 +804,28 @@ impl Render for BranchesPanel {
                                             None => "no upstream".into(),
                                         }),
                                 ),
+                        )
+                        .child(
+                            IconButton::new("branches-new", IconName::Plus)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::for_action(
+                                    "New Branch…",
+                                    &git_actions::NewBranch,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(git_actions::NewBranch), cx)
+                                }),
+                        )
+                        .child(
+                            IconButton::new("branches-stash", IconName::Archive)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::for_action(
+                                    "Stash Changes…",
+                                    &git_actions::StashChanges,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(git_actions::StashChanges), cx)
+                                }),
                         )
                         .child(
                             IconButton::new("branches-refresh", IconName::Refresh)

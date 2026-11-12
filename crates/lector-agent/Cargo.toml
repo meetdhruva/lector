@@ -15,6 +15,9 @@ lector-workspace.workspace = true
 lector-config.workspace = true
 lector-diff.workspace = true
 lector-fs.workspace = true
+lector-process.workspace = true
+lector-buffer.workspace = true
+lector-syntax.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -24,4 +27,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
 lector-config = { workspace = true, features = ["test-support"] }

@@ -18,9 +18,13 @@ lector-workspace.workspace = true
 lector-git.workspace = true
 lector-diff.workspace = true
 lector-config.workspace = true
+lector-buffer.workspace = true
+lector-forge.workspace = true
+serde.workspace = true
 futures = "0.3"
 serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 lector-config = { workspace = true, features = ["test-support"] }

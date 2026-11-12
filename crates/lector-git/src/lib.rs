@@ -13,11 +13,15 @@
 //! * No panics on repository data; all failures are [`Error`]s.
 //! * Line numbers are 0-based `u32`; paths are repository-relative with `/`.
 //!
-//! This crate has no dependency on other Lector crates.
+//! Network and branch operations (v0.7: [`sync`], fetch / pull / push / branches / stash)
+//! also use the CLI, run under `lector-process` (cancellable, whole process tree killed).
+//!
+//! This crate depends only on `lector-process` among Lector crates.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod branch;
 mod changes;
 mod cli;
 mod conflict;
@@ -26,9 +30,11 @@ mod graph;
 mod log;
 mod oid;
 mod permalink;
+mod proc;
 mod repo;
 pub mod shadow;
 mod status;
+pub mod sync;
 mod types;
 pub mod write;
 
@@ -47,3 +53,13 @@ pub use types::{
     LogQuery, RefKind, RefLabel, Remote, Side, Signature, Stash, StatusEntry, Tag,
 };
 pub use write::{CommitOptions, PatchTarget};
+
+pub use branch::{BranchSwitch, DeletedBranch, StashApplied, StashPushOptions};
+/// Cancellation token of git network / branch operations ([`SyncOptions::cancel`]).
+pub use lector_process::CancelToken;
+pub use proc::SyncOptions;
+pub use sync::{
+    FetchOptions, FetchOutcome, Progress, PullMode, PullOutcome, PullStatus, PushOptions,
+    PushOutcome, PushRefStatus, PushedRef, RefUpdate, SyncError, SyncErrorKind, SyncEvent,
+    UpstreamStatus,
+};

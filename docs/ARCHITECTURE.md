@@ -25,10 +25,12 @@ review state live under the platform config/data directories.
                ├─ lector-config   settings, keymaps, paths, session store
                ├─ lector-theme    theme model + built-in themes
                ├─ lector-icons    Material file icons + UI icons (SVG bytes)
-               └─ lector-text     SumTree, Rope, mmap text, coordinates (no internal deps)
+               ├─ lector-text     SumTree, Rope, mmap text, coordinates (no internal deps)
+               └─ lector-process  child processes: process trees, streaming, cancel, askpass (no internal deps)
    ```
    Allowed internal edges: `syntax→text`, `fs→text`, `diff→(none)`, `search→text?`,
-   `workspace→all core`, `ui→all`. Nothing depends on `ui`.
+   `git→process`, `lsp→process`, `agent→process` (v0.7), `workspace→all core`, `ui→all`.
+   Nothing depends on `ui`.
 3. **Snapshots, not locks.** Text is immutable and cheaply clonable (`Arc`).
    Background work (parse, highlight, diff, git, search) runs on snapshots and
    results are tagged with the snapshot version; stale results are dropped.
@@ -467,6 +469,252 @@ with that version (`None` when they refer to an older text); without a handler `
 `applied: false`. Tests: `tests/editing.rs` against `tests/fixtures/fake_lsp.py --editing` (diagnostics, formatting,
 code actions + resolve + commands → applyEdit, prepare/rename across files) and an ignored real-`pylsp` test.
 
+### Completion and signature help (v0.7) — lector-lsp, lector-config — as implemented
+
+Product rules: completion comes **only from language servers** (no AI source); snippets are **off by default**; nothing is
+requested or written on open or focus: a request is the result of typing, a trigger character or Ctrl+Space, and the buffer
+changes only when the user accepts an item. `lector-lsp` stays UI-free and runtime-agnostic; the popup is built by `lector-ui` on
+the types below. `lector-lsp` has its own small fuzzy matcher (`fuzzy.rs`, fzy-style scoring) because `lector-search` sits above it
+in the layering and pulls in the walker and grep stack.
+
+```rust
+// ---- requests (lector_lsp::LspManager; futures are Send + 'static, nothing is sent until the document is synced) ----
+impl LspManager {
+    pub fn completion(&self, path: &Path, req: CompletionRequest, cancel: Option<&CancelToken>)
+        -> impl Future<Output = Result<RequestOutcome<CompletionResponse>>>;
+    pub fn resolve_completion(&self, path: &Path, item: &CompletionItem, cancel: Option<&CancelToken>)
+        -> impl Future<Output = Result<RequestOutcome<ResolvedCompletion>>>;
+    pub fn signature_help(&self, path: &Path, req: SignatureRequest, cancel: Option<&CancelToken>)
+        -> impl Future<Output = Result<RequestOutcome<Option<SignatureHelp>>>>;   // Done(None): no signature here, close
+    pub fn set_completion_snippets(&self, enabled: bool);   // advertised at `initialize`: servers started afterwards
+}
+pub enum RequestOutcome<T> { Done(T), Cancelled, Stale, Unavailable }   // done(), is_done()
+pub struct CancelToken;   // Clone; new(), cancel(), is_cancelled(). Cancelling sends $/cancelRequest and ends the future at once
+pub enum CompletionTrigger { Invoked /*typed identifier char, Ctrl+Space*/, TriggerCharacter(char), Incomplete }
+pub struct CompletionRequest { pub pos: PointUtf16 /* UTF-16 caret */, pub trigger: CompletionTrigger }
+pub struct CompletionResponse { pub items: Vec<CompletionItem>, pub is_incomplete: bool, pub request_pos: PointUtf16,
+                                pub doc_version: i32, pub tag: Option<u64>, pub resolve_supported: bool }
+pub struct CompletionItem { pub label: String, pub label_details: Option<LabelDetails { detail, description }>, pub kind: CompletionKind,
+    pub detail: Option<String>, pub documentation: Option<Documentation { value, markdown }>, pub deprecated: bool /* flag or tag 1 */,
+    pub preselect: bool, pub sort_text: Option<String>, pub filter_text: Option<String>, pub insert_text: Option<String>,
+    pub format: InsertFormat /* PlainText | Snippet */, pub insert_mode: InsertTextMode /* AsIs | AdjustIndentation (default) */,
+    pub edit: Option<ItemEdit { insert: Range<PointUtf16>, replace: Range<PointUtf16>, new_text }>,
+    pub additional_edits: Vec<TextEdit>, pub commit_characters: Vec<char>, pub command: Option<Command>,
+    pub resolved: bool, pub raw: serde_json::Value /* sent back for resolve */ }
+pub enum CompletionKind { Text, Method, Function, Constructor, Field, Variable, Class, Interface, Module, Property, Unit, Value,
+    Enum, Keyword, Snippet, Color, File, Reference, Folder, EnumMember, Constant, Struct, Event, Operator, TypeParameter, Other }
+pub struct ResolvedCompletion { pub detail, pub documentation, pub additional_edits: Vec<TextEdit>, pub label_details,
+                                pub doc_version: i32, pub tag: Option<u64> }
+// ServerCapabilities gained `completion: Option<CompletionCapabilities { trigger_characters, all_commit_characters, resolve }>`
+// (is_trigger(c)) and `signature_help: Option<SignatureHelpCapabilities { trigger_characters, retrigger_characters }>`.
+```
+
+*Client capabilities* (declared only for what is implemented): completion `contextSupport`, `insertTextMode: 2`, `completionItem`
+`{ snippetSupport: <setting, default false>, commitCharactersSupport, documentationFormat [markdown, plaintext], deprecatedSupport,
+preselectSupport, tagSupport [1], insertReplaceSupport, resolveSupport [documentation, detail, additionalTextEdits],
+insertTextModeSupport [1, 2], labelDetailsSupport }`, `completionItemKind` 1..25, `completionList.itemDefaults` `[commitCharacters,
+editRange, insertTextFormat, insertTextMode, data]` (applied per item when parsing; `data` is merged into the item's `raw` so resolve
+works; `textEditText` becomes the edit's text); signature help `contextSupport`, `activeParameterSupport`, `labelOffsetSupport`,
+markdown/plaintext documentation. `completionItem/resolve` is only sent when the server has `resolveProvider`, only for items not
+yet resolved, and only `documentation`, `detail`, `labelDetails` and `additionalTextEdits` are taken from the answer (label, filter,
+sort and the main edit stay as listed).
+
+*Request lifecycle* (all three requests). The request is tied to the document version synced when it is made (`document_state`):
+the document must be synced first (`DocHandle::sync_lsp_now()`, tag = rope version) with the text the position refers to.
+`Stale`: the version changed before the request was sent or before the answer arrived, or the server answered `ContentModified`
+(-32801); the answer is dropped, re-issue it if still wanted. `Cancelled`: a newer request of the same kind (completion, resolve,
+signature help are separate kinds) for the same document superseded it, the `CancelToken` fired, or the server answered
+`RequestCancelled` (-32800); `$/cancelRequest` is sent and the future ends without waiting for the server (also while the server is
+still starting). `Unavailable`: no server has the document, it is not running, or it lacks the capability; nothing is sent. Other
+server errors and timeouts are `Err`. Parsing a 10,000-item list happens inside the future, off the UI thread.
+
+*Session model* (`lector_lsp::CompletionSession`, UI-free; text is a `lector_text::Rope`, offsets are byte offsets, the server's
+UTF-16 positions are converted with the rope's converters and clamped to the line):
+```rust
+pub struct SessionOptions { pub insert_mode: InsertMode /* Insert (default) | Replace */, pub snippets: bool /* false */,
+                            pub word_chars: WordChars /* WordChars::for_language(name) */, pub commit_characters: bool /* true */ }
+pub enum OpenReason { Typing, TriggerCharacter(char), Manual }
+pub enum Update { Continue, Requery(CompletionRequest), Close(CloseReason) }
+pub enum CloseReason { CaretMoved, LeftWord, NoMatches, TextChanged, Committed, Dismissed }
+impl CompletionSession {
+    pub fn open(text: &Rope, caret: usize, reason: OpenReason, options: SessionOptions) -> Self;  // typed prefix = word chars before the caret
+    pub fn request(&self) -> CompletionRequest;                       // send with LspManager::completion
+    pub fn set_response(&mut self, text: &Rope, caret: usize, r: CompletionResponse) -> bool;     // false: ignored (closed, other row, caret left)
+    pub fn update(&mut self, text: &Rope, caret: usize) -> Update;    // after every edit / caret move; re-filters locally
+    pub fn close(&mut self, reason: CloseReason); pub fn is_closed(&self) -> bool; pub fn close_reason(&self) -> Option<CloseReason>;
+    pub fn anchor(&self) -> usize; pub fn typed(&self) -> &str; pub fn has_response(&self) -> bool; pub fn is_incomplete(&self) -> bool;
+    pub fn items(&self) -> &[CompletionItem]; pub fn item(&self, i: usize) -> Option<&CompletionItem>;
+    pub fn matches(&self) -> &[Match { item: usize, score: i32 }];    // filtered and ranked rows
+    pub fn label_highlights(&self, row: usize) -> Vec<Range<usize>>;  // byte ranges of the label that match the typed text (lazy)
+    pub fn selected(&self) -> Option<usize>; pub fn selected_item(&self) -> Option<(usize, &CompletionItem)>;
+    pub fn select(&mut self, row: usize); pub fn select_next(&mut self); pub fn select_previous(&mut self);   // wrap
+    pub fn select_relative(&mut self, delta: isize); pub fn select_page(&mut self, rows: isize);              // no wrap
+    pub fn is_commit_character(&self, c: char) -> bool;               // call before inserting `c`
+    pub fn needs_resolve(&self, item: usize) -> bool; pub fn generation(&self) -> u64;
+    pub fn apply_resolved(&mut self, generation: u64, item: usize, r: ResolvedCompletion) -> bool;   // false: older list
+    pub fn commit(&self, text: &Rope, carets: &[usize], primary: usize, item: usize) -> Result<CompletionCommit, CommitError>;
+}
+pub struct CompletionCommit { pub edits: Vec<ByteEdit { range: Range<usize>, new_text }> /* sorted, non-overlapping, offsets in the text given;
+        same shape as lector_buffer::TextEdit: Buffer::apply_edits, one undo step */, pub carets: Vec<usize> /* after the edits, same order */,
+        pub tab_stops: Vec<TabStop>, pub command: Option<Command> /* triggers_signature_help() */,
+        pub skipped_additional_edits: usize, pub skipped_carets: usize }
+```
+*Rules.* **Typed prefix / replace range:** an item's `textEdit` wins (`insert` range or `replace` range per `InsertMode`; a plain
+`TextEdit` has one range for both); without one the range is the word before the caret (Insert) or the whole word around it
+(Replace) and the text is `insertText` or the label. The server's UTF-16 range is **re-anchored** to what was typed since the
+request: on the caret's row, range ends and positions at or after the old caret move with the caret, range starts at the old caret
+stay, so an answer for `fo` still replaces `foo` after one more keystroke (and shrinks on backspace). **Filtering:** the typed text
+is fuzzy-matched (case-insensitive subsequence) against `filterText` or the label; items whose edit starts before the word (for
+example at a `.`) are matched against the text from their own start. Score: fzy-style boundary bonuses (start, after `_ - . / :`,
+camelCase), consecutive runs, +50 per exact-case char, +1500 for a prefix match (+500 more for an exact one), no penalty for text
+after the last match, deprecated items minus 3000. Rows are ordered by score, then `sortText` (or label), then `preselect`, then
+server order; the default selection is the first `preselect` item among the best-scoring rows, else row 0; an explicit selection
+survives narrowing. Extending the query only searches the previous survivors; there is no re-query unless the list was
+`isIncomplete`, in which case any change of the typed text returns `Update::Requery` (trigger kind 3; the UI sends it, the manager
+cancels the one in flight). **Closing:** `update` returns `Close` when the caret leaves the word's row or goes before its start
+(`CaretMoved`), a non-word char is typed (`LeftWord`), the text before the word on the line changed (`TextChanged`), or nothing
+matches a complete list (`NoMatches`); Escape and accepting are the UI's `close(Dismissed)` / `close(Committed)`. **Commit characters:**
+an item's own, else `itemDefaults`, else the server's `allCommitCharacters`; `is_commit_character(c)` is true for the selected item
+only when something was typed or the user moved the selection, so a fresh list does not swallow `(`. **Additional edits** (auto-imports)
+come from the list or from resolve; resolved ones are placed relative to the caret of the document version they were computed for
+(the session remembers the caret per `rope.version()` of the last 64 updates, so documents must be tagged with the rope version);
+edits that overlap the main edit or whose version is unknown are dropped and counted in `skipped_additional_edits`. **Multi-line text:**
+`AdjustIndentation` (the default) re-indents lines after the first to the indentation of the caret's line, `AsIs` does not; line
+breaks follow the document's (CRLF if its first line break is CRLF). **Multi-caret:** the main edit applies at the primary caret;
+every other caret gets the same inserted text when the text before it (and, in Replace mode, after it) equals the primary's text
+over the main range, otherwise it is left alone (`skipped_carets`); additional edits are for the primary only; `carets` gives all
+new caret offsets. **Snippets:** with `SessionOptions::snippets` off a snippet (which a server should not send) is flattened to its
+plain text; on, `Snippet::parse` (`$1`, `${1:x}` nested, `${1|a,b|}`, `$0`, mirrors, variables replaced by their default or nothing,
+escapes) yields tab stops as byte ranges in the final text (`CompletionCommit::tab_stops`, visiting order, `$0` last) and the primary
+caret is placed at the first stop. Lector 0.7 does not run a tab-stop session itself; the UI may select the first stop or ignore them.
+
+*Signature help* (`lector_lsp::SignatureSession`):
+```rust
+pub enum SignatureTrigger { Invoked, TriggerCharacter(char), ContentChange }
+pub struct SignatureRequest { pub pos: PointUtf16, pub trigger: SignatureTrigger, pub active: Option<SignatureHelp> /* retrigger */ }
+pub struct SignatureHelp { pub signatures: Vec<SignatureInfo { label, documentation, parameters: Vec<ParameterInfo { label, range: Option<Range<usize>>,
+                           documentation }>, active_parameter }>, pub active_signature: usize, pub active_parameter: Option<usize>, pub raw: Value }
+impl SignatureSession {
+    pub fn new() -> Self; pub fn is_open(&self) -> bool; pub fn close(&mut self);
+    pub fn request(&self, pos: PointUtf16, trigger: SignatureTrigger) -> SignatureRequest;   // retrigger (isRetrigger, activeSignatureHelp) when open
+    pub fn trigger_for_typed(&self, caps: &SignatureHelpCapabilities, c: char) -> Option<SignatureTrigger>;  // trigger chars; retrigger chars only while open
+    pub fn set_help(&mut self, help: Option<SignatureHelp>);    // None closes; the user's overload pick survives while still offered
+    pub fn next_signature(&mut self); pub fn previous_signature(&mut self);                  // wrap
+    pub fn active(&self) -> Option<ActiveSignature { signature, index, count, parameter: Option<usize>, highlight: Option<Range<usize>>, parameter_documentation }>;
+}
+```
+Parameter labels are resolved to byte ranges of the signature label: a string label is searched after the previous parameter's end
+(then anywhere), a `[start, end]` pair is UTF-16 and converted (ranges that split a surrogate pair or fall outside the label give
+`None`). The active parameter is the signature's own, else the help's, and out of range means nothing is highlighted.
+
+*Driving it from the UI* (typing a char `c` at the primary caret, completion enabled in settings, server has `completion`):
+1. Session open and `session.is_commit_character(c)`: accept the selected item first (step 4), then insert `c`.
+2. Insert `c` into the buffer; sync the document (`sync_lsp_now`).
+3. Session open: `match session.update(rope, caret)`: `Continue` re-render rows; `Requery(req)` send it (same path as step 5);
+   `Close(_)` hide. Session closed or none: if `c` is in `caps.completion.trigger_characters` open `TriggerCharacter(c)`, else if `c` is a
+   word char open `Typing` (Ctrl+Space opens `Manual`, also with an empty prefix).
+4. Accept (Enter/Tab/click): if `needs_resolve(item)` run `resolve_completion` and `apply_resolved(generation, ..)` first (a `Stale` answer:
+   retry once or accept without the additional edits), then `commit(rope, &carets, primary, item)`, `Buffer::apply_edits(commit.edits.map(..))`,
+   `set_selections(commit.carets)`, close with `Committed`, run `commit.command` if any (`triggers_signature_help()` opens signature help).
+5. A new session sends `LspManager::completion(path, session.request(), None)` on a background task and feeds `Done(r)` to
+   `set_response(rope_now, caret_now, r)` followed by `update(..)` (the user may have typed meanwhile); `Stale` with the session still
+   open and no response yet: send `session.request()` again; `Cancelled`/`Unavailable`: ignore. When the selection changes and
+   `needs_resolve`, resolve it (a newer resolve cancels the previous) to show documentation.
+6. Signature help: `trigger_for_typed` on typed chars while the setting is on; while open, send a `ContentChange` request after edits or caret
+   moves inside the call; `Done(None)` or a caret outside the call closes it; Up/Down (or the UI's keys) call `previous_signature` / `next_signature`.
+
+*Settings* (`lector-config`, additive): `[editor.completion]` `enabled = true`, `snippets = false` (read when servers start; call
+`LspManager::set_completion_snippets` before opening documents), `insert_mode = "insert" | "replace"` (`CompletionInsertMode`); `[editor.signature_help]`
+`enabled = true`. They change how Lector talks to servers, never which program runs; project settings can set them like other editor settings
+(the user-only restrictions on server commands are unchanged).
+
+*Tests and numbers.* `tests/completion.rs` runs a scripted fake server (`tests/fixtures/fake_completion.py`: per-method steps with delays,
+errors, ignoring cancellation, request log) over the real transport: capabilities and declaration, label / insertText / textEdit items with UTF-16
+positions after `𝄞é`, insert vs replace, `itemDefaults`, `isIncomplete` re-query (trigger kind 3), resolve with additional edits, stale-version drop,
+superseding cancel (+ `$/cancelRequest` id), `CancelToken`, `-32800` / `-32801`, unsupported servers, signature help with both label forms and
+retrigger; an ignored `pylsp_smoke` runs against a real server. `tests/completion_perf.rs`: 10,000 items, per keystroke (median of 30 runs, workspace dev
+profile): 0.54 ms for the first character (1,664 survivors), 0.35 / 0.29 / 0.11 ms for the next ones, 0.27 ms for a backspace (full re-filter),
+worst keystroke 0.67 ms; ingesting the 10,000 items (`set_response`) 3.8 ms; the test asserts < 5 ms medians. Unit tests cover the matcher (ranking table), snippet
+parser, parsing, session rules and signature help.
+
+### Completion and signature help — editor UI (v0.7) — lector-ui `editor::{completion, signature_help}`, `code_view::popup` — as implemented
+
+The popups are built on the session models above; the editor integration is three small pieces.
+
+* **`CodeView` popup hosting** (`code_view/popup.rs`). `CodeView::set_popup(key, Option<EditorPopup { view, anchor: Pos, size, prefer:
+  Vertical, on_dismiss }>)` shows a non-focusing popup (focus stays in the editor; typing keeps going to the document). The placement
+  is the pure `place_popup(anchor_point, line_height, size, window, margin) -> Placement { origin, above }`: below the line, above
+  when it does not fit below and fits above (else the side with more room), x clamped into the window, so a popup at the window edge
+  is shifted, never cut. The anchor is a buffer `Pos` mapped through the last layout on every frame, so the popup **follows
+  horizontal and vertical scrolling**; it is dropped (`on_dismiss`) when its row scrolls out of view, when the view loses focus, or by
+  its owner. `set_context_flag(flag, on)` adds an identifier to the view's key context (`CodeView && completion`);
+  `take_typed()` returns the text of the last plain keystroke (so owners can tell typing from other edits);
+  `set_input_interceptor(f)` lets an owner take a keystroke over before it is inserted (commit characters);
+  `insert_typed(text)` types text like a keystroke without asking the interceptor.
+* **One controller per file tab** (`editor::completion::CompletionController`, found with `controller_for(&Entity<FileView>)`;
+  `completion::init` is called by `lsp::init` and creates it, and the tab's `SignatureController`, for every `FileView`). Only
+  file tabs have controllers: diff, review and other non-editable code views never open a popup. The controller listens to the code
+  view's `Edited` / `SelectionChanged` events, drives `CompletionSession` as in "Driving it from the UI" (steps 1 to 6), and is the
+  popup's view.
+* **Opening.** A typed identifier character (`WordChars::for_language`) or a server trigger character opens a session; Ctrl+Space
+  (`editor::TriggerSuggest`) opens one by hand, also with an empty prefix. Never opened: `editor.completion.enabled = false`, a
+  read-only tab, an IME composition (a composition in progress also closes a session), while the same word was dismissed
+  with Escape or has no match (until a non-word char is typed or the caret moves to another word). Nothing is requested on open or
+  focus. The document is synced (`lsp::sync_now`, tag = rope version) before every request, the request runs on a background task, the manager
+  cancels the one in flight, and a `Stale` answer for a session without an answer is asked again (at most three times). The popup shows only
+  when the server answered and something matches; until then the keys keep their normal meaning (only Escape, which cancels the request).
+  Manual trigger without a usable server never fails silently: a status-bar toast says why (servers off, no server for this kind of
+  file, still starting, failed, or the "install ..." hint from `lector_lsp::install` when none is installed); automatic triggers are
+  silent. Latency: the answer is filtered synchronously on the UI thread when it arrives (`set_response`, then `update` for text typed
+  meanwhile); a debug log (`lector_ui::perf`: "completion list filtered", "completion reply -> first render") times reply to first paint.
+  Measured at model level, 10,000 items (`editor::completion::tests::ten_thousand_items_reach_the_first_page_within_budget`, workspace dev
+  profile): `set_response` + first page of rows about 5 ms, one more keystroke about 2 ms, against the 50 ms budget.
+* **The popup.** A hand-virtualized list: at most `VISIBLE_ROWS` (10) rows are built, whatever the list size; mouse wheel scrolls,
+  click accepts. Row = kind badge (the outline's symbol badges where a symbol kind exists, a letter badge otherwise), label with the
+  matched characters accented (`label_highlights`), dimmed `labelDetails.detail` after it, right-aligned dimmed description or detail,
+  deprecated items struck through. A side pane shows the selected item's detail and documentation (the existing markdown renderer);
+  documentation that only `completionItem/resolve` gives is requested 120 ms after the selection settled and cancelled when it moves.
+  Width adapts to the first 64 rows within 280..560 px plus the docs pane (320 px); theme tokens; follows UI scale; no animation.
+* **Keys while the popup shows** (key context `CodeView && completion`, bindings defined after the plain `CodeView` ones so they win;
+  all rebindable, actions in the `completion` namespace, hidden from the palette): `down` / `up` / `ctrl-n` / `ctrl-p` `SelectNext` /
+  `SelectPrev` (wrap), `pagedown` / `pageup` `PageDown` / `PageUp` (10 rows, no wrap), `enter` `AcceptOnEnter`, `tab` `Accept`, `escape`
+  `Dismiss`. Everything else types into the document and updates the session (typing narrows, backspace widens, a non-word char or leaving
+  the word closes). The actions are handled at workspace level (`Workspace::register_action` runs before the editor's); since GPUI
+  reads the key context of the last rendered frame, each handler falls back to the editor action the key normally has (`MoveDown`,
+  `PageUp`, `Tab`, `Newline`, `ClearSelection`) when the popup is already gone. **Escape closes only the popup**: it does not clear
+  multi-caret selections or close anything else; a second Escape is the editor's. `editor.completion.accept_on_enter` (default `true`)
+  turns Enter's acceptance off (Enter then closes the list and inserts a line break); Tab always accepts. **Commit characters** go through
+  the input interceptor: when `is_commit_character(c)`, the selected item is accepted first, then `c` is typed. Ctrl+I is not bound
+  (the inline agent edit owns it); Ctrl+Space and Ctrl+Shift+Space are the only new global bindings.
+* **Accepting** (one undo step): if `needs_resolve`, resolve first, waiting at most 300 ms (then accept without the extra edits), then
+  `CompletionSession::commit(rope, carets, primary, item)` and **one** `Buffer::apply_edits` for the main edit and the additional edits
+  (auto-imports), then `set_selections(commit.carets)`, so undo restores text, imports and carets together. Multi-caret follows the
+  session rules (`skipped_carets`). If the document version changed so that the commit no longer fits (`CommitError`), the popup closes quietly.
+  The session is closed with `Committed` and does not reopen for the same word; with `commit.triggers_signature_help()` signature help opens
+  right after. **Snippets** (`editor.completion.snippets = true`; applied through `LspManager::set_completion_snippets` when the project
+  opens): there is no tab-stop session in the editor, so the caret is placed at the first stop and the remaining stops are ignored.
+* **Signature help** (`editor::signature_help::SignatureController`). Opens on the server's trigger characters (`(`, `,` per
+  capabilities) while `editor.signature_help.enabled`, after accepting a completion that asks for it, and with Ctrl+Shift+Space
+  (`editor::TriggerParameterHints`). A small popup above the line (it coexists with the completion popup below the line) shows the active
+  overload with the active parameter highlighted (byte range from the session), the overload counter ("1/3") when there are several, the
+  signature's and the active parameter's documentation. `alt-down` / `alt-up` (and plain `down` / `up` when there is more than one overload
+  and no completion popup) switch overloads (`signature::NextSignature` / `PrevSignature`, context `signature_help` / `signature_overloads`);
+  `escape` closes it (`signature::Dismiss`, only when no completion popup shows). While open, edits and caret moves inside the call send a
+  `ContentChange` retrigger (coalesced; a newer request cancels the older); it closes on `Done(None)`, when the caret leaves the call
+  (including typing the matching `)`), on Escape, on blur, or when the tab becomes read-only.
+* **Settings and menus.** `[editor.completion] accept_on_enter = true` is new (the others are described above). Edit menu: "Trigger Suggest",
+  "Trigger Parameter Hints" (palette commands `editor::TriggerSuggest`, `editor::TriggerParameterHints`); the shortcut viewer lists the new
+  bindings like any other.
+* *Tests.* `editor/completion/tests.rs`: row model, labels runs (match accent, strikethrough, char boundaries), badges, list scrolling,
+  width, the 10,000-item budget; in a test window with the fake server (`fake_completion.py`): open on typing, filter as typing continues
+  without asking again, accept with Enter and Tab as one undo step, `accept_on_enter = false`, Escape closes only the popup with two carets,
+  a late answer for a closed session and a stale answer (asked again), read-only tab, IME composition, `enabled = false`, additional edits in
+  the same undo step, multi-caret accept, selection navigation and paging (Up / Down / Ctrl+N / Ctrl+P / PageUp / PageDown, wrap), commit
+  character, caret leaving the word, Ctrl+Space, no language server, signature help (active parameter, retrigger on `,`, overloads with Alt+Up/Down
+  and Up/Down, closing on `)`, Escape, manual trigger). `code_view/popup.rs`: placement math (below, above, clamped, margins). Not covered
+  by automated tests: the real paint of the popup in a window (see `scripts/screenshot.sh`) and real servers (the ignored `pylsp_smoke`
+  exercises only the protocol).
+
 ### lector-fs
 ```rust
 pub enum ImageFormat { Png, Jpeg, Gif, Webp, Svg, Bmp, Ico }      // from_extension, from_magic, mime_type
@@ -510,6 +758,8 @@ pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is
 // SessionSettings); `buffer_font_family: Vec<String>` (accepts a string or list in TOML); `Platform::{MacOS,Linux,Windows}`
 // + `Platform::current()`; `merge_keymap`; keymap.toml = `[[bindings]] keys/action/context` ("none"/"" unbinds).
 // Env overrides: LECTOR_CONFIG_DIR, LECTOR_DATA_DIR. Contexts: Workspace, CodeView, DiffView, Picker.
+// v0.7: `git.auto_fetch: AutoFetch::{Off (default), Minutes(n)}` (TOML `"off"` or a number; `interval()`), user-level
+// only (dropped from the project layer with a warning): nothing fetches on a timer unless the user opts in.
 // Project layer (`<project>/.lector/settings.toml`) cannot set `[forge]`, `agent.servers`, `lsp.servers.*.command` /
 // `args` or `lsp.servers.*.enabled = true` (dropped with a warning): opening a project never runs a program it chose.
 // SessionStore::{new(), with_dir(dir), load(&root) -> Option<Session>, save(&root, &Session) -> io::Result<()>};
@@ -787,6 +1037,74 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
     first conflicted path), NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth (conflict at the cursor),
     AcceptAllOurs, AcceptAllTheirs (confirmed), MarkResolved (save + stage the active file), ContinueOperation,
     AbortOperation}`; the merge editor handles the same actions itself when focused.
+* **Sync with the remote (v0.7)** — `sync::SyncController` (one per window, `GitStore::sync`), UI-free logic in
+  `sync_model`, dialogs in `sync_dialogs`, credential prompts in `askpass_ui`. As implemented:
+  * State: `SyncStatus` (branch / detached + short sha, upstream, `upstream_gone`, push remote, ahead/behind, remotes with
+    redacted URLs, `FETCH_HEAD` mtime) from `Repo::upstream_status` in the background; ahead/behind follow every
+    `GitStoreEvent`, the full read happens when branch / upstream / HEAD change and after every operation.
+    `SyncState::{Loading, UpToDate, NeedsPush, NeedsPull, Diverged, NoUpstream, UpstreamGone, Detached, NoRemote}` →
+    `control_view` = branch label, counts as text (`↑2 ↓1`), a state word ("up to date", "push", "pull", "diverged",
+    "publish", "upstream gone", "detached", "no remote" — never color alone) and the click action (`PrimaryAction`:
+    Fetch / Push / Pull (ff) / Pull (Rebase) for diverged / Publish / New Branch for detached / none).
+  * Status bar: `SyncControl` replaces the branch button (`Workspace::set_branch_status_view`); click = `git::Sync` (the
+    primary action); tooltip = what the click does + "Last fetched 12 min ago" (+ auto-fetch interval / last automatic
+    failure); the chevron opens the sync menu above the bar (`git::ShowSyncMenu`): Fetch, Pull (Fast-Forward), Pull
+    (Rebase), Push, Push (Force with Lease)…, Publish Branch, Set Upstream…, (Cancel), New Branch…, Switch Branch…,
+    Branches. While an operation runs: spinner, "Pushing main → origin/main 45% · Writing objects", × = `git::CancelSync`.
+  * Changes panel: `SyncPanelBar` at the top (state text, Fetch / Pull / Push icon buttons with tooltips and key
+    bindings; disabled with "A push is running" while busy; progress bar + Cancel while running).
+  * Running: `run_action(SyncAction)` → `sync_model::plan` → `Plan::{Run, Confirm, Blocked}`; `execute(OpKind, steps,
+    label, quiet)` runs the registry commands in order on the app `Scheduler` (`Priority::Interactive`, journaled,
+    `Source::Ui`), then `notify_repo_changed` (status, history, branches, diff tabs reload) and a status refresh. One
+    operation per repository: this window's running op or a `SyncHost::running()` entry for the repo blocks new ones
+    (toast). Progress comes from `SyncHost::subscribe` (filtered by repo, coalesced to the newest event). Cancel =
+    `SyncHost::cancel_repo` (git, ssh and helpers killed) + pending credential prompts cancelled.
+  * Force push exists only as `SyncAction::ForcePushWithLease` and is always `Plan::Confirm` first ("Force push to
+    origin/main?" naming the remote branch, saying commits there may be discarded for everyone and that the lease refuses
+    a moved branch); plain `--force` is never built.
+  * Outcomes (`success_view`): toasts "Pulled 3 commits into main", "Pushed main → origin/main", "Published f → origin/f",
+    "Already up to date"; a pull with an undo record shows the Undo toast (`git.restore_ref`); a rebase pull that stops
+    with conflicts toasts and opens the Changes panel, where the operation banner / conflict flow takes over. After a
+    successful commit the composer's toast offers **Push** (ahead of the upstream) or **Publish** (no upstream, a push
+    remote exists) — `commit_composer::push_offer`.
+  * Failures (`failure_view`, every `SyncErrorKind`): a `NoticeDialog` with what happened, the files involved, git's or
+    the hook's output in the composer's output box (`commit_composer::output_box`), and next steps (`NextStep`):
+    Rejected → Pull First (then the toast offers Push again; a diverged ff pull offers Pull (Rebase), which also offers
+    Push again) / Pull (Rebase); NoUpstream → Publish Branch / Set Upstream…; LocalChanges / DirtyWorktree on pull →
+    Stash and Pull (explicit; the toast then offers Pop Stash), on switch → Stash Changes and Switch; Diverged → Pull
+    (Rebase); StaleLease → Fetch; AuthenticationFailed → explains which credential sources were tried (configured
+    `credential.helper` values read with `git config --get-all`, whether Lector's prompt was answered or cancelled, ssh
+    agent / key files for SSH remotes) → Retry; HostKeyUnknown / NetworkUnreachable / RemoteNotFound / HookDeclined /
+    Other → Retry; HostKeyChanged → a warning and no way around it; DetachedHead → New Branch…. Cancelled → toast.
+    Background (auto-fetch) failures never open a dialog: they show in the control's tooltip.
+  * Credential prompts (`askpass_ui`): one `AskpassServer` per process, started lazily by the first network operation
+    (runtime dir = `paths::data_dir()`), env installed with `SyncHost::set_askpass_env`; stopped on app quit. The handler
+    posts to the GPUI thread and blocks ≤ 10 min (`PROMPT_TIMEOUT`); prompts queue and show one at a time as a
+    `PromptDialog` in the window whose operation is running ("Operation: Pushing main → origin/main", "Remote:
+    https://***@host/…"). Kinds (`prompt_spec`): username; password / token (masked `TextInput::set_masked`, never
+    logged or stored by Lector, the note says git's credential helper may store it, the field is cleared on close);
+    SSH key passphrase (masked, key path shown); unknown host key (host, key type, fingerprint; Cancel is the default —
+    Enter answers Cancel until the user moves to "Trust and Continue" with Tab / arrows — and the answer is exactly
+    `yes`); anything else verbatim, masked when it looks secret. Closing the dialog any other way, the window closing,
+    the operation being cancelled or ending, all answer Cancel.
+  * Branches: New Branch… (`InputDialog`: name validated as you type with git's ref rules, `validate_branch_name`; start
+    point = HEAD or a branch / tag from the "Choose…" menu; "Switch to it" on by default), Switch (unsaved editor buffers
+    go through the workspace's save prompt first; when git refuses because local changes would be overwritten the
+    dialog lists the files and offers Stash Changes and Switch / Cancel — never a silent stash), Rename…, Delete (merged:
+    at once with an Undo toast; unmerged: a confirmation listing the commits that would become unreachable, then
+    `force`, still undoable), Set Upstream… (remote branch picker), Publish, Check Out as Local Branch for remote branches
+    (create at the remote branch + set upstream). In the Branches panel's context menus, the Git menu, the palette and
+    the sync menu.
+  * Stash: Stash Changes… (message, "Include untracked files"), Apply / Pop / Drop from the stash rows' context menu
+    or a stash picker; Drop and Pop are undoable from the toast (journal); conflicts on pop open the Changes panel.
+  * Auto-fetch: `git.auto_fetch` (user-level, default `"off"`); when set, a 30 s tick fetches quietly once the last
+    fetch (`FETCH_HEAD`) is older than the interval and nothing runs in the repository.
+  * Tests: `sync_model::tests` (state → label / action for every state, action → command, force-with-lease gating,
+    failure → next steps for every `SyncErrorKind`, credential source text, outcome toasts, branch-name table, prompt
+    classification and masking), `sync_tests` (GPUI: push → rejected → Pull First → diverged → Pull (Rebase) → Push
+    against a bare remote through the controller; dirty-tree switch → Stash Changes and Switch; force push waits for
+    the confirmation and Escape cancels it; host-key default Cancel and literal `yes`, masked password answer and
+    cleared field, prompt queue, cancel and close → Cancel).
 
 ### lector-buffer (v0.3, UI-free editing model; no GPUI, no tokio)
 ```rust
@@ -1349,6 +1667,312 @@ operation, plus round trips (binary, empty, symlink, exec bit, deleted, nested, 
   (`GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`, `gc.auto=0`, `maintenance.auto=false`); lector-ui-git `staging::tests` (op →
   command mapping; discard → Undo toast → `UndoLastOperation` restores the files).
 
+### lector-process (v0.7) — as implemented
+One component supervises every child process (git network/branch operations and git CLI reads, language
+servers, later agents, terminals). `lector-lsp`'s client spawns its server through `Supervisor::global()` (kind
+`LanguageServer`; the child is a `ChildHandle`, its stdio is taken as before, and `Client::kill` kills the whole tree). No internal dependencies, no tokio, `#![forbid(unsafe_code)]`: process trees come from
+`process-wrap` 8.2 (std feature): a new **session** (`setsid`; or only a new process group with `new_session(false)`)
+on Unix, a **Job Object** plus `CREATE_NO_WINDOW` on Windows.
+```rust
+pub struct ProcessCommand;   // new(program).arg/args/cwd/env/envs/env_remove/env_clear/stdin(StdinMode)/stdout(OutputMode)/stderr(..)
+                             // .label(..).kind(ProcessKind).new_session(bool=true).kill_tree_on_exit(bool=true).console_window(bool=false)
+                             // Debug shows env *names* only and the length of stdin bytes.
+pub enum StdinMode { Null /* default */, Piped, Bytes(Vec<u8>) /* written on a thread, then closed */ }
+pub enum OutputMode { Piped /* default */, Null, Inherit }
+pub enum ProcessKind { Git, LanguageServer, Agent, Terminal, Helper, Other }
+pub struct CancelToken;      // Arc<AtomicBool>, same shape as lector_search::CancelToken; from_flag(Arc<AtomicBool>) / flag()
+pub struct Supervisor;       // Clone; Supervisor::global() / new()
+impl Supervisor {
+    pub fn spawn(&self, &ProcessCommand) -> Result<ChildHandle>;                         // long-lived (LSP, agents)
+    pub fn run(&self, &ProcessCommand, &RunOptions) -> Result<RunOutput>;                // to completion, captured
+    pub fn run_streaming(&self, &ProcessCommand, &RunOptions, on_line: &mut dyn FnMut(&Line)) -> Result<RunOutput>;
+    pub fn list(&self) -> Vec<ProcessInfo { id, pid, label, kind, program, started, running }>;
+    pub fn kill(&self, id: u64) -> bool;  pub fn shutdown(&self, grace: Duration);  pub fn is_shutting_down(&self) -> bool;
+}
+pub fn run(..); pub fn run_streaming(..);   // on the global supervisor
+pub struct RunOptions { cancel: Option<CancelToken>, timeout: Option<Duration>, grace /* 2 s */, capture_limit /* 32 MiB per stream */,
+                        drain_timeout /* 2 s */ }
+pub struct RunOutput { status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>, stdout_truncated, stderr_truncated }  // success(), code(), *_text()
+pub struct Line { stream: Stream::{Stdout, Stderr}, bytes: Vec<u8>, end: LineEnd::{Newline, CarriageReturn, None} }
+pub struct ChildHandle;      // id, pid, label, kind, info, killer() -> Killer (weak, cloneable), take_stdin/stdout/stderr (raw pipes),
+                             // lines(capacity) -> Receiver<Line>, try_wait, wait, wait_timeout, terminate(grace), kill()
+pub enum ProcessError { NotFound{program}, Spawn{program, source}, Cancelled, TimedOut{after}, ShuttingDown, Io }
+```
+* **Streaming.** Both pipes are read on their own threads (no deadlock on large output either side, stdin bytes are
+  written concurrently); lines split on `\n`, `\r\n` and lone `\r` (git progress updates, delivered at once; lines over
+  64 KiB are split) and delivered in arrival order through a channel bounded to 256 lines on the calling thread; raw
+  bytes are captured exactly up to `capture_limit`.
+* **Stopping.** Cancel / timeout / `terminate(grace)` / `shutdown(grace)`: close stdin, `SIGTERM` to the group (Unix),
+  then after `grace` `SIGKILL` to the group / `TerminateJobObject`, and reap. Dropping a `ChildHandle` whose process still
+  runs hard-kills the tree. When the main process exits, the rest of its group is killed immediately (unless
+  `kill_tree_on_exit(false)`, used for git network commands so credential-cache daemons and ssh `ControlPersist`
+  masters survive, as in a terminal); after that no signal is ever sent to that group id again (no pid-reuse races).
+  Windows has no console-less SIGTERM: closing stdin is the polite step. A crash of Lector itself does not kill
+  children (Unix sessions are detached; the Job Object is created without kill-on-close): children see EOF on stdin.
+  **The app must call `Supervisor::global().shutdown(grace)` when it quits.**
+* **Askpass** (`lector_process::askpass`). `AskpassServer::start(runtime_dir, handler)`: Unix domain socket `s` in a fresh
+  `0700` directory `lector-askpass-<random>` under `runtime_dir` (temp dir if the path would exceed `sun_path`), socket
+  `0600`; loopback TCP on Windows (`start_tcp`, also used in tests). A 256-bit random token per server. Protocol v1:
+  length-prefixed frames (u32 BE, ≤ 64 KiB): `"LECTOR-ASKPASS/1"`, token, prompt → `b'A'`+answer | `b'C'`; wrong token =
+  closed without reply (constant-time compare); ≤ 8 prompts at once; a panicking handler = cancel. `handler:
+  Fn(PromptRequest { text, kind: PromptKind::{Username, Password, Passphrase, HostKeyConfirm, Other} }) -> PromptReply::
+  {Answer(Secret), Cancel}` runs on a connection thread and may block while the user answers. `classify_prompt(text)`.
+  `server.helper_program(current_exe)` creates the helper program (once) in the server's private directory (also created
+  on Windows); `server.env(helper)` = `GIT_ASKPASS`/`SSH_ASKPASS` = helper, `SSH_ASKPASS_REQUIRE=force`,
+  `GIT_TERMINAL_PROMPT=0`, `LECTOR_ASKPASS_ENDPOINT`, `LECTOR_ASKPASS_TOKEN` (`credential.helper` untouched: helpers
+  answer first). `run_askpass_client(prompt) -> i32` (prints the answer + `\n`; 0 answered, 1 cancelled, 2 error; the
+  token must be 64 hex digits, `is_valid_token`). `askpass_helper_path(current_exe)` prefers `lector-cli.exe` next to
+  the GUI `lector.exe` on Windows. Both binaries call `lector_cli::run_askpass_helper(&args)` first thing in `main`.
+  `Secret` zeroes itself and prints `Secret(***)`; frames holding tokens or answers are zeroed; prompts are logged by
+  kind only.
+* **Helper-mode trigger (0.7, hardening).** The environment alone never selects the helper mode: a git hook that runs
+  `lector <path>` during a sync inherits git's environment (askpass variables included) and must open a window as usual.
+  `askpass_prompt_from_args(&args)` selects it only on an explicit marker an ordinary invocation cannot carry:
+  * **Unix**: the helper program is a generated `#!/bin/sh` shim `lector-askpass` (mode `0700`, `create_new`) in the
+    server's `0700` directory: `exec '<lector exe>' --lector-askpass-helper "$@"` (exe path single-quoted). The hidden
+    first argument `HELPER_FLAG` selects the mode; the prompt follows.
+  * **Windows**: OpenSSH runs `SSH_ASKPASS` as an executable without extra arguments, so the helper is a hard link (a
+    copy when linking fails, e.g. across volumes) of the console binary named `lector-askpass.exe` in the private
+    directory; the mode is selected iff the executable's own file name (`current_exe` or `argv[0]`) is `HELPER_NAME`
+    (`lector-askpass`). git runs `GIT_ASKPASS` through Git for Windows' `sh`, OpenSSH directly; both work.
+  * Trust model: anyone able to run the helper still needs the per-server 256-bit token and the endpoint (a `0700`
+    directory + `0600` socket on Unix; loopback TCP + token on Windows); the helper, socket and directory are removed
+    when the server stops (`lector-ui-git` stops it on app quit). The token and endpoint only ever go into the
+    environment of git network commands (`SyncOptions::env` via `SyncHost`), never into Lector's own environment.
+  * **Scrubbing**: `askpass::SCRUB_ENV` = `GIT_ASKPASS`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `GIT_TERMINAL_PROMPT`,
+    `LECTOR_ASKPASS` (pre-0.7.1 flag), `LECTOR_ASKPASS_ENDPOINT`, `LECTOR_ASKPASS_TOKEN`. `ProcessCommand` removes them
+    from the inherited environment of `ProcessKind::{LanguageServer, Agent, Terminal}` children
+    (`ProcessKind::scrubs_askpass_env`; variables set explicitly with `.env()` are kept). Terminals spawned outside the
+    supervisor must add the same names to their own scrub list (`SpawnOptions.env_scrub`).
+* Tests: `tests/process.rs` (env/cwd, arrival order with `\r` updates, 3 MB on stderr then stdout, 2 MB stdin echo,
+  bounded capture, cancel and timeout kill grandchildren (`sh -c 'sleep 1000 & wait'`), graceful TERM trap, drop kills
+  the tree, leftovers killed unless `kill_tree_on_exit(false)`, shutdown, killer), `tests/askpass.rs` (TCP and Unix round
+  trips, token rejection, 0700/0600 permissions and cleanup, concurrent prompts, panicking handler),
+  `tests/askpass_git.rs` (`harness = false`: the test binary is the helper; real `git credential fill` gets username and
+  password through the server; cancel makes git fail). Unix-only tests are `cfg(unix)`; Windows runs `cmd /C` basics.
+
+### git sync (v0.7) — lector-git `sync` + branch API, lector-app `commands::git_sync` — as implemented
+All through the git CLI (`git -C <workdir> --no-pager -c core.quotepath=off`, `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0`,
+`GIT_EDITOR=true`) under `lector-process` (new session, cancellable). `lector-git` depends on `lector-process`; its
+blame / `log -L` / `--follow` runner (`cli.rs`) also runs under the supervisor now (`write.rs` and the shadow repo keep
+plain `std::process` so tty-based signing pinentries behave as before).
+```rust
+pub struct SyncOptions { env: Vec<(OsString, OsString)> /* askpass env */, cancel: Option<CancelToken>, timeout: Option<Duration>,
+                         supervisor: Option<Supervisor> }                       // Debug prints env names only
+pub enum SyncEvent { Progress(Progress { phase, remote, percent, current, total, bytes, throughput, done }), Message(String) }
+impl Repo {
+    pub fn fetch(&self, &FetchOptions { remote: Option<String> /* None = --all */, prune }, &SyncOptions, on: &mut dyn FnMut(SyncEvent))
+        -> Result<FetchOutcome { updated: Vec<RefUpdate { name, old, new }> }>;          // refs/remotes + refs/tags diff
+    pub fn pull(&self, PullMode::{FastForwardOnly /* --no-rebase --ff-only */, Rebase}, &SyncOptions, on)
+        -> Result<PullOutcome { status: PullStatus::{UpToDate, FastForwarded, Rebased, Conflicts}, branch, upstream, before, after,
+                                incoming, rebased, conflicts }>;                         // never an implicit merge commit
+    pub fn push(&self, &PushOptions { remote, branch, set_upstream /* true */, force_with_lease }, &SyncOptions, on)
+        -> Result<PushOutcome { remote, branch, remote_branch, set_upstream, refs: Vec<PushedRef>, up_to_date }>;
+    pub fn upstream_status(&self) -> Result<UpstreamStatus { branch, detached, upstream, remote, push_remote, upstream_gone, ahead, behind }>;
+    pub fn push_remote_for(&self, branch) -> Result<Option<String>>;   // pushRemote > remote.pushDefault > branch remote > only remote / origin
+    pub fn create_branch(&self, name, start: Option<&str>) -> Result<Oid>;
+    pub fn switch_branch(&self, name, &SyncOptions) -> Result<BranchSwitch { from, from_oid, to, oid }>;
+    pub fn rename_branch(&self, old, new) -> Result<()>;
+    pub fn delete_branch(&self, name, force: bool) -> Result<DeletedBranch { name, oid, upstream }>;
+    pub fn set_upstream(&self, branch, upstream: Option<&str>) -> Result<Option<String> /* previous */>;
+    pub fn branch_tip(&self, name) -> Result<Option<Oid>>;  pub fn branch_upstream(&self, name) -> Result<Option<String>>;
+    pub fn restore_ref(&self, refname, expected: Option<Oid>, target: Option<Oid>) -> Result<()>;   // undo; checked-out branch: reset --keep
+    pub fn stash_push(&self, &StashPushOptions { message, include_untracked }) -> Result<Option<Stash>>;   // None = nothing to stash
+    pub fn stash_apply(&self, index, pop: bool) -> Result<StashApplied { stash, conflicts, dropped }>;
+    pub fn stash_drop(&self, index) -> Result<Stash>;  stash_store(oid, message);  stash_at(index);  stash_index_of(oid);  stash_paths(index);
+}
+pub fn parse_progress(&str) -> Option<Progress>;  parse_push_porcelain(&str) -> Vec<PushedRef>;  classify_failure(&str) -> Option<SyncErrorKind>;
+pub fn redact_credentials(&str) -> String;        // https://user:token@host → https://***@host (all surfaced messages)
+// Error::Sync(Box<SyncError { kind, message, hint, paths, hook_output, alternatives }>), Error::Cancelled, Error::TimedOut
+pub enum SyncErrorKind { NoUpstream, NoRemote, DetachedHead, Rejected /* hint "Pull first" */, StaleLease, AuthenticationFailed,
+    HostKeyUnknown, HostKeyChanged, NetworkUnreachable, RemoteNotFound, HookDeclined /* hook_output */, Diverged,
+    LocalChanges /* paths; alternatives ["stash_and_switch"] on switch */, DirtyWorktree, NotMerged, InvalidName, AlreadyExists,
+    NotFound, RefChanged, Other }
+```
+* Push: explicit refspec `refs/heads/<b>:refs/heads/<remote branch>` (upstream's branch when pushing to the upstream
+  remote, else the same name), `--set-upstream` only when none is configured, `--force-with-lease=refs/heads/<rb>:<last
+  fetched oid>` (empty = must not exist) only on request; plain force is never offered. `--porcelain` decides the outcome
+  (`!` + `stale info` → `StaleLease`, `remote rejected`/`hook declined` → `HookDeclined`, other `!` → `Rejected`); a local
+  `pre-push` failure (no ref lines) → `HookDeclined` with its output. Network commands use `kill_tree_on_exit(false)`.
+* Conflicts: a rebase pull that stops is `PullStatus::Conflicts` (the repo is in the rebase state the existing conflict
+  flow / `git.continue_operation` / `git.abort_operation` handle); a stash pop/apply that conflicts reports `conflicts`
+  and (pop) keeps the stash.
+* **Commands** (`lector_app::commands::git_sync`, JSON schemas; reads: `git.upstream_status {}`, `git.list_remotes {}`
+  (URLs redacted), `git.stash_list {}`; writes, journaled): `git.fetch {remote?, prune?}` (not undoable), `git.pull {mode?:
+  ff_only|rebase}` (undo → `git.restore_ref` = branch back, `reset --keep`), `git.push {remote?, branch?, set_upstream?,
+  force_with_lease?}` (not undoable), `git.create_branch {name, start_point?, switch?}`, `git.switch_branch {name,
+  stash_changes?}` (the explicit "stash and switch"; on failure the stash is popped back), `git.rename_branch {name?,
+  new_name}`, `git.delete_branch {name, force?}` (destructive, undo restores tip + upstream), `git.set_upstream {branch?,
+  upstream: string|null}`, `git.stash_push {message?, include_untracked?}` (undo = pop), `git.stash_apply` /
+  `git.stash_pop {index?|oid?, allow_without_backup?}` (files + index entries of the stash's paths backed up in the
+  shadow repo first; undo = `Multi[RestoreIndex, RestoreFiles(, git.stash_store)]`), `git.stash_drop {index?|oid?}`
+  (destructive, undo = `git.stash_store`), `git.stash_store {oid, message?}`, `git.restore_ref {ref, expected, target,
+  upstream?}` (refuses unless the ref is at `expected`; itself undoable). All are `writes` (MCP lists them only with
+  `--allow-writes`). Errors keep their type: downcast `CommandError::Failed(anyhow)` to `lector_git::Error::Sync`.
+* **`SyncHost`** (`SyncHost::of(&core)`, an `AppCore` extension): `set_askpass_env(Vec<(OsString, OsString)>)` — the UI
+  starts one `AskpassServer` per process (handler = its prompt dialog) and installs
+  `server.env(&server.helper_program(&current_exe()?)?)` here; `subscribe(cb: Fn(&SyncProgress { op, repo, command, event }))` → `SyncSubscription` (drop =
+  unsubscribe; called on worker threads); `running() -> Vec<RunningSync { id, repo, command }>`; `cancel(id)`,
+  `cancel_repo(workdir)` (kills git, ssh and helpers).
+* Tests: `crates/lector-git/tests/sync.rs` (bare remote + two clones: fetch incl. tags and prune, ff pull + restore_ref,
+  diverged → rebase without merge commit, rebase conflicts → abort, no upstream / dirty tree, push ff / up to date /
+  rejected, set upstream, force-with-lease ok + stale, remote and local hooks, ssh auth / host key / DNS failures via
+  `GIT_SSH_COMMAND` injected through `SyncOptions::env`, deterministic cancel mid-fetch kills the fake ssh, branches,
+  stash round trip + conflicting pop), unit tests on captured progress (`\r` updates) / porcelain / classification /
+  redaction; `crates/lector-app/tests/git_sync.rs` (spec flags, fetch + pull + journal undo, typed errors, rebase + push,
+  branch create/switch/stash-and-switch/rename/delete/upstream undo, stash push/drop/pop undo, env injection via `SyncHost`).
+
+### lector-terminal (v0.7) — as implemented
+UI-free core of the integrated multi-tab terminal. No internal dependencies, no GPUI, no tokio,
+`#![forbid(unsafe_code)]`. Building blocks: `portable-pty` 0.9 (openpty / ConPTY, sync) for the PTY and
+`alacritty_terminal` 0.26 (default features off) for the VT parser, grid, scrollback and reflow. alacritty's own
+`tty`/`event_loop` modules are not used (they own the PTY and read loop; portable-pty does that). **No alacritty or
+portable-pty type appears in the public API**: snapshots, colors, cursor, modes, points and events are crate types, so
+`lector-ui-terminal` depends on `lector-terminal` only.
+```rust
+// Session (one per tab). Dropping it kills the child's process tree.
+Terminal::spawn(SpawnOptions, wake: Option<WakeFn /* Arc<dyn Fn() + Send + Sync> */>) -> Result<Terminal, TerminalError>
+term.snapshot() -> Snapshot                // one per frame; re-arms Wakeup
+term.try_event() / drain_events() / recv_event_timeout(d) -> TerminalEvent
+term.lock() -> EmulatorGuard               // Deref<Target = Emulator>: selection, search, links, marks, scroll
+term.send_key(Key, Modifiers) -> bool; send_text(&str); paste(&str); write(bytes)   // never block
+term.send_mouse(MouseEvent) -> bool        // false: the app does not want it, the UI handles it (select/scroll)
+term.set_focused(bool); scroll(ScrollAmount); resize(TermSize) -> Result<..>; kill()
+term.cwd() -> PathBuf; resolve_link(&LinkTarget, &AtomicBool) -> Option<LinkTarget>
+term.exit_info() -> Option<ExitInfo { code, signal, success }>; is_running(); pid()
+SpawnOptions { profile: ShellProfile { name, program, args, env }, cwd, env, size, scrollback /*10_000*/,
+               shell_integration: Option<PathBuf /*dir under data_dir()*/>, env_scrub, scroll_to_bottom_on_input }
+ShellProfile::default_for_platform()       // Unix $SHELL → /bin/bash → /bin/sh (login on macOS);
+                                           // Windows pwsh.exe → powershell.exe → cmd.exe on PATH
+enum TerminalEvent { Wakeup, TitleChanged(Option<String>), Bell, CwdChanged(PathBuf), PromptStarted, CommandStarted,
+  CommandOutputStarted, CommandFinished { exit_code }, ClipboardCopy { text, primary_selection },
+  ClipboardReadDenied, Exited(ExitInfo) }
+// Headless core (also usable directly; tests feed bytes without a PTY)
+Emulator::new(EmulatorConfig { size, scrollback, word_separators, initial_cwd }); feed(&[u8]);
+  snapshot() -> Snapshot; take_events(); take_responses() -> Vec<u8>; resize(TermSize); scroll(ScrollAmount);
+  modes() -> TerminalModes; start_selection(SelectionKind{Simple,Word,Line,Block}, GridPoint, Side);
+  update_selection(..); select_all(); clear_selection(); selection_span(); selection_text() -> Option<String>;
+  set_search(&SearchQuery { pattern, regex, case_sensitive }) -> Result; search_next(Direction) -> Option<SearchMatch>;
+  visible_matches(); link_at(GridPoint) -> Option<LinkCandidate>; visible_links(); command_blocks() -> Vec<CommandBlock>;
+  command_text(&CommandBlock); scroll_to_command(Direction); encode_key/encode_paste/encode_mouse/encode_focus;
+  viewport_point(row, col) -> GridPoint; set_query_colors(QueryColors); cwd(); title(); line_text(i32); screen_text()
+Snapshot { seq, size, rows: Vec<Arc<SnapshotRow { cells: Vec<Cell>, wrapped }>>, damage: Damage::{Full, Rows(Vec<u32>)},
+           cursor: CursorState { row, col, shape, visible, blinking, wide }, display_offset, history_size,
+           selection: Option<SelectionSpan>, modes: TerminalModes }
+Cell { ch, zerowidth, width: CellWidth::{Narrow, Wide, WideSpacer, LeadingSpacer},
+       style: CellStyle { fg, bg: TermColor, attrs: Attrs(BOLD|ITALIC|DIM|INVERSE|HIDDEN|STRIKETHROUGH),
+                          underline: UnderlineStyle, underline_color, hyperlink: Option<Arc<Hyperlink { id, uri }>> } }
+SnapshotRow::runs() -> Vec<TextRun { col, cols, text, style, has_wide }>   // equal styles coalesced, all columns covered
+TermColor::{Foreground, Background, Cursor, BrightForeground, DimForeground, Indexed(u8), DimIndexed(u8), Rgb(r,g,b)}
+LinkCandidate { start, end: GridPoint, text, target: LinkTarget::{Url(String), File { path, line: Option<u32>, col }},
+                source: LinkSource::{Hyperlink, Detected} }
+CommandBlock { id, prompt_line: i32, command_start: Option<GridPoint>, output_line, end_line, exit_code, truncated }
+```
+- **Coordinates.** `GridPoint { line: i32, col: u32 }`: line 0 is the top of the live screen, negative lines are
+  scrollback (alacritty's convention; scroll position does not change them, output scrolling does). Snapshot rows are
+  viewport rows `0..rows`; `viewport_to_grid` / `grid_to_viewport` convert. File-link `line`/`col` are 0-based `u32`.
+- **Threading.** Reader thread (blocking 64 KiB reads) → bounded channel (32 chunks) → parser thread (feeds the
+  `Emulator` under a mutex, ≤ 512 KiB per lock hold, also wakes for expired `?2026` synchronized updates and the exit
+  drain) → events channel (bounded, lossy) + wake callback. Waiter thread reports the exit status (`Exited` after the
+  PTY drained or 250 ms). Writer thread drains an unbounded input queue (pastes of MBs never block the UI). Emulator
+  answers to DA/CPR/OSC 10-12/4 color/size queries are queued to the writer. Under a flood the bounded channel blocks
+  the *child*, so memory is bounded by the channel plus the scrollback; `Wakeup` is sent once until the next
+  `snapshot()`.
+- **Damage.** alacritty's line damage; full damage on resize, display scroll, selection change, screen switch, erase,
+  reset. Undamaged rows are the previous snapshot's `Arc`s.
+- **Shell integration.** OSC 7 (`file://host/path`, percent-decoded; other hosts ignored) and OSC 133 A/B/C/D (also
+  VS Code's 633 A-D) are read by a small scanner running beside the parser, correct across chunk boundaries; it also
+  tracks modifyOtherKeys (`CSI > 4 ; n m`) and X10 mouse (`?9`), which alacritty does not. Marks are stored as absolute
+  line numbers: a probe selection parked far above the grid is rotated by alacritty on every scroll, and its movement
+  is accumulated into a monotonic scroll counter (erase-display/erase-scrollback/screen switches/reset are split out
+  so the probe is read just before them). Blocks above the oldest scrollback line are dropped; on resize marks are
+  re-anchored by counting logical (soft-wrapped) lines from the cursor. Opt-in snippets for bash, zsh, fish and
+  PowerShell are embedded (`shell::*_INTEGRATION`); injection writes only to the given directory: zsh via a `ZDOTDIR`
+  shim, fish via an `XDG_DATA_DIRS` `vendor_conf.d` entry (both restored inside the shell), bash via `--rcfile` (a
+  file sourcing the system bashrc, `~/.bashrc`, then the snippet; only for interactive non-login bash without
+  arguments). PowerShell/cmd: no clean mechanism, no injection (users dot-source the snippet).
+- **Environment.** `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Lector`, `TERM_PROGRAM_VERSION`;
+  `DEFAULT_ENV_SCRUB` removes `LECTOR_*`, `COLUMNS`/`LINES` and other terminals' identity variables.
+- **Process lifetime.** Drop/kill: Unix collects every process of the shell's session (`/proc` on Linux, `ps`
+  descendants elsewhere) while the shell is alive, sends SIGHUP+SIGCONT to them and their groups, and SIGKILLs
+  survivors after 500 ms on a reaper thread (drop never blocks). Windows: `taskkill /T /F` then `TerminateProcess`.
+- **Security.** Nothing received from the program is executed. OSC 52: copy reported as `ClipboardCopy` (UI decides),
+  read denied (`ClipboardReadDenied`; alacritty `Osc52::OnlyCopy`). Titles: control and bidi-override characters
+  stripped, 256 chars max. Link targets are untrusted data (the UI asks before opening); file links are resolved
+  (exists check, `a/`/`b/` diff prefixes) only on demand for the hovered/clicked candidate, cancellable. Bracketed
+  paste strips embedded `ESC[200~`/`ESC[201~` repeatedly; newlines become CR.
+- **Measured.** Parse throughput (release, 2-core sandbox, `cargo bench -p lector-terminal`): 115 MiB/s plain text,
+  69 MiB/s mixed (SGR, CJK, OSC 133/7 every few lines). 20 MB `yes | head` through the PTY with bounded RSS.
+
+### lector-ui-terminal (v0.7) — as implemented
+GPUI front end of the integrated terminal, on top of `lector-terminal` (depends on `lector-ui`, `lector-terminal`,
+`lector-config`, `lector-theme`; nothing depends on it but the binary). `lector_ui_terminal::init(cx)` (after
+`lector_ui::init`) registers the keymap extension, the "Open in Terminal" hook, quit handling and, for every
+`Workspace`, a `TerminalPanel` installed with `Workspace::set_bottom_panel`.
+```rust
+TerminalView::new(id, SpawnOptions, WeakEntity<Workspace>, window, cx)   // spawns on the background executor
+  display_title(); cwd(); has_exited(); is_command_running(); last_command_failed(); kill()
+  copy(cx) -> bool; paste(window, cx); select_all; clear; scroll(ScrollAmount); scroll_to_command(Direction)
+  open_find / find_next(Direction) / close_find               // events: TerminalViewEvent::{TitleChanged, Activity,
+                                                              //   Bell, Exited, CloseRequested, Focused}
+TerminalPanel: new_terminal(CwdRequest::{Explicit(path), Default}, profile: Option<&str>, split: Option<SplitAxis>, ..)
+  toggle; kill(view) (asks when a command runs); activate_relative; focus_split_relative; start_rename;
+  choose_profile; saved_tabs() / restore(Vec<SavedTab>); active_terminal(); terminals()
+TerminalItem::new(view)                // a terminal as an editor-area PaneItem (item_key "terminal:<id>", no session)
+panel_for(workspace_id, cx); kill_all(cx)
+// Pure, tested modules: config (profile/cwd/spawn options), keys (translation + pass-through bindings),
+// colors (TerminalPalette per theme), grid (grid_size, cell_at, RowCache, merge_backgrounds), model (PanelModel),
+// routing (route_url, route_file, paste_needs_confirmation), session (SavedTab load/store).
+```
+- **Frame scheduling.** The core's wake callback (parser thread) only flips an `AtomicBool` and, once, sends on an
+  unbounded channel; a GPUI task drains it, drains the session's events (title, cwd, OSC 133, exit; bounded) and
+  calls `cx.notify()`. The element takes **one** `snapshot()` per frame and only when woken (or resized). The core
+  sends no further `Wakeup` until the next snapshot, so a terminal that is not painted (inactive tab, collapsed
+  panel, background editor tab) never snapshots and costs nothing however much it prints; it raises
+  `has_new_output` (activity dot) once. Output volume never turns into UI-thread work beyond one frame.
+- **Rendering.** Cell size = the font's em advance × `round(font_size × line_height)` (terminal font settings, else
+  the code font, ligatures off; the code font is not UI-scaled). `grid_size(bounds)` → `Terminal::resize`, at most
+  one resize per 50 ms while dragging (the last size always lands). `RowCache<Rc<ShapedRow>>` keeps one entry per
+  viewport row keyed by `Arc::ptr_eq` on the snapshot row + a style generation (theme, font): only rows whose `Arc`
+  changed are re-shaped (the emulator also re-reports the cursor's row). A row is shaped per styled run
+  (`SnapshotRow::runs`); runs with wide characters or whose advance would drift from the grid (fallback glyphs) are
+  shaped per cell with `force_width`. Backgrounds are merged spans. Order: background, cell backgrounds,
+  selection / search matches, failed-command bars (OSC 133 `D` ≠ 0, left edge), text, cursor (block with the glyph
+  re-drawn in `cursor_text`, beam, underline, hollow when unfocused; blink off under reduced motion), hovered-link
+  underline (Ctrl/Cmd), IME preedit, scrollbar thumb. Colors: `TerminalPalette::for_theme` — hand-picked 16-color
+  palettes for the four built-in themes (contrast-tested, 7:1 in high contrast), derived from the editor colors for
+  other themes; 256-color cube/greys and truecolor as is; inverse/dim/hidden applied; the palette is also given to
+  the emulator for OSC 10/11/12/4 queries.
+- **Key routing.** The terminal surface has key context `Terminal` (find bar: `TerminalFind`). A keymap extension
+  (`lector_ui::keymap::add_keymap_extension`) adds, for every binding active in `Workspace`/globally, a
+  `zed::NoAction` binding with the same keys in `Terminal` — so Ctrl+W/R/P/B/T, Tab, Alt+arrows... reach the shell —
+  except `keys::RESERVED_ACTIONS` (command palette, F6 region cycling, Shift+F10, next/prev editor tab, zoom, UI zoom,
+  the app menu), every `terminal::*` action, keys using the platform key (cmd/super) and keys the user bound in
+  `Terminal` themselves. Unbound keys: plain text goes through the IME input handler (`EntityInputHandler`: dead keys,
+  compose, preedit drawn at the cursor); the rest is translated by `keys::route_keystroke` (Ctrl/Alt combos → the
+  core's encoder; Windows AltGr = Ctrl+Alt producing a character is typed; macOS Option types characters unless
+  `terminal.option_as_meta`; Shift+PageUp/Down scroll locally off the alternate screen).
+- **Mouse.** Drag selects (double-click word, triple-click line, Alt-drag block, Shift-click extends), wheel scrolls
+  the scrollback or goes to the program when it asked for mouse reporting / alternate scroll; Shift forces local
+  handling; right-click menu (Open Link, Copy, Paste, Select All, Find, Clear, Split, Rename, Move, Kill).
+- **Security.** Lector never writes to a terminal on its own: no auto-run; "Open in Terminal" only sets the folder;
+  Clear sends Ctrl+L to the shell only as the user's explicit command. Links: only `http`, `https`, `mailto` open
+  (`routing::route_url`), anything else is ignored with a toast; file links are resolved by the core against the
+  terminal's cwd on the background executor (cancellable) and open in Lector at the line (outside the project:
+  read-only). Multi-line pastes into a program without bracketed paste ask first (`terminal.confirm_multiline_paste`,
+  "don't ask again" for the session). OSC 52 copies land only while that terminal is focused; reads are denied by
+  the core. The shell program/args, profiles and env are user-only settings (project layers are stripped, like
+  LSP/agent commands). Agents get no terminal access.
+- **Lifecycle.** On exit: "[Process exited with code N]" banner, the tab stays until a key or close
+  (`terminal.close_on_exit`). Kill asks first only when shell integration reports a running command. App quit:
+  sessions saved and every terminal killed (`kill_all`); dropping a view kills its process tree. Session restore
+  (`terminal.restore`): panel tabs/splits and custom names per project root in `<data dir>/terminal/sessions.json`
+  (≤ 12 tabs × 4 splits), fresh shells in the saved folders; editor-area terminals are not restored.
+- **Settings** (`[terminal]`, `lector_config::TerminalSettings`): `shell`, `profiles`, `default_profile`, `env` (user-only),
+  `font_family`, `font_size`, `line_height` (unset: code font, 1.2), `scrollback` (10000), `cursor_style`,
+  `cursor_blink`, `copy_on_select`, `ctrl_c_copies_selection`, `option_as_meta`, `confirm_multiline_paste`,
+  `new_terminal_cwd` ("project" | "active_file"), `shell_integration` (true), `restore` (true), `close_on_exit`.
+
 ### v0.4 algorithms (Agent ALGO; core crates) — as implemented
 All UI-free, no new dependencies on higher layers (`regex-syntax` in lector-search, `regex` in lector-workspace).
 Benchmarks: `cargo bench -p lector-diff --bench moves_bench`, `-p lector-search --bench search_bench|picker_gate`,
@@ -1374,6 +1998,69 @@ with `.line() -> Option<u32>`. Unchanged lines always map `Exact` (property test
 confidence, fuzzy }>`. Exact text + matching context wins first; otherwise fuzzy score
 `0.6·text + 0.3·context + 0.1·proximity` (0.85/0.15 without context). `None` when below `min_confidence`, when two
 candidates tie within 0.01, or when a trivial anchor (blank/brace) lacks context ≥ 0.5.
+
+**Risk — `lector_workspace::risk`.**
+`assess(&FileDiff, &LanguageRegistry) -> RiskReport { score: f32 /*0..1, 3 decimals*/, reasons: Vec<RiskReason { kind:
+RiskKind, weight, message, line: Option<u32>, evidence: Option<Evidence { path, side: EvidenceSide::{Old|New},
+lines: Range<u32> /*0-based, end exclusive*/ }> }> }` (+ `level() -> RiskLevel`, `top_reason()`, `summary()`,
+`is_low_value()`), `rank_files(&[FileDiff]) -> Vec<(index, RiskReport)>` (descending; ties by churn, then index) and
+`rank_files_with(.., langs)`. 0.7 additions: `RiskWeights` (explicit base weights of every signal and dampening
+class, `Default` = fitted, `baseline()` = hand-set start, `NAMES`/`get`/`set` for fitting), `assess_with`,
+`rank_files_weighted`, and the weight-independent split `collect_facts(&FileDiff, &LanguageRegistry, tests_changed) ->
+RiskFacts` + `RiskFacts::score(&RiskWeights)` + `rank_facts(&[RiskFacts], &RiskWeights)` + `tests_changed_in(files)`
+(cheap re-scoring for fitting). New `RiskKind`s: `AuthCheckRemoved`, `VerificationDisabled`, `WeakCrypto`,
+`HardcodedSecret`, `SecretCompare`, `DestructiveMigration`, `ConcurrencyRemoved|Weakened|Added`, `DependencyRisk`,
+`CiWeakened`, `ContainerWeakened`, `TestsDisabled`, `ConfigDefaultFlipped`. Score = noisy-or of raising reasons
+(`weight = base weight x magnitude`, magnitude grows with counts) x product of (1 − damping) for generated/lock/
+test-only/docs files. Public-API and signature changes come from the outline (tree-sitter, per-language export rules for
+Rust, TS/JS, Python, Go, Java, Kotlin, Swift, C#, C/C++ (non-`static`), PHP, Ruby; data types compare whole definitions,
+others their header; added exports are one reason). Other signals are regex tables on changed lines, each pointing at
+its evidence: deleted conditionals / error handling (Rust `?`, `catch`/`.catch`, `except`, Go `err != nil`), added
+`unwrap`/`expect`/`panic`, `unsafe`, eval/exec/shell (also shell strings built from interpolation, `sh -c`), SQL built
+from strings; and, in `risk/signals.rs`: removed authorization checks, disabled TLS/signature verification, weak hashes
+or removed hardening primitives, hard-coded credentials, secrets compared with `==`, destructive migrations
+(`DROP`/`TRUNCATE`/`DELETE` without `WHERE`, `op.drop_column`), removed locks/`await`/memory ordering and weakened
+thread safety, dependency manifests (new dependency, install-time script, git/URL/path/wildcard source, loosened
+pin, `replace`), CI (`pull_request_target`, `write-all`, removed test/lint step), containers (root, remote `ADD`),
+skipped tests, flipped boolean defaults (weighted by key polarity), plus security-sensitive path words, tests-vs-source,
+churn and config. Deterministic; every point of the score is attributable to a reason.
+Evaluation (`crates/lector-app/tests/risk_eval`, see its README): 60 hand-written, synthetic changesets (Rust, TS,
+Python, Go, config), a fixed 70/30 tune/holdout split, top-1 / top-3 / MRR through `review_queue::analyze`, a
+deterministic coordinate search for the weights (`examples/risk_fit.rs`) and a floor test on the holdout top-1.
+Numbers and limits are in `docs/PERFORMANCE.md`: the set was written together with the signals, so it measures
+regressions and coverage, not accuracy on real pull requests (`scripts/risk-eval-import.sh` imports those locally).
+
+**Caches — `lector_workspace::cache`.**
+`ContentCache::{new(CacheConfig), global(), syntax(id, ..), outline(id, &syntax, &text), tags(..), line_diff(old_id,
+new_id, ..), stats() -> CacheStats { per-kind KindStats { hits, misses, evictions, entries, bytes, budget } }, reset_stats, clear}`.
+Keys: `ContentId::{Blob(Oid), Hash(u128)}` (`of_bytes`, `of_text`; 128-bit non-cryptographic hash, 60 KB in 8 µs).
+Thread-safe LRU per kind with byte budgets; values are `Arc`. `review::build_file_diff` / `prepare_side` use
+`ContentCache::global()` for parsing and line diffs (public APIs unchanged). Syntax parse 3.3 ms vs hit 178 ns.
+
+**Structural diff — `lector_workspace::structural`.**
+`diff(old_syntax, old_text, new_syntax, new_text, &Budget) -> Option<StructuralDiff { old: Vec<Marked>, new: Vec<Marked>,
+states, skipped: Vec<SkippedRegion { old: Range<usize>, new: Range<usize>, reason: SkipReason::{RegionBudget|TotalBudget|Time} }> }>`
+and `diff_cancellable(.., &Budget, &lector_search::CancelToken)` (a cancelled token returns `None`);
+`Budget { max_states: 400_000 (all regions), max_region_states: 60_000, max_time: 750 ms, max_nodes: 1M }`;
+`Marked { range: Range<usize> /*bytes*/, mark: Mark::{Changed|Added|Removed|Moved} }`. Trees are lists (bracketed
+nodes) and atoms (leaves, strings, comments) built from `Syntax::flatten`, each with a structural hash. The two trees
+are first reduced level by level: identical prefixes and suffixes are trimmed, then the child sequences are aligned by
+*anchors* (hashes that occur once on each side, found with a sibling-hash diff), so unchanged functions are skipped in
+O(1) each and the expensive search only runs inside the regions between anchors (and inside paired lists of the same
+kind). Each region runs Dijkstra over (left cursor, right cursor, entered-list stack) with difftastic-like costs
+(unchanged 1 + depth penalty, enter both lists 1, replace string/comment 150, novel node 300) under its own
+`max_region_states`; small same-shape runs are paired positionally when the search runs out. A region that exceeds its
+budget (or the total state/time budget) is *not* an error: it is reported in `skipped` and marked from the line diff
+refined with the word diff (`lector_diff::refine_inline`), so the result never hides a change and is never worse than
+the line diff, while every other region stays structural. `None` only when the trees exceed `max_nodes`, the token is
+cancelled or no region could be solved: callers show the line diff. `Moved` = fully novel subtrees with identical
+structure on both sides (>= 3 leaves, >= 12 bytes). Adjacent marks merge across whitespace. Invariants (property
+tests): reformatting marks nothing; what is not marked is identical on both sides, in order; marks are sorted,
+disjoint and in bounds, also when regions fall back. 3 000 lines with ~50 changed lines: 11-15 ms (line diff 0.2 ms), 10 000
+lines 36-42 ms, 500 lines 2-3 ms (`cargo bench -p lector-workspace --bench structural_bench`); before 0.7 files of
+a few hundred lines with a small edit exceeded the budget after 150-250 ms. UI note: `review_layer.rs` still treats
+`None` as "too complex" and can read `skipped` (non-empty = part of the diff is line/word based) to say so.
+`lector-syntax` gained `Syntax::flatten(max_nodes) -> Option<Vec<TreeNode>>` (additive).
 
 **Risk — `lector_workspace::risk`.**
 `assess(&FileDiff, &LanguageRegistry) -> RiskReport { score: f32 /*0..1, 3 decimals*/, reasons: Vec<RiskReason { kind:
@@ -1416,13 +2103,26 @@ files > `MAX_INDEXED_FILE_SIZE` are not searchable (never candidates). Candidate
 them; an integration test checks equality with a full search. 3000 files / 16 MB: build 213 ms, index 1.6 MB,
 rare literal 2 µs, regex 8-12 µs, update one file 70 µs.
 
-**Fuzzy finder — `lector_search::Picker`** (API unchanged; added `PickerInjector::push_boosted(item, haystack, boost)`
-and `MAX_RESULTS = 1000`). nucleo is only the lock-free append-only item store; scoring (nucleo `Pattern`/`Matcher`)
-runs on a worker thread using all cores. Only a top-k heap (score, shorter haystack, lower index) is kept,
-`matches()` exposes the best `MAX_RESULTS`; the empty query orders by boost then insertion. Partial results are
-published after the first batch (<= 2048 items) and then at most every 12 ms, `tick` returns true until settled.
-Completed match sets of the last 16 queries are remembered, so typing narrows the previous set and backspace
-reuses a remembered one.
+**Fuzzy finder — `lector_search::Picker`** (API unchanged; added `PickerInjector::push_boosted(item, haystack, boost)`,
+`MAX_RESULTS = 1000` and, in 0.7, `Picker::progress() -> PickerProgress { scanned, total, complete, ranked, current }`,
+`Picker::drop_caches()` and `Picker::heap_bytes()`). nucleo (`Pattern`/`Matcher`) only does the scoring. Items live in
+`picker_store`: chunks of 4096 haystacks in one byte arena each, with dense side arrays (end offsets, a 128-bit
+character mask pair "occurs anywhere" / "occurs at a word boundary", boost) and a lock-free table of sealed chunks, so
+the scan reads sequentially and `matches()` hands out `&T` without `unsafe`. Memory: 22 bytes per path on top of the
+path text and the item (62 MB for 1 M paths of 36 bytes). `picker_plan` classifies the query: single-atom fuzzy
+queries run a *fast* mode (mask rejection, then an upper bound of the nucleo score from the match length, the
+boundary bonus table of the config and the masks; candidates that cannot beat the current k-th best are not scored),
+other syntax (`^`, `$`, `'`, `!`, several atoms, non-ASCII needles) a *masked* or *slow* mode that is exactly nucleo.
+Results are identical to a brute-force nucleo pass (property tests). A pass has two phases: *rank* (top-k heap keyed
+(score, shorter haystack, lower index); `progress().ranked` means the visible page is final) and *count* (exact
+`matched_count`, no scoring for items whose mask proves they match). The empty query orders by boost then insertion.
+Completed passes are remembered (last 16 queries, with the end position of each match): typing narrows the previous
+match set and extends stored match ends, backspace replays a remembered result without scanning, and every chunk
+checks for cancellation, so a new keystroke abandons the old pass within one chunk. `tick` returns true until settled.
+1 M paths on the 2-core VM, p50 / p95 in ms (settled = exact count and final ranking): cold 1-3 characters 8-41 / 10-49,
+extend by one 8-38 / 10-45, backspace 0.1-3.3 / 0.2-5.5; 6 characters cold 17-30 / 20-40 on the uniform corpus and
+15-59 / 16-69 on the varied one (misses: `parser` 55 and `src/ma` 69 ms p95; their first page is exact after 25 and 49 ms
+p95), 6-character extension 6-30 / 8-36. See `docs/PERFORMANCE.md`.
 
 ### v0.5 / v0.6 — agents, CLI/MCP, code hosts, review UX (contracts)
 
@@ -1454,7 +2154,9 @@ pub struct Turn { pub id: TurnId, pub prompt: String, pub before: Option<ShadowS
 
 **lector-agent as implemented (Agent AGENT).**
 * *Protocol* (`rpc`, `session`): ACP v1 implemented directly on `serde_json` — newline-delimited JSON-RPC 2.0, one
-  reader thread per agent process, requests block their caller (`Connection::request(method, params, timeout)` /
+  reader thread per agent process (spawned since 0.7 through `lector_process::Supervisor::global().spawn` with
+  `ProcessKind::Agent`: its own process tree, killed whole on stop / restart / failed start and on app exit; askpass
+  variables scrubbed from its environment), requests block their caller (`Connection::request(method, params, timeout)` /
   `start_request` → `PendingReply::wait`), agent→client requests each run on their own thread (a permission prompt
   blocks only itself), notifications are delivered in order. Malformed lines are counted and skipped, answers to
   unknown ids ignored, unknown methods answered `-32601`. No async runtime (the `agent-client-protocol` crate needs an
@@ -1640,6 +2342,7 @@ Submitting a review is an explicit user action, irreversible → confirmation di
 * **Settings `[forge]`**: `github_hosts`, `gitlab_hosts`, `api_urls` (host → API base), `default_filter`
   (`review_requested`). Ignored (with a warning) in a project's `.lector/settings.toml`, so a repository cannot send
   your token to another server.
+* **Update check (v0.7)**: `lector_forge::releases` (same ureq setup, no token) — see "Updates and signing (v0.7)".
 
 **CLI and MCP (v0.5, Agent CLI).** Subcommands of the `lector` binary drive `AppCore` headlessly:
 `lector status`, `lector changes [--json]`, `lector diff <changeset> [--json]`, `lector commands`,
@@ -1667,7 +2370,7 @@ Two UI-free crates, layered `lector (bin) → lector-cli → lector-mcp → lect
 * **Subcommands**: `status [PATH]` (gix only, no core or database: ~10 ms), `changes [--staged | --unstaged | --branch BASE |
   --range A..B] [--no-risk] [-C DIR]`, `diff <changeset> [--file P] [--moved] [-U N]`, `commands [--category C]`,
   `run <id> [--args JSON | @file | -] [--allow-writes]`, `activity [-n N] [--all]`, `undo <id> [--force]`,
-  `mcp [PATH] [--allow-writes]`; global `--color auto|always|never` (auto = stdout is a TTY, `NO_COLOR` empty/unset, `TERM`
+  `mcp [PATH] [--allow-writes]`, `health [-n N]` (local crash log and session health, see "Measurement (0.7)"); global `--color auto|always|never` (auto = stdout is a TTY, `NO_COLOR` empty/unset, `TERM`
   not `dumb`); every command except `mcp` has `--json`. Exit codes 0 ok, 1 error (message `lector: error: ...` on stderr),
   2 usage (clap). A closed stdout (`| head`) exits 0. Diagnostics go to stderr only when `RUST_LOG` is set.
   Changesets: review keys (`worktree`, `staged`, `unstaged`, `untracked`, `commit:<rev>`, `range:<a>..<b>`,
@@ -1694,6 +2397,9 @@ Two UI-free crates, layered `lector (bin) → lector-cli → lector-mcp → lect
   activity  {entries: [{id, time (RFC 3339 UTC), command, source: ui|cli|mcp|agent|internal, summary, repo, paths, args,
               undoable, undone, undo_of?, undone_by?}]}                       // newest first, current repository unless --all
   undo      {undone: <id>, entry: <the entry the undo recorded>}
+  health    {sessions, running, clean, abnormal, panics, crash_free_rate: 0..1|null, by_version: [{version, sessions, clean,
+             abnormal, panics}], crash_reports, crash_dir, last_crashes: [{file, path, time, version, os, thread, location,
+             message}]}                                                       // newest first, at most `-n` (default 5)
   ```
   `risk.reasons[].kind` is the snake_case `lector_workspace::risk::RiskKind` (`public_api_changed`, `panic_added`, ...).
   Moved blocks come from `lector_diff::moves` (within a file: `detect_moved`; between files of the changeset:
@@ -1741,7 +2447,7 @@ the user's "reviewed" marks and "last looked" fingerprint in the Db (`kv`), neve
 * **`lector_app::review_queue`** (pure, UI-free): `analyze(&[Arc<FileDiff>], &AnalysisOptions) -> ChangesetAnalysis
   { order: Vec<QueueEntry { index, report: RiskReport, group: Attention | LowRisk }>, moves: Vec<FileMoves>,
   hunks: Vec<Vec<HunkFingerprint>> }` (risk from `lector_workspace::risk::rank_files`; generated / lock files and
-  score <= 0.05 form the low-risk group, placed last). Moves: `intra_file_moves(&FileDiff)` (what a single file can
+  score <= 0.05 form the low-risk group, placed last; `RiskReport::is_low_value()`). Moves: `intra_file_moves(&FileDiff)` (what a single file can
   know) and `analyze_moves(&[files])` (adds cross-file moves via `lector_diff::detect_moved_across`); a
   `MoveSpan { rows, other_path, other_lines, same_file, reindented }` per block on each end (`FileMoves { removed,
   added }`). Hunk marks: `hunk_fingerprints` (sha256 of the hunk's removed + added lines, plus an `Anchor`),
@@ -1811,6 +2517,9 @@ pub trait PaneItem { fn title; fn icon; fn path; fn view(&self) -> AnyView; fn f
 // Option<GutterAnnotations{width_chars, blocks: Vec<GutterAnnotation{rows, text, detail, bar, shaded, muted}>}>)
 // (a left column before the line numbers) + on_gutter_annotation_click(|block_ix, window, cx|);
 // Pane::index_for_key(key, cx); Workspace::{show_toast(msg, cx), set_branch(branch, status_label, cx), is_sidebar_visible()}.
+// v0.7: Workspace::set_branch_status_view(Option<AnyView>, cx) (a view drawn in place of the status-bar branch button:
+// lector-ui-git's sync control); TextInput::{set_masked(bool, cx), is_masked(), clear_secret()} (secrets drawn as •,
+// no copy / cut).
 // components::text_area::TextArea (v0.2): multi-line input — IME (EntityInputHandler), soft wrap, grows between
 // set_line_limits(min, max) rows then scrolls, mouse/keyboard selection (double/triple click), clipboard, undo/redo
 // (typing coalesced within 1 s), placeholder, set_ruler(Option<col>), set_font_family; text()/set_text/is_empty/
@@ -1871,6 +2580,18 @@ impl Workspace {
 // Settings: settings::{AppSettings::get(cx) -> Arc<Settings>, apply_settings, bind_effective_keymap, UiFont}.
 // Markdown: markdown::{parse(&str) -> Vec<Block> (blocking, highlights code fences), render_blocks(..)}.
 // lector-ui additions to Actions: workspace::ShowOutline (outline sidebar panel; ToggleOutline is the file-symbol picker).
+```
+Seams added for the terminal (v0.7, all additive):
+```rust
+Workspace::set_bottom_panel(view: AnyView, focus: FocusHandle, cx); set_bottom_panel_visible(bool, window, cx);
+Workspace::is_bottom_panel_visible(); bottom_panel_focus()    // panel below the editor area, resizable (top edge),
+                                                             // Region::BottomPanel in F6 order (before the status bar)
+keymap::add_keymap_extension(cx, fn(&[KeySpec]) -> Vec<KeySpec>); keymap::extension_bindings(cx, &specs)
+                                                             // applied by settings::bind_effective_keymap
+terminal_hook::{set_open_in_terminal(cx, f), has_terminal(cx), open_in_terminal(path, window, cx)}
+                                                             // file tree (folders, files, empty area) and tab menus
+TreeDelegate::background_context_menu(window, cx) -> Option<Entity<ContextMenu>>   // right-click below the nodes
+components::split::panel_resize_handle_top(id, cx); keymap::contexts::{TERMINAL, TERMINAL_FIND}
 ```
 Menus, window chrome and the welcome view (v0.2 "ease of access"):
 ```rust
@@ -2104,6 +2825,211 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   snapshot; dirty → `DiskConflict` banner: Reload (discard mine) / Keep Mine (next save overwrites) / Compare
   (`editor::compare::CompareItem`, unified disk ↔ buffer diff from `lector_diff` rows).
 
+### Inline agent edit and turn summaries (v0.7) — as implemented
+
+**Inline agent edit** (`Ctrl/Cmd+I`, "Edit with Agent…" in the editor context menu, View → Agent and the palette). Select
+code (or leave the caret on a line), type an instruction in the small box under the selection, and the agent's change
+appears as a diff inside the file's own tab.
+
+* *Layers.* `lector_agent::inline_edit` (UI-free, unit-tested; no GPUI): `InlineRequest::from_selection`, the state machine
+  `InlineEdit` (`Prompting → Running{turn} → Reviewing → Done(Resolved | NoChanges | FellBack(reason))`, plus
+  `Cancelled` and `Failed`), `compute_hunks(old, new)` (line diff through `lector-diff`, lossless: a mismatch falls back
+  to one whole-file hunk), `splice`, `focused_prompt`, `availability(&AvailabilityInput) -> Result<(), Unavailable>`
+  and `status_line(&Turn)`. `lector_ui::editor::inline_diff` (UI only; knows nothing about agents): `FileView::set_inline_edit(
+  Option<InlineEditUi>)`, `InlineEditAction { AcceptHunk, RejectHunk, AcceptAll, RejectAll, Cancel, Dismiss, FollowUp,
+  OpenReview }` delivered to the owner's handler, `InlineDiffSource` (the merged view, below). `lector_ui_agent::inline_edit`
+  (`InlineEdits`, one per workspace window) connects the two to the Agent panel's session, the buffer and the workspace.
+* *Disabled states* (each with its reason in a toast, and a menu/context-menu entry that is never silently dead): the tab is
+  not an editable text file; the tab is read-only; the file already has an unresolved inline edit; no agent is configured
+  (the toast offers "Set up an agent", which runs `agent::NewSession`, the existing setup path); the session is busy.
+* *The turn.* Submitting calls `AgentSession::prompt(text, context)`: a normal turn, so the checkpoint, the journal, undo
+  of the whole turn, permission prompts (the Agent panel opens when one is pending) and confinement all apply. The prompt
+  puts the instruction alone on its first line, then the path, the line range, the selected text, six lines of context
+  either side, and the constraint to change only that file near the range. While the turn runs the range carries an
+  accent tint and a "Working…" marker, the bar above the code shows the agent's name and the newest status line with a
+  Cancel button (it cancels the turn), and the tab stays editable. Escape in the prompt box cancels before anything ran.
+* *Apply or overlay? The agent's write lands on disk first; the editor shows a diff against the baseline.* The alternative
+  (hold the proposal back and show it as an overlay with Accept/Reject) needs the agent's `fs/write_text_file` to be
+  intercepted and deferred, which breaks three guarantees that already hold for every agent turn: the checkpoint after the
+  turn is the truth about what the agent did (review tab, summary, "Undo turn"), the journal records every write when it
+  happens, and an agent that reads a file back after writing it sees its own write. Holding writes back also changes what
+  the agent can observe (tests it runs would see old files). So the write lands, and the in-place diff is a *view* of the
+  turn against the text the file had when the box was submitted. Nothing is lost by this choice: Undo restores the exact old
+  text, and the turn's review tab and "Undo turn" are still there.
+* *The in-place diff.* While hunks are pending the tab shows the file with each hunk's old lines inserted above its new
+  lines (`InlineDiffSource`: a read-only `CodeSource` wrapper, because the code view has no virtual rows). Removed lines use
+  the diff's red, added lines its green, and every old row has `-` and every new row `+` in the gutter, so no meaning rests on
+  color. Per hunk: Keep and Undo buttons at the first row. In the bar: "Keep all", "Undo all", "Refine…" and the count.
+  Keys (context `CodeView && inline_edit`): `Alt+Y` keep the hunk under the cursor, `Alt+N` undo it, `Alt+Shift+Y` keep all,
+  `Alt+Shift+N` undo all; `Alt+]` / `Alt+[` (the existing next/previous change keys) walk the hunks because the wrapper
+  reports one gutter mark per hunk. Hunks far from the selection are flagged in a note ("3 changes outside the selected
+  lines"). The tab is read-only while the merged view is up (rows no longer match the buffer); it returns to its previous
+  read-only state, with the cursor near where it was, when the last hunk is decided.
+* *Undo semantics.* **Keep** writes nothing: the text is already in the buffer and on disk. **Undo** restores the hunk's
+  exact old text with one buffer edit (`DocumentModel::apply_edits`: one undo step, "Undo all" is one step for all hunks), so
+  the file becomes *unsaved* and Ctrl+Z brings the agent's text back; the user saves it like any edit (Lector never saves
+  on its own, see "Write policy"). The end state is always consistent: every hunk is Kept or Undone and the file is the
+  splice of the two (accept all = the agent's text, undo all = the baseline, any mix = baseline hunks where undone; this is
+  property-tested for every combination). "Undo turn" in the Agent panel still restores the whole turn from its checkpoint.
+* *Other files.* When the turn changed other files the bar says "The agent also changed N other files" with a button that
+  opens the turn's review tab.
+* *Conflicts.* While the agent works, an edit by the user inside the selected range ends the inline review when the turn
+  finishes (the review tab opens instead, with a toast saying why); other edits only get a note ("check that your edits are
+  still there": the agent's whole-file write may have replaced them). While reviewing, an edit that touches a pending hunk
+  (including a disk reload) falls back to the review tab at once. The agent's own write is recognised by its edit having no
+  origin view.
+* *Follow-up.* "Refine…" opens the prompt box again; the instruction becomes a new turn in the same session, measured
+  against what the file would be with the pending hunks undone, and its result replaces the pending hunks (decided hunks
+  stay decided).
+* *Known gaps.* Word-level highlights inside a changed line are not drawn; the merged view hides folds and sticky headers;
+  diagnostics squiggles can sit on the wrong row while it is up; a failed or cancelled turn that already wrote the file is
+  shown as a review with a note (the write cannot be taken back except by Undo). Not exercised with a real agent in a real
+  window: the controller is tested with a scripted fake ACP agent (`crates/lector-agent/tests/inline_edit.rs`).
+
+**Turn summaries.** `lector_agent::summary::TurnSummary::compute(repo, languages, &changeset, &DiffOptions)` (blocking) and
+the pure `from_diffs(&[Arc<FileDiff>])`: files in the review queue's order (`lector_app::review_queue::analyze`: attention
+group by risk, then generated / lock / negligible files as a low-value group), per file the added and removed lines, the top
+risk reason and its evidence lines, whether it is a test file, and a `NavTarget { path, old_side, line }` (the evidence
+line, else the first changed line; a deleted file opens on the old side). `headline()` reads like "Changed 4 files (+62 −17).
+Riskiest: src/auth/session.rs — removes error handling (lines 40–52). Tests touched: 2 files." with variants for one file,
+only tests ("only test files"), and only generated or lock files. **No language model is involved:** the sentence is built
+from the diff, the risk analysis and a path heuristic, so it is deterministic and works offline. The Agent panel computes it
+on a background thread when a turn that changed files finishes and caches it per turn (turns that changed nothing get
+nothing); it shows under the turn with clickable files (`AgentPanel::review_turn_at` opens the review tab at the evidence
+line), "Review changes" and "Undo turn". The same card is the header of the turn's review tab (`ReviewView::set_header_view`,
+`ReviewView::show_file_at`, `review_tab::open_review_view`). When `StructuralDiff.skipped` is not empty the diff shows
+"Syntax-aware diff skipped for part of this file (too large); showing line diff there" (`StructuralOutcome::PartialMarks`).
+
+## Updates and signing (v0.7)
+
+Goal: installs and updates can be trusted without Lector ever updating itself behind the user's back.
+v0.7 is **notify only**: Lector can tell you that a newer release exists, which file fits your machine and
+what its checksum should be, and open the release page; it never downloads and runs anything.
+
+### Trust model
+
+Three layers, each useful on its own and none depending on the others:
+
+1. **Transport**: HTTPS to `api.github.com` / `github.com` (rustls + the platform verifier, proxies from the
+   environment).
+2. **Operating-system signatures** (what the OS shows the user; the project cannot control how it is judged):
+   macOS Developer ID + notarization (hardened runtime, no entitlements: `packaging/macos/entitlements.plist`),
+   Windows Authenticode (Azure Artifact Signing or a certificate) for `lector.exe`, `lector-cli.exe`, the
+   installer and the MSI, GPG detached `.asc` files (and an embedded `.rpm` signature) on Linux. All optional:
+   the release workflow signs only when the matching secrets exist and states in the release notes what was
+   actually signed.
+3. **The project's own signature**: `SHA256SUMS.txt` of every release carries a minisign (Ed25519, prehashed
+   `ED`) signature `SHA256SUMS.txt.minisig` whose trusted comment is exactly `lector <tag>`. The public key is
+   committed as `packaging/update-key.pub` and compiled into `lector-forge` (`UPDATE_PUBLIC_KEY`). This is what
+   `UpdateStatus::Available::verified` means, independently of OS vendors and of GitHub's account security.
+
+`verified` is **true only when** a real key is compiled in, the `.minisig` parses, its key id matches, the Ed25519
+signature over the exact `SHA256SUMS.txt` bytes and the trusted-comment signature both verify, and the trusted
+comment names this release's tag (so an older, validly signed file cannot be replayed under a newer tag). Legacy
+non-prehashed signatures are refused. **While `packaging/update-key.pub` is the placeholder (no key line),
+nothing is ever verified**: there is no "verified: unknown" middle state and the UI must not imply verification;
+it may still show the published SHA-256 as "unsigned checksum". Key rotation = ship a Lector with the new public
+key first. Not covered: a stolen signing key, or a compromised build pipeline that holds it.
+
+### Contract (`lector_forge::releases`, UI-free, blocking, no tokio)
+
+```rust
+pub fn check_for_update(current_version: &str, channel: Channel) -> UpdateStatus;      // production defaults, no state
+pub fn check_for_update_with(current_version: &str, channel: Channel,
+                             opts: &UpdateOptions, state: &mut UpdateState) -> UpdateStatus;
+pub enum Channel { Stable, Preview }
+pub enum UpdateStatus {
+    UpToDate,
+    Available { version, notes_url, published_at: Option<i64>, prerelease: bool, assets: Vec<ReleaseAsset>,
+                verified: bool, install_kind: InstallKind, action: UpdateAction, hint: Option<String> },
+    CouldNotCheck { reason: CheckFailure },        // offline, rate limited, HTTP error, odd response: stay quiet
+}
+pub struct ReleaseAsset { name, url, size, sha256: Option<String> }   // sha256 from SHA256SUMS.txt; trust it only if `verified`
+pub enum UpdateAction { Download { asset }, PackageManager { command }, ReleasePage }
+pub enum CheckFailure { RateLimited { retry_at: Option<i64> }, Network(String), Http(u16), BadResponse(String), InvalidVersion(String) }
+pub struct UpdateState { last_checked: Option<i64>, etag: Option<String>, releases: Vec<Release> }   // load(path) / save(path)
+pub struct UpdateOptions { api_base, repo, public_key: Option<String>, platform: Platform, install_kind: InstallKind }
+// pure helpers (all unit-tested): compare_versions, pick_release, parse_releases, parse_checksums,
+// verify_checksums(public_key, sums, signature, tag), select_asset, plan_action, detect_install_kind(&InstallProbe),
+// os_release_ids, embedded_public_key_text, state_file_in(data_dir)
+```
+
+* **Request**: `GET {api}/repos/meetdhruva/lector/releases?per_page=30` with `Accept: application/vnd.github+json`,
+  `User-Agent: lector/<version>`, no credentials, no cookies, no identifiers; `If-None-Match` when a cached list
+  exists (a `304` is answered from `UpdateState::releases` and does not count against GitHub's rate limit).
+  Timeout 20 s, response ≤ 8 MiB. `403`/`429` with `x-ratelimit-remaining: 0` or `Retry-After` is
+  `RateLimited { retry_at }` (from `Retry-After` or `x-ratelimit-reset`); other statuses are `Http(n)`.
+  A connection failure leaves `last_checked` untouched; rate limits and HTTP errors count as a check.
+* **Selection**: drafts ignored; tags that are not semver ignored; build metadata ignored; `Stable` takes only
+  non-prerelease versions, `Preview` also pre-releases; the newest candidate must be strictly greater than the
+  running version, so a downgrade is never offered (a pre-release build is not "updated" to an older stable).
+* **Verification data** (only when an update exists): `SHA256SUMS.txt` (≤ 256 KiB) and `SHA256SUMS.txt.minisig`
+  (≤ 8 KiB) are fetched from the release's assets (URLs must be `https://github.com/...` or the configured API
+  origin); every asset's `sha256` is filled from the sums file; `verified` as above. Nothing else is downloaded.
+* **Install kind** (`detect_install_kind(&InstallProbe)`, pure; `InstallProbe::from_environment()` reads the
+  executable path, `$APPIMAGE`, `$FLATPAK_ID` / `/.flatpak-info`, `/etc/os-release`, the Homebrew Caskroom,
+  `lector-data` and `unins000.exe` next to the executable): `MacApp`, `Homebrew`, `WindowsSetup` (Inno uninstaller
+  present), `WindowsMsi` (Program Files without it), `WindowsPortable` (`lector-data`), `Deb` / `Rpm` (`/usr/bin`
+  + distro family), `AppImage`, `Tarball` (`/usr/local/bin`, `~/.local/bin`), `Flatpak`, `Unknown`. Package-manager
+  installs (`Homebrew`: `brew upgrade --cask lector`, `Flatpak`: `flatpak update io.github.meetdhruva.Lector`) get
+  `UpdateAction::PackageManager`; known kinds get the matching file via `select_asset`
+  (`Lector-V-macos-universal.dmg`, `-windows-{x64,arm64}-setup.exe` / `.msi` / `-portable.zip`, `lector_V_{amd64,arm64}.deb`,
+  `lector-V-1.{x86_64,aarch64}.rpm`, `Lector-V-{x86_64,aarch64}.AppImage`, `lector-V-linux-ARCH.tar.gz`); anything
+  else gets `ReleasePage`. winget cannot be told apart from a direct installer, so Windows installers carry a
+  `hint` ("Installed with winget? Run `winget upgrade meetdhruva.Lector`").
+
+### Policy and state (`lector_config`)
+
+* `[updates]` in `settings.toml`: `check = "off" | "on"` (**default `off`**: nothing happens on a timer until the
+  user opts in; the UI asks once on first run) and `channel = "stable" | "preview"`. User settings only: a
+  project's `.lector/settings.toml` cannot turn network requests on (ignored with a warning, like `[forge]`).
+* `lector_config::should_check_now(last_checked, now, UpdateCheck) -> bool`: false when off; true when never
+  checked, at least 24 h (`CHECK_INTERVAL_SECS`) after the last request, or when the stored time is more than a day
+  in the future (clock changes). A manual "Check for updates now" ignores it and works with `check = "off"`.
+* State (`last_checked`, `ETag`, cached release list) lives in `lector_config::update_state_file()`
+  (`<data dir>/update-state.json`); the caller loads it, passes it to `check_for_update_with`, and saves it. A
+  corrupt or missing file is an empty state. The one-time "ask the user" flag is the UI's concern.
+* UI contract: show "Lector X is available" and one button that opens `notes_url` or the asset URL in the browser
+  (or the package-manager command); show the SHA-256 and a verified / "not verified" label. No download-and-run.
+
+### Update and health UI (lector-ui-agent: `update_model`, `notices`, `health_model`, `update_ui`) — as implemented
+
+* *Ask once, default off.* On the first run of a build with this feature, a dismissible dialog asks "Check for updates
+  automatically? Lector would ask GitHub once a day whether a new version exists. Nothing about you or your code is sent."
+  with [Turn on] / [Not now] (Escape counts as "Not now"). Whether it was asked, and the answer, live in Lector's own state
+  (`<data dir>/notices.json`, `lector_ui_agent::notices::Notices`), never in the user's settings or project. The dialog is
+  skipped when `[updates] check = "on"` is already set in settings.toml, in headless screenshot runs (`LECTOR_SCREENSHOT`)
+  and with `LECTOR_NO_NOTICES`. A choice made in the dialog or with the toggle wins over `[updates] check`
+  (`Notices::effective_check`); there is no settings window with toggles, so the toggle is the Help menu command below.
+* *Schedule.* When on, one background check at startup (`update_model::run_check` → `check_for_update_with` with the persisted
+  `UpdateState`) if `should_check_now(last_checked, now, On)`: at most one request per 24 h. Its result is kept in
+  `notices.json` so the quiet **status bar item** "Update X" can show on later starts without a request (dropped when the
+  running version caught up). Nothing runs on a timer after startup.
+* *Help menu.* "Check for Updates…" (`workspace::CheckForUpdates`) always works, also with checks off: it shows a dialog with
+  the answer: up to date, could not check (with the reason, e.g. offline or rate limited), or available. "Automatic Update
+  Checks" (`workspace::ToggleAutoUpdateCheck`) flips the choice. Both are in the palette; neither has a default key.
+* *The dialog* (`update_model::dialog_model(&UpdateStatus, current) -> UpdateDialogModel`, UI-free): version, published date,
+  release-notes link, and by `UpdateAction`: `Download` opens the asset URL in the browser and shows the expected SHA-256
+  (with a copy button), `PackageManager` shows a copyable command, `ReleasePage` opens the notes. The word "Verified" appears
+  **only** when `verified` is true; otherwise the dialog says "Signature not available for this build." Lector never downloads,
+  installs or runs anything.
+* *Health.* Help → "Show Crash Log" (`workspace::ShowCrashLog`) opens a dialog from `health_summary()`: sessions (clean,
+  abnormal, running), the crash-free rate, per-version counts and the recent crash reports, each with "Open" (the report in a
+  tab) and "Copy details"; "Show folder" reveals the crash directory. After an abnormal previous exit
+  (`lector_app::health::previous_session_abnormal`) one quiet toast says "Lector didn't shut down cleanly last time" with
+  "Show details"; it is shown once per abnormal session (`Notices::acknowledged_crash`). Nothing is sent anywhere.
+* *GUI sessions only.* `crates/lector/src/main.rs` dispatches askpass and CLI/MCP invocations before anything else; the panic
+  hook is installed after that and `SessionHealth::begin()` runs only for a GUI start, so `lector status`, `lector mcp` and the
+  askpass helper never count as sessions (the headless paths install the hook only, in `lector_cli::run_args`).
+
+### Release pipeline (see docs/RELEASING.md for the checklist)
+
+`.github/workflows/release.yml` signs only with secrets present (`scripts/sign-macos.sh`, `sign-windows.ps1`,
+`sign-linux.sh`, `sign-checksums.sh`), never in `release/**` dry runs unless asked, and records per platform what
+happened (`signing-status/*.txt`) so `scripts/release-notes.sh` reports facts. `scripts/gen-package-manifests.sh`
+fills `packaging/{homebrew,winget,flatpak}` (cask, winget 1.6.0 manifests, Flatpak manifest) from the built files.
+`scripts/gen-update-key.sh` creates the minisign key pair once.
+
 ## Threading model (UI)
 
 * GPUI main thread owns entities (`Workspace`, `Pane`, `CodeView`, ...).
@@ -2111,6 +3037,38 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   applied with `this.update(cx, ..)` and `cx.notify()`.
 * Highlights are computed per visible range (+ margin) and cached per
   `(text.version(), row-chunk)`.
+
+### Measurement (0.7): crash log, instruction gates, journeys
+
+The 0.7 targets ("sessions without a crash", hot-path budgets, whole journeys) rest on three measurements that run
+without a network and send nothing anywhere.
+
+* **Crash log and session health (`lector_app::health`, UI-free).** `install_panic_hook()` chains a panic hook that writes
+  `<data dir>/crashes/crash-<UTC time>-<pid>-<n>.txt` (time, version, OS/arch, thread, location, first line of the panic
+  message, backtrace; the home directory and any `/home/<n>`, `/Users/<n>`, `C:\Users\<n>` show as `~`; no file contents:
+  only the first message line is kept, cut to 300 chars, and the text a failed string slice quotes is dropped; at most 20
+  reports kept, 48 KiB each, 5 written per process). It never panics itself and works on an unwritable data directory.
+  `SessionHealth::begin()` / `end_clean()` (GUI only; Clone, no `Drop` so unwinding is not a clean exit) keep one record per
+  process, `<data dir>/health/sessions/<started ms>-<pid>-<n>.json` (`running` -> `clean`, version, OS, panics); a process
+  writes only its own record, so windows and processes never contend. A `running` record whose process is gone (pid + start
+  token on Linux via `/proc`, `ps` elsewhere, `tasklist` on Windows; treated as alive when the check fails) is an abnormal
+  end: the next `begin` freezes the verdict with an exclusive `<id>.json.abnormal` marker so a reused pid cannot revive it,
+  and a `clean` record always wins over a late marker. The log keeps the newest 500 sessions (live ones are never deleted).
+  `health_summary()` / `health_summary_in(&HealthPaths)` (read-only) -> `HealthSummary { sessions, running, clean, abnormal,
+  panics, crash_free_rate = clean / (clean + abnormal) | None, by_version, last_crashes: Vec<CrashFile>, crash_reports,
+  crash_dir }`. The GUI installs the hook first thing in `main` and begins the session after the start request is built;
+  `end_clean` runs from `App::on_app_quit` (macOS exits inside `[NSApp terminate:]`) and again after `Application::run`;
+  `lector_cli::run_args` installs the hook for the CLI and `lector mcp`, which never count as sessions. Killing the app
+  counts as abnormal (indistinguishable from a crash).
+* **Instruction-count gates (`crates/lector-perf`, `scripts/perf-gate.sh`, `perf/baseline.json`).** Not shipped. One gate
+  binary per crate (`gate_text`, `gate_buffer`, `gate_diff`, `gate_search`, `gate_syntax`) runs named workloads on seeded
+  generated inputs; the `perf-gate` runner executes them under `valgrind --tool=callgrind` and compares the instruction
+  counts with the baseline (default threshold 5 %). The contract of a gate: `--list` (`name<TAB>window|process`), `<name>`,
+  `<name> --setup-only`, `--native`. See `docs/PERFORMANCE.md`, "Instruction-count gates".
+* **Journeys (`crates/lector-cli/tests/journeys`).** Scripted end-to-end walks through the headless core on `git` CLI
+  fixtures (open -> status -> changes -> diff -> stage a hunk -> commit -> activity -> undo; edit -> save -> discard -> undo;
+  review queue and reviewed hunks across a new commit; comments across unrelated edits and new commits; the CLI with its
+  stable `--json` schemas; a `sync` placeholder with a bare remote and two clones). They run on Linux, macOS and Windows.
 
 ## Performance budgets (v0.1.0 release gates)
 
@@ -2158,6 +3116,19 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
 * v0.5 agent sessions (`agent::`, handled by `lector-ui-agent`): TogglePanel (`cmd-alt-i`), NewSession, Cancel
   (`escape` in `AgentPanel`), ReviewLastTurn (`cmd-alt-r`), UndoLastTurn (`cmd-shift-alt-z`), SendFeedback
   (`cmd-alt-f`), SendPrompt (`cmd-enter` in `AgentComposer`; menu-exempt). Menu: View → Agent.
+* v0.7 terminal (`terminal::`, handled by `lector-ui-terminal`): TogglePanel (``ctrl-` ``, all platforms), NewTerminal
+  (``ctrl-shift-` ``), NewTerminalWithProfile, OpenInTerminal, SplitTerminal, SplitTerminalDown, FocusNextSplit,
+  FocusPrevSplit, KillTerminal, Clear, Rename, NextTerminal, PrevTerminal, ScrollToPrevCommand, ScrollToNextCommand,
+  Find, FindNext / FindPrev / CloseFind (`enter` / `shift-enter` / `escape` in `TerminalFind`; menu-exempt), Copy,
+  Paste, SelectAll, MoveToEditor, MoveToPanel. Key context `Terminal` (Linux/Windows: `ctrl-shift-c`/`ctrl-insert`
+  copy, `ctrl-shift-v`/`shift-insert` paste, `ctrl-shift-a`, `ctrl-shift-f`, `ctrl-shift-k` clear, `ctrl-shift-w`
+  kill, `ctrl-shift-5` split, `ctrl-pageup/pagedown`, `ctrl-shift-up/down` commands, `alt-shift-left/right` splits;
+  macOS: `cmd-c/v/a/f/k/w`, `cmd-\`, `cmd-shift-[/]`, `cmd-up/down`, `cmd-alt-left/right`). Menu: View → Terminal,
+  View → Terminal Commands; status-bar "Terminal" button.
+* v0.7 inline agent edit (`agent::`, `lector-ui-agent`; the namespace is now a palette namespace): EditWithAgent (`cmd/ctrl-i`,
+  editor context menu, View → Agent), AcceptInlineHunk (`alt-y`), RejectInlineHunk (`alt-n`), AcceptAllInlineEdits
+  (`alt-shift-y`), RejectAllInlineEdits (`alt-shift-n`), the last four in context `CodeView && inline_edit`. v0.7 Help
+  (`workspace::`, `lector-ui-agent`): CheckForUpdates, ToggleAutoUpdateCheck, ShowCrashLog.
 * v0.4 undo (`workspace::`): ShowActivity (View → Activity Log; the journal of every write Lector made, with Undo per
   entry), UndoLastOperation (`cmd/ctrl-alt-z`; Git → Undo Last Operation; undoes the newest undoable operation in the
   repository of the active window, backed up first and itself undoable).
@@ -2180,3 +3151,10 @@ blame `cmd-alt-b`, markdown preview `cmd-shift-v`, zoom `cmd-=`/`cmd--`/`cmd-0`,
 diff next/prev hunk `alt-n`/`alt-p` (also `]c`-free plain keys `n`/`p` in diff context),
 next/prev file `alt-j`/`alt-k`, toggle viewed `v` (diff context), toggle layout `cmd-alt-d`,
 undo last operation `cmd-alt-z`.
+* v0.7 sync, branches and stash `git::` (handled by `lector-ui-git`, Git menu → Sync … / Branches / Stash): Sync (the
+  obvious next step), Fetch, Pull (fast-forward only), PullRebase, Push, ForcePushWithLease (always confirmed),
+  PublishBranch, SetUpstream, CancelSync, ShowSyncMenu (menu-exempt: opens the status bar dropdown), NewBranch,
+  SwitchBranch, RenameBranch, DeleteBranch, CheckoutRemoteBranch, StashChanges, ApplyStash, PopStash, DropStash.
+  Default keys (Workspace; `cmd` = `ctrl` off macOS; chords with a plain second key like `cmd-k f`): Sync `cmd-k y`,
+  Fetch `cmd-k t`, Pull `cmd-k l`, Push `cmd-k p`, New Branch `cmd-k n`, Switch Branch `cmd-k b`, Stash Changes
+  `cmd-k z`.

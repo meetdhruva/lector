@@ -227,6 +227,24 @@ pub fn panel_resize_handle(id: &'static str, cx: &App) -> impl IntoElement {
         })
 }
 
+/// A horizontal drag handle on the top edge of a panel (the bottom panel); the owner
+/// handles `on_drag_move::<DraggedPanelEdge>` to update its height.
+pub fn panel_resize_handle_top(id: &'static str, cx: &App) -> impl IntoElement {
+    let accent = cx.theme().ui.accent.hsla();
+    div()
+        .id(id)
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(-3.))
+        .h(px(6.))
+        .cursor(CursorStyle::ResizeUpDown)
+        .hover(move |s| s.bg(accent.opacity(0.4)))
+        .on_drag(DraggedPanelEdge { id }, |_, _, _, cx| {
+            cx.new(|_| DragPreview)
+        })
+}
+
 /// Clamps a panel width between `min` and `max`.
 pub fn clamp_width(width: Pixels, min: Pixels, max: Pixels) -> Pixels {
     width.max(min).min(max.max(min))

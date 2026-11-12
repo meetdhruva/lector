@@ -26,6 +26,7 @@ lector-git.workspace = true
 lector-diff.workspace = true
 lector-mcp.workspace = true
 lector-agent.workspace = true
+lector-process.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

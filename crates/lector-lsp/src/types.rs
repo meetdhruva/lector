@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::completion::{CompletionCapabilities, SignatureHelpCapabilities};
 use crate::PointUtf16;
 
 /// A range in a file.
@@ -277,6 +278,10 @@ pub struct ServerCapabilities {
     pub code_action_resolve: bool,
     /// Commands for `workspace/executeCommand`.
     pub commands: Vec<String>,
+    /// `textDocument/completion` options (`None`: not supported).
+    pub completion: Option<CompletionCapabilities>,
+    /// `textDocument/signatureHelp` options (`None`: not supported).
+    pub signature_help: Option<SignatureHelpCapabilities>,
 }
 
 /// Sync state of a document as the server knows it.

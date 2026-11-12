@@ -499,7 +499,8 @@ impl Pane {
         let pane = cx.entity().downgrade();
         let path = self.entries.get(ix).and_then(|e| e.item.path(cx));
         let rel = path.as_ref().map(|p| self.relative_path(p));
-        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+        let menu = ContextMenu::build(window, cx, move |menu, _, cx| {
+            let terminal = crate::terminal_hook::has_terminal(cx);
             let p1 = pane.clone();
             let p2 = pane.clone();
             let p3 = pane.clone();
@@ -526,10 +527,18 @@ impl Pane {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(rel.clone()))
                     })
                     .separator()
-                    .entry("Reveal in File Tree", move |_, cx| {
+                    .entry("Reveal in File Tree", {
                         let path = path.clone();
-                        let _ = reveal.update(cx, |_, cx| cx.emit(PaneEvent::RevealPath(path)));
+                        move |_, cx| {
+                            let path = path.clone();
+                            let _ = reveal.update(cx, |_, cx| cx.emit(PaneEvent::RevealPath(path)));
+                        }
                     });
+                if terminal {
+                    menu = menu.entry("Open in Terminal", move |window, cx| {
+                        crate::terminal_hook::open_in_terminal(path.clone(), window, cx)
+                    });
+                }
             }
             menu
         });

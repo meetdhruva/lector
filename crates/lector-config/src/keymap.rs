@@ -215,6 +215,55 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(w, format!("{m}-alt-f"), "agent::SendFeedback");
     add("AgentComposer", format!("{m}-enter"), "agent::SendPrompt");
     add("AgentPanel", "escape".into(), "agent::Cancel");
+    // v0.7 inline agent edit: ask for a change in place, then decide each hunk. The decision
+    // keys apply only while hunks are pending (`inline_edit` is set on the code view then).
+    add(c, format!("{m}-i"), "agent::EditWithAgent");
+    let ie = "CodeView && inline_edit";
+    add(ie, "alt-y".into(), "agent::AcceptInlineHunk");
+    add(ie, "alt-n".into(), "agent::RejectInlineHunk");
+    add(ie, "alt-shift-y".into(), "agent::AcceptAllInlineEdits");
+    add(ie, "alt-shift-n".into(), "agent::RejectAllInlineEdits");
+    // v0.7 integrated terminal. `Terminal` is the focused terminal: keys bound in `Workspace`
+    // are not seen there (they reach the shell) except a reserved few, see lector-ui-terminal.
+    add(w, "ctrl-`".into(), "terminal::TogglePanel");
+    add(w, "ctrl-shift-`".into(), "terminal::NewTerminal");
+    // X11/Wayland and macOS report Shift+` as `~`.
+    add(w, "ctrl-~".into(), "terminal::NewTerminal");
+    let t = "Terminal";
+    if mac {
+        add(t, "cmd-c".into(), "terminal::Copy");
+        add(t, "cmd-v".into(), "terminal::Paste");
+        add(t, "cmd-a".into(), "terminal::SelectAll");
+        add(t, "cmd-f".into(), "terminal::Find");
+        add(t, "cmd-k".into(), "terminal::Clear");
+        add(t, "cmd-w".into(), "terminal::KillTerminal");
+        add(t, "cmd-\\".into(), "terminal::SplitTerminal");
+        add(t, "cmd-shift-]".into(), "terminal::NextTerminal");
+        add(t, "cmd-shift-[".into(), "terminal::PrevTerminal");
+        add(t, "cmd-up".into(), "terminal::ScrollToPrevCommand");
+        add(t, "cmd-down".into(), "terminal::ScrollToNextCommand");
+        add(t, "cmd-alt-right".into(), "terminal::FocusNextSplit");
+        add(t, "cmd-alt-left".into(), "terminal::FocusPrevSplit");
+    } else {
+        add(t, "ctrl-shift-c".into(), "terminal::Copy");
+        add(t, "ctrl-insert".into(), "terminal::Copy");
+        add(t, "ctrl-shift-v".into(), "terminal::Paste");
+        add(t, "shift-insert".into(), "terminal::Paste");
+        add(t, "ctrl-shift-a".into(), "terminal::SelectAll");
+        add(t, "ctrl-shift-f".into(), "terminal::Find");
+        add(t, "ctrl-shift-k".into(), "terminal::Clear");
+        add(t, "ctrl-shift-w".into(), "terminal::KillTerminal");
+        add(t, "ctrl-shift-5".into(), "terminal::SplitTerminal");
+        add(t, "ctrl-pagedown".into(), "terminal::NextTerminal");
+        add(t, "ctrl-pageup".into(), "terminal::PrevTerminal");
+        add(t, "ctrl-shift-up".into(), "terminal::ScrollToPrevCommand");
+        add(t, "ctrl-shift-down".into(), "terminal::ScrollToNextCommand");
+        add(t, "alt-shift-right".into(), "terminal::FocusNextSplit");
+        add(t, "alt-shift-left".into(), "terminal::FocusPrevSplit");
+    }
+    add("TerminalFind", "enter".into(), "terminal::FindNext");
+    add("TerminalFind", "shift-enter".into(), "terminal::FindPrev");
+    add("TerminalFind", "escape".into(), "terminal::CloseFind");
     // v0.4 accessibility: keyboard-only operation, interface zoom.
     add(w, "f6".into(), "workspace::FocusNextRegion");
     add(w, "shift-f6".into(), "workspace::FocusPrevRegion");
@@ -227,6 +276,51 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(w, format!("{m}-alt--"), "workspace::UiZoomOut");
     add(w, format!("{m}-alt-0"), "workspace::UiZoomReset");
     add(c, "escape".into(), "editor::ClearSelection");
+    // v0.7: completion and signature help. The `completion` / `signature_help` identifiers are
+    // added to the CodeView key context only while the popup is open (see
+    // `lector_ui::code_view::CodeView::set_context_flag`). These come after the plain CodeView
+    // bindings above on purpose: for equal depth GPUI prefers the binding defined last.
+    add(c, "ctrl-space".into(), "editor::TriggerSuggest");
+    add(
+        c,
+        "ctrl-shift-space".into(),
+        "editor::TriggerParameterHints",
+    );
+    let cc = "CodeView && completion";
+    add(cc, "down".into(), "completion::SelectNext");
+    add(cc, "up".into(), "completion::SelectPrev");
+    add(cc, "ctrl-n".into(), "completion::SelectNext");
+    add(cc, "ctrl-p".into(), "completion::SelectPrev");
+    add(cc, "pagedown".into(), "completion::PageDown");
+    add(cc, "pageup".into(), "completion::PageUp");
+    add(cc, "enter".into(), "completion::AcceptOnEnter");
+    add(cc, "tab".into(), "completion::Accept");
+    add(cc, "escape".into(), "completion::Dismiss");
+    let cs = "CodeView && signature_help";
+    add(cs, "alt-down".into(), "signature::NextSignature");
+    add(cs, "alt-up".into(), "signature::PrevSignature");
+    add(
+        "CodeView && signature_overloads && !completion",
+        "down".into(),
+        "signature::NextSignature",
+    );
+    add(
+        "CodeView && signature_overloads && !completion",
+        "up".into(),
+        "signature::PrevSignature",
+    );
+    add(
+        "CodeView && signature_help && !completion",
+        "escape".into(),
+        "signature::Dismiss",
+    );
+    // A completion request that has not been answered yet has no popup to close, but Escape
+    // still cancels it (and nothing else).
+    add(
+        "CodeView && completion_pending",
+        "escape".into(),
+        "completion::Dismiss",
+    );
 
     let d = "DiffView";
     add(d, "alt-n".into(), "diff::NextHunk");
@@ -266,6 +360,15 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     add(cm, format!("{m}-enter"), "git::Commit");
     add(w, format!("{m}-k {m}-c"), "git::FocusCommitMessage");
     add(w, format!("{m}-shift-r"), "git::Refresh");
+    // v0.7: sync with the remote, branches, stash (all rebindable). A `{m}-k` chord with a
+    // plain second key, like `{m}-k f`; none of them is a plain key on its own.
+    add(w, format!("{m}-k y"), "git::Sync");
+    add(w, format!("{m}-k t"), "git::Fetch");
+    add(w, format!("{m}-k l"), "git::Pull");
+    add(w, format!("{m}-k p"), "git::Push");
+    add(w, format!("{m}-k n"), "git::NewBranch");
+    add(w, format!("{m}-k b"), "git::SwitchBranch");
+    add(w, format!("{m}-k z"), "git::StashChanges");
 
     // v0.3: conflict resolution.
     let mg = "MergeEditor";
@@ -354,6 +457,32 @@ mod tests {
         assert_eq!(find(&lin, "editor::ReplaceNext"), ["ctrl-shift-1"]);
         assert_eq!(find(&lin, "editor::ReplaceAll"), ["ctrl-alt-enter"]);
         assert_eq!(find(&lin, "editor::GoToDefinition"), ["f12"]);
+        assert_eq!(find(&lin, "editor::TriggerSuggest"), ["ctrl-space"]);
+        assert_eq!(find(&mac, "completion::AcceptOnEnter"), ["enter"]);
+    }
+
+    /// The completion keys only bind while the popup is open, and after the plain CodeView
+    /// bindings of the same keys (GPUI prefers the last binding at equal depth).
+    #[test]
+    fn completion_keys_are_scoped_and_come_last() {
+        for p in [Platform::MacOS, Platform::Linux, Platform::Windows] {
+            let km = default_keymap(p);
+            for (i, b) in km.iter().enumerate() {
+                if b.action.starts_with("completion::") || b.action.starts_with("signature::") {
+                    let ctx = b.context.as_deref().unwrap_or_default();
+                    assert!(
+                        ctx.contains("completion") || ctx.contains("signature_"),
+                        "{b:?}"
+                    );
+                    let plain = km
+                        .iter()
+                        .position(|o| o.keys == b.keys && o.context.as_deref() == Some("CodeView"));
+                    if let Some(plain) = plain {
+                        assert!(plain < i, "{p:?}: {b:?} must follow the plain binding");
+                    }
+                }
+            }
+        }
     }
 
     /// Regression: writes to the repository are never bound to a bare letter

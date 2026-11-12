@@ -5,8 +5,14 @@
 #![forbid(unsafe_code)]
 
 pub mod feedback;
+pub mod health_model;
+pub mod inline_edit;
+pub mod notices;
 pub mod panel;
 mod render;
+mod summary_ui;
+pub mod update_model;
+mod update_ui;
 
 use gpui::{App, AppContext, Entity, Window};
 use lector_agent::AgentManager;
@@ -36,6 +42,7 @@ pub fn init(cx: &mut App) {
     let core = lector_ui::commands_bridge::core(cx);
     lector_agent::commands::register(&core);
     cx.set_global(PanelsByWorkspace::default());
+    update_ui::init(cx);
     cx.on_app_quit(move |_| {
         AgentManager::of(&core).stop_all();
         async {}
@@ -57,6 +64,14 @@ pub fn init(cx: &mut App) {
             sb.set_panel_view(SidebarPanel::Agent, panel.clone().into(), cx)
         });
         register_actions(ws, &panel);
+        let inline = cx.new(|cx| {
+            inline_edit::InlineEdits::new(
+                cx.weak_entity(),
+                workspace.downgrade(),
+                panel.downgrade(),
+            )
+        });
+        inline_edit::register_actions(ws, &inline);
     })
     .detach();
 }

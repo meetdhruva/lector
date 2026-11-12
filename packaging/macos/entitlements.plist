@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the hardened-runtime signature of Lector.app (scripts/sign-macos.sh).
+
+  Lector needs none. It is not App-Sandboxed (it reads and writes the user's own files and runs git,
+  language servers and agents), it does not generate machine code at run time (no JIT, no
+  `allow-jit` / `allow-unsigned-executable-memory`: GPUI renders with Metal, tree-sitter grammars are
+  compiled in, there is no scripting runtime), it loads no third-party-signed plug-in libraries (no
+  `disable-library-validation`), and it does not read DYLD_* variables (no
+  `allow-dyld-environment-variables`). Camera, microphone, contacts, location and Apple Events are
+  not used.
+
+  Keep this file empty unless a feature really needs an entitlement; every key widens what a
+  compromised Lector could do. If a signed build fails to start, check Console.app for
+  "Code Signature Invalid" / "library load disallowed" before adding anything here.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

@@ -10,6 +10,7 @@ mod core; // Agent APP
 pub mod db; // Agent APP
 pub mod documents; // Agent DOCS
 pub mod git_service; // Agent APP
+pub mod health; // local crash log and session health
 pub mod journal; // Agent SAFE
 pub mod provenance; // Agent REVIEWUX
 pub mod review_queue; // Agent REVIEWUX

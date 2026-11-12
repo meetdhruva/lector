@@ -1,0 +1,32 @@
+{
+  "id": "requirements-unpinned-git",
+  "split": "tune",
+  "category": "deps-ci",
+  "language": "text",
+  "description": "Pins are dropped and a git branch dependency is added to requirements.txt.",
+  "risky": [
+    "requirements.txt"
+  ],
+  "files": [
+    {
+      "path": "app/stats.py",
+      "base": "def stat_0(values):\n    acc = 0\n    for v in values:\n        if v > 0:\n            acc += v * 1\n    return acc\n\n\ndef stat_1(values):\n    acc = 0\n    for v in values:\n        if v > 1:\n            acc += v * 2\n    return acc\n\n\ndef stat_2(values):\n    acc = 0\n    for v in values:\n        if v > 2:\n            acc += v * 3\n    return acc\n\n\ndef stat_3(values):\n    acc = 0\n    for v in values:\n        if v > 3:\n            acc += v * 4\n    return acc\n\n\ndef stat_4(values):\n    acc = 0\n    for v in values:\n        if v > 4:\n            acc += v * 5\n    return acc\n\n\ndef stat_5(values):\n    acc = 0\n    for v in values:\n        if v > 5:\n            acc += v * 6\n    return acc\n\n\ndef stat_6(values):\n    acc = 0\n    for v in values:\n        if v > 6:\n            acc += v * 7\n    return acc\n\n\ndef stat_7(values):\n    acc = 0\n    for v in values:\n        if v > 7:\n            acc += v * 8\n    return acc\n\n\ndef stat_8(values):\n    acc = 0\n    for v in values:\n        if v > 8:\n            acc += v * 9\n    return acc\n\n\ndef stat_9(values):\n    acc = 0\n    for v in values:\n        if v > 9:\n            acc += v * 10\n    return acc\n\n\ndef stat_10(values):\n    acc = 0\n    for v in values:\n        if v > 10:\n            acc += v * 11\n    return acc\n\n\ndef stat_11(values):\n    acc = 0\n    for v in values:\n        if v > 11:\n            acc += v * 12\n    return acc\n\n\n",
+      "head": "def stat_0(values):\n    total = 0\n    for value in values:\n        if value > 0:\n            total += value * 1\n    return total\n\n\ndef stat_1(values):\n    total = 0\n    for value in values:\n        if value > 1:\n            total += value * 2\n    return total\n\n\ndef stat_2(values):\n    total = 0\n    for value in values:\n        if value > 2:\n            total += value * 3\n    return total\n\n\ndef stat_3(values):\n    total = 0\n    for value in values:\n        if value > 3:\n            total += value * 4\n    return total\n\n\ndef stat_4(values):\n    total = 0\n    for value in values:\n        if value > 4:\n            total += value * 5\n    return total\n\n\ndef stat_5(values):\n    total = 0\n    for value in values:\n        if value > 5:\n            total += value * 6\n    return total\n\n\ndef stat_6(values):\n    total = 0\n    for value in values:\n        if value > 6:\n            total += value * 7\n    return total\n\n\ndef stat_7(values):\n    total = 0\n    for value in values:\n        if value > 7:\n            total += value * 8\n    return total\n\n\ndef stat_8(values):\n    total = 0\n    for value in values:\n        if value > 8:\n            total += value * 9\n    return total\n\n\ndef stat_9(values):\n    total = 0\n    for value in values:\n        if value > 9:\n            total += value * 10\n    return total\n\n\ndef stat_10(values):\n    total = 0\n    for value in values:\n        if value > 10:\n            total += value * 11\n    return total\n\n\ndef stat_11(values):\n    total = 0\n    for value in values:\n        if value > 11:\n            total += value * 12\n    return total\n\n\n"
+    },
+    {
+      "path": "app/extras.py",
+      "base": "def extra_base(x):\n    return x + 1\n",
+      "head": "def extra_base(x):\n    return x + 1\n\n\ndef extra_0(x):\n    return extra_base(x) * 2\n\n\ndef extra_1(x):\n    return extra_base(x) * 3\n\n\ndef extra_2(x):\n    return extra_base(x) * 4\n\n\ndef extra_3(x):\n    return extra_base(x) * 5\n"
+    },
+    {
+      "path": "requirements.txt",
+      "base": "flask==3.0.3\nrequests==2.32.3\nsqlalchemy==2.0.30\ngunicorn==22.0.0\n",
+      "head": "flask\nrequests\nsqlalchemy==2.0.30\ngunicorn==22.0.0\nmylib @ git+https://example.invalid/mylib.git@main\n"
+    },
+    {
+      "path": "tests/test_stats.py",
+      "base": "from app import run_case\n\n\ndef test_smoke():\n    assert run_case(0) == 0\n",
+      "head": "from app import run_case\n\n\ndef test_smoke():\n    assert run_case(0) == 0\n\n\ndef test_case_0():\n    assert run_case(0) == 0\n\n\ndef test_case_1():\n    assert run_case(1) == 2\n\n\ndef test_case_2():\n    assert run_case(2) == 4\n\n\ndef test_case_3():\n    assert run_case(3) == 6\n\n\ndef test_case_4():\n    assert run_case(4) == 8\n\n\ndef test_case_5():\n    assert run_case(5) == 10\n"
+    }
+  ]
+}

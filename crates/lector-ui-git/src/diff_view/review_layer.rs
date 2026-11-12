@@ -43,6 +43,9 @@ pub(super) enum StructuralOutcome {
     Off,
     /// Marks to paint.
     Marks(Arc<StructuralMarks>),
+    /// Marks to paint, but part of the file was too large for the syntax-aware diff and keeps
+    /// the line diff (`StructuralDiff::skipped` is not empty).
+    PartialMarks(Arc<StructuralMarks>),
     /// Requested but not possible; the message tells why (line diff is shown).
     Fallback(&'static str),
 }
@@ -90,11 +93,18 @@ fn structural_marks(diff: &FileDiff) -> StructuralOutcome {
         new_text,
         &Budget::default(),
     ) {
-        Some(result) => StructuralOutcome::Marks(Arc::new(StructuralMarks::from_diff(
-            Some(old_text),
-            Some(new_text),
-            &result,
-        ))),
+        Some(result) => {
+            let marks = Arc::new(StructuralMarks::from_diff(
+                Some(old_text),
+                Some(new_text),
+                &result,
+            ));
+            if result.skipped.is_empty() {
+                StructuralOutcome::Marks(marks)
+            } else {
+                StructuralOutcome::PartialMarks(marks)
+            }
+        }
         None => StructuralOutcome::Fallback("the change is too complex"),
     }
 }
@@ -223,6 +233,13 @@ impl DiffView {
             StructuralOutcome::Marks(marks) => {
                 self.review.structural_marks = Some(marks);
                 self.review.notice = None;
+            }
+            StructuralOutcome::PartialMarks(marks) => {
+                self.review.structural_marks = Some(marks);
+                self.review.notice = Some(
+                    "Syntax-aware diff skipped for part of this file (too large); showing line diff there"
+                        .into(),
+                );
             }
             StructuralOutcome::Fallback(why) => {
                 self.review.structural_marks = None;

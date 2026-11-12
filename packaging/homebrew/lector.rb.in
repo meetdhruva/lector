@@ -1,0 +1,35 @@
+# Homebrew cask for Lector. Template: scripts/gen-package-manifests.sh fills the version and
+# sha256 placeholders from a release and attaches the result to it as `lector.rb`. Put it in a tap as Casks/lector.rb
+# (repository meetdhruva/homebrew-tap, `brew install --cask meetdhruva/tap/lector`); see docs/RELEASING.md.
+cask "lector" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/meetdhruva/lector/releases/download/v#{version}/Lector-#{version}-macos-universal.dmg"
+  name "Lector"
+  desc "Fast, reading-first code viewer and git review tool"
+  homepage "https://github.com/meetdhruva/lector"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on macos: ">= :big_sur"
+
+  app "Lector.app"
+  binary "#{appdir}/Lector.app/Contents/MacOS/lector"
+
+  zap trash: [
+    "~/Library/Application Support/Lector",
+    "~/Library/Saved Application State/io.github.meetdhruva.Lector.savedState",
+  ]
+  # BEGIN-UNNOTARIZED (removed by the generator when the release was notarized)
+
+  caveats <<~EOS
+    This release of Lector is not signed with an Apple Developer ID and not notarized, so
+    macOS asks you to confirm the first launch: right-click Lector.app and choose Open, or run
+      xattr -dr com.apple.quarantine "#{appdir}/Lector.app"
+  EOS
+  # END-UNNOTARIZED
+end

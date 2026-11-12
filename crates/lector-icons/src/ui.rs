@@ -252,6 +252,8 @@ ui_icons! {
     Undo => "undo-2",
     /// Delete.
     Trash => "trash-2",
+    /// The integrated terminal.
+    Terminal => "square-terminal",
 }
 
 /// SVG bytes of a UI icon.

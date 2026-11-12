@@ -18,7 +18,7 @@ pub(crate) struct Client {
     token: Token,
 }
 
-fn is_loopback(url: &str) -> bool {
+pub(crate) fn is_loopback(url: &str) -> bool {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let host = rest.split(['/', ':']).next().unwrap_or("");
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")

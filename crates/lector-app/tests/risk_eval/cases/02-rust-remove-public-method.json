@@ -1,0 +1,32 @@
+{
+  "id": "rust-remove-public-method",
+  "split": "tune",
+  "category": "api-break",
+  "language": "rust",
+  "description": "A public method disappears from a public type.",
+  "risky": [
+    "src/store.rs"
+  ],
+  "files": [
+    {
+      "path": "src/extras.rs",
+      "base": "pub fn extra_base(x: u32) -> u32 {\n    x + 1\n}\n",
+      "head": "pub fn extra_base(x: u32) -> u32 {\n    x + 1\n}\n\npub fn extra_0(x: u32) -> u32 {\n    extra_base(x) * 2\n}\n\npub fn extra_1(x: u32) -> u32 {\n    extra_base(x) * 3\n}\n\npub fn extra_2(x: u32) -> u32 {\n    extra_base(x) * 4\n}\n\npub fn extra_3(x: u32) -> u32 {\n    extra_base(x) * 5\n}\n\npub fn extra_4(x: u32) -> u32 {\n    extra_base(x) * 6\n}\n"
+    },
+    {
+      "path": "src/store.rs",
+      "base": "pub struct Store {\n    items: Vec<String>,\n}\n\nimpl Store {\n    pub fn new() -> Self {\n        Store { items: Vec::new() }\n    }\n    pub fn add(&mut self, s: &str) {\n        self.items.push(s.to_string());\n    }\n    pub fn remove(&mut self, s: &str) -> bool {\n        let before = self.items.len();\n        self.items.retain(|i| i != s);\n        before != self.items.len()\n    }\n    pub fn len(&self) -> usize {\n        self.items.len()\n    }\n}\n",
+      "head": "pub struct Store {\n    items: Vec<String>,\n}\n\nimpl Store {\n    pub fn new() -> Self {\n        Store { items: Vec::new() }\n    }\n    pub fn add(&mut self, s: &str) {\n        self.items.push(s.to_string());\n    }\n    pub fn len(&self) -> usize {\n        self.items.len()\n    }\n}\n"
+    },
+    {
+      "path": "tests/extras.rs",
+      "base": "use super::*;\n\n#[test]\nfn smoke() {\n    assert_eq!(1 + 1, 2);\n}\n",
+      "head": "use super::*;\n\n#[test]\nfn smoke() {\n    assert_eq!(1 + 1, 2);\n}\n\n#[test]\nfn case_0() {\n    let got = run_case(0).unwrap();\n    assert_eq!(got, 0);\n}\n\n#[test]\nfn case_1() {\n    let got = run_case(1).unwrap();\n    assert_eq!(got, 2);\n}\n\n#[test]\nfn case_2() {\n    let got = run_case(2).unwrap();\n    assert_eq!(got, 4);\n}\n\n#[test]\nfn case_3() {\n    let got = run_case(3).unwrap();\n    assert_eq!(got, 6);\n}\n\n#[test]\nfn case_4() {\n    let got = run_case(4).unwrap();\n    assert_eq!(got, 8);\n}\n\n#[test]\nfn case_5() {\n    let got = run_case(5).unwrap();\n    assert_eq!(got, 10);\n}\n"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "base": "# Changelog\n\n## 1.4.0\n\n- Added caching\n",
+      "head": "# Changelog\n\n## 1.5.0\n\n- Fixed typos\n- Improved logging\n\n## 1.4.0\n\n- Added caching\n"
+    }
+  ]
+}

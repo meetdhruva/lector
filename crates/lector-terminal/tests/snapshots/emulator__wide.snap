@@ -1,0 +1,9 @@
+---
+source: crates/lector-terminal/tests/emulator.rs
+expression: dump(&s)
+---
+00|a中文b|
+01|éx|
+02|1234567| (wrap)
+03|中|
+cursor 3,2 visible=true

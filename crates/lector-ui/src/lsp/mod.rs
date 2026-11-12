@@ -41,6 +41,7 @@ pub fn init(cx: &mut App) {
     LanguageFeatureProvider::set(cx, features_for_path);
     diagnostics::init(cx);
     format::init(cx);
+    crate::editor::completion::init(cx);
     cx.observe_new(|ws: &mut Workspace, window, cx| {
         if let Some(window) = window {
             wire_workspace(ws, window, cx);

@@ -283,7 +283,8 @@ impl TreeDelegate for FsTreeDelegate {
         let is_branch = node.is_branch;
         let path = node.id.clone();
         let handler = self.on_command.clone();
-        Some(ContextMenu::build(window, cx, move |menu, _, _| {
+        Some(ContextMenu::build(window, cx, move |menu, _, cx| {
+            let terminal = crate::terminal_hook::has_terminal(cx);
             let cmd = |command: TreeCommand| {
                 let handler = handler.clone();
                 let path = path.clone();
@@ -306,12 +307,19 @@ impl TreeDelegate for FsTreeDelegate {
             }
             let abs2 = abs.clone();
             let rel2 = rel.clone();
+            menu = menu.icon_entry(
+                crate::os::REVEAL_LABEL,
+                IconName::FolderOpen,
+                cmd(TreeCommand::RevealInOs),
+            );
+            if terminal {
+                let path = path.clone();
+                menu =
+                    menu.icon_entry("Open in Terminal", IconName::Terminal, move |window, cx| {
+                        crate::terminal_hook::open_in_terminal(path.clone(), window, cx)
+                    });
+            }
             menu = menu
-                .icon_entry(
-                    crate::os::REVEAL_LABEL,
-                    IconName::FolderOpen,
-                    cmd(TreeCommand::RevealInOs),
-                )
                 .separator()
                 .icon_entry("Copy Path", IconName::Link, move |_, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(abs2.clone()))
@@ -334,6 +342,22 @@ impl TreeDelegate for FsTreeDelegate {
                     );
             }
             menu
+        }))
+    }
+
+    fn background_context_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Entity<ContextMenu>> {
+        if !crate::terminal_hook::has_terminal(cx) {
+            return None;
+        }
+        let root = self.root.clone();
+        Some(ContextMenu::build(window, cx, move |menu, _, _| {
+            menu.icon_entry("Open in Terminal", IconName::Terminal, move |window, cx| {
+                crate::terminal_hook::open_in_terminal(root.clone(), window, cx)
+            })
         }))
     }
 }

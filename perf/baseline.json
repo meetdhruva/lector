@@ -1,0 +1,23 @@
+{
+  "benches": {
+    "buffer/multi_caret_edit": 18100351,
+    "buffer/select_all_occurrences": 10992160,
+    "buffer/typing_in_big_buffer": 36429589,
+    "diff/line_diff_5k": 7067453,
+    "diff/word_refine": 4830207,
+    "search/picker_100k_paths": 598594601,
+    "syntax/parse_highlight_2k": 139146385,
+    "syntax/reparse_after_edit": 11369739,
+    "text/edit_and_line_lookup": 326207123,
+    "text/rope_build_1mb": 16662605,
+    "text/scroll_lines": 119665920
+  },
+  "host": "x86_64-unknown-linux-gnu",
+  "libc": "ldd (Ubuntu GLIBC 2.39-0ubuntu8.9) 2.39",
+  "llvm": "22.1.6",
+  "note": "Instruction counts (callgrind Ir) of fixed workloads; regenerate with scripts/perf-gate.sh --update in the commit that bumps the toolchain.",
+  "profile": "release opt-level=3 lto=off codegen-units=1 debug=0 strip=none panic=unwind",
+  "rustc": "1.97.0",
+  "schema": 1,
+  "valgrind": "valgrind-3.22.0"
+}

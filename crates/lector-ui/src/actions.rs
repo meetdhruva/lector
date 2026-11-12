@@ -55,6 +55,13 @@ pub mod workspace {
             ShowWelcome,
             ShowKeybindings,
             OpenLogFile,
+            // v0.7 update notice and local crash log (handled by lector-ui-agent).
+            /// Check GitHub for a newer Lector now and show the answer (Help menu).
+            CheckForUpdates,
+            /// Turn the once-a-day automatic update check on or off.
+            ToggleAutoUpdateCheck,
+            /// Show the local crash log and session health (nothing is sent anywhere).
+            ShowCrashLog,
             OpenDocumentation,
             ReportIssue,
             Minimize,
@@ -175,6 +182,54 @@ pub mod editor {
             Rename,
             NextDiagnostic,
             PrevDiagnostic,
+            // v0.7: completion and signature help.
+            /// Ask the language server for completions at the caret (Ctrl+Space).
+            TriggerSuggest,
+            /// Ask the language server for the signature of the call at the caret.
+            TriggerParameterHints,
+        ]
+    );
+}
+
+/// `completion::*` actions: only bound while the completion popup is open (key context
+/// `CodeView && completion`), all rebindable. Handled by `editor::completion`.
+pub mod completion {
+    use gpui::actions;
+    actions!(
+        completion,
+        [
+            /// Select the next suggestion (wraps).
+            SelectNext,
+            /// Select the previous suggestion (wraps).
+            SelectPrev,
+            /// Select the suggestion one page further down.
+            PageDown,
+            /// Select the suggestion one page further up.
+            PageUp,
+            /// Accept the selected suggestion (Tab).
+            Accept,
+            /// Accept the selected suggestion, or close the list and start a new line when
+            /// `editor.completion.accept_on_enter` is off (Enter).
+            AcceptOnEnter,
+            /// Close the popup (and nothing else).
+            Dismiss,
+        ]
+    );
+}
+
+/// `signature::*` actions: bound while the signature help popup is open
+/// (key context `CodeView && signature_help`). Handled by `editor::signature_help`.
+pub mod signature {
+    use gpui::actions;
+    actions!(
+        signature,
+        [
+            /// Show the next overload.
+            NextSignature,
+            /// Show the previous overload.
+            PrevSignature,
+            /// Close the popup (and nothing else).
+            Dismiss,
         ]
     );
 }
@@ -211,6 +266,45 @@ pub mod git {
             AcceptAllTheirs,
             ContinueOperation,
             AbortOperation,
+            // v0.7: sync with the remote, branches and stash (handled by lector-ui-git).
+            /// Run the obvious next sync step (push, pull, publish or fetch).
+            Sync,
+            /// Fetch every remote.
+            Fetch,
+            /// Pull, fast-forward only (never a merge commit).
+            Pull,
+            /// Pull with rebase.
+            PullRebase,
+            /// Push the current branch.
+            Push,
+            /// Push with `--force-with-lease`, after a confirmation.
+            ForcePushWithLease,
+            /// Push the branch and set its upstream.
+            PublishBranch,
+            /// Choose the upstream of the current branch.
+            SetUpstream,
+            /// Cancel the running fetch / pull / push.
+            CancelSync,
+            /// Show the sync menu (status bar dropdown).
+            ShowSyncMenu,
+            /// Create a branch (name, start point, switch to it).
+            NewBranch,
+            /// Switch to another branch.
+            SwitchBranch,
+            /// Rename the current branch.
+            RenameBranch,
+            /// Delete a local branch (undoable).
+            DeleteBranch,
+            /// Check out a remote branch as a local tracking branch.
+            CheckoutRemoteBranch,
+            /// Stash local changes (message, include untracked).
+            StashChanges,
+            /// Apply a stash, keeping it.
+            ApplyStash,
+            /// Apply a stash and drop it.
+            PopStash,
+            /// Drop a stash (undoable).
+            DropStash,
         ]
     );
 }
@@ -283,6 +377,75 @@ pub mod agent {
             SendFeedback,
             /// Send the prompt typed in the Agent panel.
             SendPrompt,
+            // v0.7 inline agent edit (handled by lector-ui-agent).
+            /// Ask the agent to change the selection (or the current line) in place.
+            EditWithAgent,
+            /// Keep the inline edit hunk under the cursor.
+            AcceptInlineHunk,
+            /// Undo the inline edit hunk under the cursor (restores the exact original text).
+            RejectInlineHunk,
+            /// Keep every pending hunk of the inline edit.
+            AcceptAllInlineEdits,
+            /// Undo every pending hunk of the inline edit.
+            RejectAllInlineEdits,
+        ]
+    );
+}
+
+/// `terminal::*` actions (v0.7 integrated terminal; handled by `lector-ui-terminal`).
+pub mod terminal {
+    use gpui::actions;
+    actions!(
+        terminal,
+        [
+            /// Show or hide the Terminal panel (opens a first terminal when there is none).
+            TogglePanel,
+            /// Open a new terminal tab in the panel.
+            NewTerminal,
+            /// Open a new terminal with a profile from the settings.
+            NewTerminalWithProfile,
+            /// Open a terminal in the folder of the active file (or the project root).
+            OpenInTerminal,
+            /// Split the focused terminal (side by side).
+            SplitTerminal,
+            /// Split the focused terminal (one above the other).
+            SplitTerminalDown,
+            /// Focus the next split of the terminal tab.
+            FocusNextSplit,
+            /// Focus the previous split of the terminal tab.
+            FocusPrevSplit,
+            /// Close the focused terminal (kills its processes).
+            KillTerminal,
+            /// Clear the screen and scrollback of the focused terminal.
+            Clear,
+            /// Rename the focused terminal tab.
+            Rename,
+            /// Next terminal tab.
+            NextTerminal,
+            /// Previous terminal tab.
+            PrevTerminal,
+            /// Scroll to the previous command (shell integration).
+            ScrollToPrevCommand,
+            /// Scroll to the next command (shell integration).
+            ScrollToNextCommand,
+            /// Find in the focused terminal.
+            Find,
+            /// Next match of the terminal find bar.
+            FindNext,
+            /// Previous match of the terminal find bar.
+            FindPrev,
+            /// Close the terminal find bar.
+            CloseFind,
+            /// Copy the terminal selection.
+            Copy,
+            /// Paste into the terminal.
+            Paste,
+            /// Select all terminal text (screen and scrollback).
+            SelectAll,
+            /// Move the focused terminal into the editor area as a tab.
+            MoveToEditor,
+            /// Move a terminal tab from the editor area back into the panel.
+            MoveToPanel,
         ]
     );
 }
@@ -323,7 +486,8 @@ pub mod text_input {
 }
 
 /// Namespaces whose actions are user commands (shown in the palette).
-pub const COMMAND_NAMESPACES: &[&str] = &["workspace", "editor", "diff", "git"];
+pub const COMMAND_NAMESPACES: &[&str] =
+    &["workspace", "editor", "diff", "git", "terminal", "agent"];
 
 /// Actions hidden from the command palette (motion primitives etc.).
 pub fn is_palette_hidden(name: &str) -> bool {

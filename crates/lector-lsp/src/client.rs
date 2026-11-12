@@ -4,13 +4,15 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use futures::channel::oneshot;
+use lector_process::{
+    ChildHandle, ProcessCommand, ProcessError, ProcessKind, StdinMode, Supervisor,
+};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
@@ -119,7 +121,7 @@ impl Shared {
 pub(crate) struct Client {
     shared: Arc<Shared>,
     next_id: AtomicI64,
-    child: Mutex<Child>,
+    child: Mutex<ChildHandle>,
     timeout: Duration,
 }
 
@@ -143,27 +145,25 @@ impl Client {
         handler: Option<Arc<dyn ServerHandler>>,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Client> {
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut cmd = ProcessCommand::new(command)
+            .args(args)
+            .stdin(StdinMode::Piped)
+            .kind(ProcessKind::LanguageServer)
+            .label(format!("language server {label}"));
         if root.is_dir() {
-            cmd.current_dir(root);
+            cmd = cmd.cwd(root);
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| LspError::Io(format!("failed to start {}: {e}", command.display())))?;
+        let mut child = Supervisor::global().spawn(&cmd).map_err(|e| match e {
+            ProcessError::NotFound { .. } | ProcessError::Spawn { .. } => {
+                LspError::Io(format!("failed to start {}: {e}", command.display()))
+            }
+            other => LspError::Io(other.to_string()),
+        })?;
         let (stdin, stdout, stderr) =
-            match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+            match (child.take_stdin(), child.take_stdout(), child.take_stderr()) {
                 (Some(i), Some(o), Some(e)) => (i, o, e),
                 _ => {
-                    let _ = child.kill();
+                    child.kill();
                     return Err(LspError::Io("missing child pipes".into()));
                 }
             };
@@ -244,6 +244,43 @@ impl Client {
         params: Value,
         timeout: Duration,
     ) -> impl std::future::Future<Output = Result<Value>> + Send + 'static {
+        self.request_with_id(method, params, timeout).1
+    }
+
+    /// Like [`Client::request`], also returning the JSON-RPC id so the request
+    /// can be cancelled with [`Client::cancel_request`].
+    pub(crate) fn request_cancellable(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> (
+        i64,
+        impl std::future::Future<Output = Result<Value>> + Send + 'static,
+    ) {
+        self.request_with_id(method, params, self.timeout)
+    }
+
+    /// Cancels request `id`: sends `$/cancelRequest` and resolves its future
+    /// with [`LspError::Cancelled`] (no effect when it already finished).
+    pub(crate) fn cancel_request(&self, id: i64) {
+        let pending = self.shared.pending.lock().remove(&id);
+        if let Some(p) = pending {
+            self.shared.send(
+                &json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": id}}),
+            );
+            let _ = p.tx.send(Err(LspError::Cancelled));
+        }
+    }
+
+    fn request_with_id(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> (
+        i64,
+        impl std::future::Future<Output = Result<Value>> + Send + 'static,
+    ) {
         let (tx, rx) = oneshot::channel();
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let immediate = if self.shared.closed.load(Ordering::SeqCst) {
@@ -267,12 +304,12 @@ impl Client {
                 Some(LspError::ServerExited)
             }
         };
-        async move {
+        (id, async move {
             if let Some(e) = immediate {
                 return Err(e);
             }
             rx.await.unwrap_or(Err(LspError::ServerExited))
-        }
+        })
     }
 
     /// Send a notification (fire and forget).
@@ -311,9 +348,8 @@ impl Client {
     }
 
     pub(crate) fn kill(&self) {
-        let mut c = self.child.lock();
-        let _ = c.kill();
-        let _ = c.wait();
+        // Kills the whole process tree (language servers spawn helpers) and reaps it.
+        self.child.lock().kill();
     }
 }
 

@@ -1,0 +1,32 @@
+{
+  "id": "py-eval-added",
+  "split": "tune",
+  "category": "unsafe-exec",
+  "language": "python",
+  "description": "A restricted AST evaluator is replaced by eval() of user input.",
+  "risky": [
+    "calc/engine.py"
+  ],
+  "files": [
+    {
+      "path": "app/reports.py",
+      "base": "def report_0(values):\n    acc = 0\n    for v in values:\n        if v > 0:\n            acc += v * 1\n    return acc\n\n\ndef report_1(values):\n    acc = 0\n    for v in values:\n        if v > 1:\n            acc += v * 2\n    return acc\n\n\ndef report_2(values):\n    acc = 0\n    for v in values:\n        if v > 2:\n            acc += v * 3\n    return acc\n\n\ndef report_3(values):\n    acc = 0\n    for v in values:\n        if v > 3:\n            acc += v * 4\n    return acc\n\n\ndef report_4(values):\n    acc = 0\n    for v in values:\n        if v > 4:\n            acc += v * 5\n    return acc\n\n\ndef report_5(values):\n    acc = 0\n    for v in values:\n        if v > 5:\n            acc += v * 6\n    return acc\n\n\ndef report_6(values):\n    acc = 0\n    for v in values:\n        if v > 6:\n            acc += v * 7\n    return acc\n\n\ndef report_7(values):\n    acc = 0\n    for v in values:\n        if v > 7:\n            acc += v * 8\n    return acc\n\n\ndef report_8(values):\n    acc = 0\n    for v in values:\n        if v > 8:\n            acc += v * 9\n    return acc\n\n\ndef report_9(values):\n    acc = 0\n    for v in values:\n        if v > 9:\n            acc += v * 10\n    return acc\n\n\ndef report_10(values):\n    acc = 0\n    for v in values:\n        if v > 10:\n            acc += v * 11\n    return acc\n\n\ndef report_11(values):\n    acc = 0\n    for v in values:\n        if v > 11:\n            acc += v * 12\n    return acc\n\n\n",
+      "head": "def report_0(values):\n    total = 0\n    for value in values:\n        if value > 0:\n            total += value * 1\n    return total\n\n\ndef report_1(values):\n    total = 0\n    for value in values:\n        if value > 1:\n            total += value * 2\n    return total\n\n\ndef report_2(values):\n    total = 0\n    for value in values:\n        if value > 2:\n            total += value * 3\n    return total\n\n\ndef report_3(values):\n    total = 0\n    for value in values:\n        if value > 3:\n            total += value * 4\n    return total\n\n\ndef report_4(values):\n    total = 0\n    for value in values:\n        if value > 4:\n            total += value * 5\n    return total\n\n\ndef report_5(values):\n    total = 0\n    for value in values:\n        if value > 5:\n            total += value * 6\n    return total\n\n\ndef report_6(values):\n    total = 0\n    for value in values:\n        if value > 6:\n            total += value * 7\n    return total\n\n\ndef report_7(values):\n    total = 0\n    for value in values:\n        if value > 7:\n            total += value * 8\n    return total\n\n\ndef report_8(values):\n    total = 0\n    for value in values:\n        if value > 8:\n            total += value * 9\n    return total\n\n\ndef report_9(values):\n    total = 0\n    for value in values:\n        if value > 9:\n            total += value * 10\n    return total\n\n\ndef report_10(values):\n    total = 0\n    for value in values:\n        if value > 10:\n            total += value * 11\n    return total\n\n\ndef report_11(values):\n    total = 0\n    for value in values:\n        if value > 11:\n            total += value * 12\n    return total\n\n\n"
+    },
+    {
+      "path": "app/notes.py",
+      "base": "# helper 0: does the thing\ndef helper_0():\n    pass\n\n# helper 1: does the thing\ndef helper_1():\n    pass\n\n# helper 2: does the thing\ndef helper_2():\n    pass\n\n# helper 3: does the thing\ndef helper_3():\n    pass\n\n# helper 4: does the thing\ndef helper_4():\n    pass\n\n# helper 5: does the thing\ndef helper_5():\n    pass\n\n# helper 6: does the thing\ndef helper_6():\n    pass\n\n# helper 7: does the thing\ndef helper_7():\n    pass\n\n# helper 8: does the thing\ndef helper_8():\n    pass\n\n# helper 9: does the thing\ndef helper_9():\n    pass\n\n# helper 10: does the thing\ndef helper_10():\n    pass\n\n# helper 11: does the thing\ndef helper_11():\n    pass\n\n",
+      "head": "# helper 0: does the thing, documented in the guide\ndef helper_0():\n    pass\n\n# helper 1: does the thing, documented in the guide\ndef helper_1():\n    pass\n\n# helper 2: does the thing, documented in the guide\ndef helper_2():\n    pass\n\n# helper 3: does the thing, documented in the guide\ndef helper_3():\n    pass\n\n# helper 4: does the thing, documented in the guide\ndef helper_4():\n    pass\n\n# helper 5: does the thing, documented in the guide\ndef helper_5():\n    pass\n\n# helper 6: does the thing, documented in the guide\ndef helper_6():\n    pass\n\n# helper 7: does the thing, documented in the guide\ndef helper_7():\n    pass\n\n# helper 8: does the thing, documented in the guide\ndef helper_8():\n    pass\n\n# helper 9: does the thing, documented in the guide\ndef helper_9():\n    pass\n\n# helper 10: does the thing, documented in the guide\ndef helper_10():\n    pass\n\n# helper 11: does the thing, documented in the guide\ndef helper_11():\n    pass\n\n"
+    },
+    {
+      "path": "calc/engine.py",
+      "base": "import ast\nimport operator\n\nOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul}\n\n\ndef evaluate(expr):\n    tree = ast.parse(expr, mode=\"eval\")\n    return _walk(tree.body)\n\n\ndef _walk(node):\n    if isinstance(node, ast.BinOp):\n        return OPS[type(node.op)](_walk(node.left), _walk(node.right))\n    if isinstance(node, ast.Constant):\n        return node.value\n    raise ValueError(\"unsupported\")\n",
+      "head": "def evaluate(expr):\n    return eval(expr)\n"
+    },
+    {
+      "path": "tests/test_reports.py",
+      "base": "from app import run_case\n\n\ndef test_smoke():\n    assert run_case(0) == 0\n",
+      "head": "from app import run_case\n\n\ndef test_smoke():\n    assert run_case(0) == 0\n\n\ndef test_case_0():\n    assert run_case(0) == 0\n\n\ndef test_case_1():\n    assert run_case(1) == 2\n\n\ndef test_case_2():\n    assert run_case(2) == 4\n\n\ndef test_case_3():\n    assert run_case(3) == 6\n\n\ndef test_case_4():\n    assert run_case(4) == 8\n\n\ndef test_case_5():\n    assert run_case(5) == 10\n"
+    }
+  ]
+}

@@ -29,6 +29,7 @@ pub mod os;
 pub mod scale;
 pub mod settings;
 pub mod startup;
+pub mod terminal_hook;
 pub mod theme;
 pub mod views;
 

@@ -13,9 +13,12 @@
 //!   [`DocumentModel::apply_edits`] (one undo step, carets mapped).
 
 pub mod compare;
+pub mod completion;
 pub mod doc_store;
 pub mod image_view;
+pub mod inline_diff;
 pub mod model;
+pub mod signature_help;
 pub mod source;
 
 use std::cell::Cell;
@@ -145,6 +148,8 @@ pub struct FileView {
     setup_done: bool,
     /// The shared document is locked (`document.set_read_only`).
     doc_locked: bool,
+    /// The in-place diff of an inline agent edit, when one is showing (`inline_diff`).
+    inline_edit: Option<inline_diff::InlineEditState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -249,6 +254,7 @@ impl FileView {
             focus_pending: false,
             setup_done: false,
             doc_locked: false,
+            inline_edit: None,
             _subscriptions: vec![code_view_sub, model_sub],
         };
         if view.model.read(cx).is_loaded() {
@@ -264,6 +270,7 @@ impl FileView {
             }
             DocumentEvent::SourceChanged => {
                 if let Some(source) = self.model.read(cx).source() {
+                    let source = self.wrap_inline_source(source, cx);
                     self.code_view.update(cx, |v, cx| v.set_source(source, cx));
                 }
                 cx.notify();
@@ -1543,6 +1550,7 @@ impl Render for FileView {
                 self.is_text.get().then(|| self.render_banner(cx)).flatten(),
                 |el, banner| el.child(banner),
             )
+            .children(self.render_inline_edit_bar(cx))
             .child(div().flex_1().min_h_0().relative().child(content))
             .children(self.render_hover(window, cx))
     }

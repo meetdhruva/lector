@@ -18,6 +18,9 @@ pub enum LspError {
     /// Spawning or talking to the process failed.
     #[error("language server I/O error: {0}")]
     Io(String),
+    /// The request was cancelled by the client (`$/cancelRequest`).
+    #[error("language server request cancelled")]
+    Cancelled,
     /// A response could not be understood.
     #[error("language server protocol error: {0}")]
     Protocol(String),

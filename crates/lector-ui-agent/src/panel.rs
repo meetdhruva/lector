@@ -42,6 +42,17 @@ pub struct UndoConflict {
     pub paths: Vec<String>,
 }
 
+/// The summary card of one turn (see `lector_agent::summary`).
+#[derive(Clone)]
+pub(crate) enum SummaryState {
+    /// Being computed on a background thread.
+    Computing,
+    /// Ready to show.
+    Ready(std::rc::Rc<lector_agent::summary::TurnSummary>),
+    /// The changes could not be read (no repository...): the plain footer is all there is.
+    Unavailable,
+}
+
 /// The Agent sidebar panel of one workspace window.
 pub struct AgentPanel {
     pub(crate) workspace: WeakEntity<Workspace>,
@@ -67,6 +78,8 @@ pub struct AgentPanel {
     /// Last painted bounds of the changed-file rows (anchor of the keyboard menu).
     pub(crate) row_bounds: RowBounds,
     pub(crate) markdown: HashMap<(TurnId, usize), ParsedMessage>,
+    /// Summary cards of finished turns that changed files (computed in the background, once).
+    pub(crate) summaries: HashMap<TurnId, SummaryState>,
     pub(crate) focus_handle: FocusHandle,
     /// Focus the prompt box at the next render (after a session started).
     pub(crate) focus_composer: bool,
@@ -126,6 +139,7 @@ impl AgentPanel {
             file_menu: ContextMenuState::default(),
             row_bounds: RowBounds::default(),
             markdown: HashMap::new(),
+            summaries: HashMap::new(),
             focus_handle: cx.focus_handle(),
             focus_composer: false,
             follow_bottom: true,
@@ -204,6 +218,7 @@ impl AgentPanel {
         let previous_len = self.turns.len();
         self.turns = s.turns();
         self.status = Some(s.status());
+        self.ensure_summaries(cx);
         if self.follow_bottom || self.turns.len() != previous_len {
             self.scroll.scroll_to_bottom();
         }
@@ -430,8 +445,19 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// Opens the turn's changes in a review tab.
+    /// Opens the turn's changes in a review tab (in risk order, under the turn's summary card).
     pub fn review_turn(&mut self, id: TurnId, window: &mut Window, cx: &mut Context<Self>) {
+        self.review_turn_at(id, None, window, cx);
+    }
+
+    /// [`AgentPanel::review_turn`], then the diff of `target` at its evidence line.
+    pub fn review_turn_at(
+        &mut self,
+        id: TurnId,
+        target: Option<lector_agent::summary::NavTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(turn) = self.turns.iter().find(|t| t.id == id) else {
             return;
         };
@@ -446,9 +472,77 @@ impl AgentPanel {
         let Some(ws) = self.workspace.upgrade() else {
             return;
         };
-        match lector_ui_git::store_for(ws.entity_id(), cx) {
-            Some(store) => lector_ui_git::review_tab::open_review(&store, cs, window, cx),
-            None => self.toast("Reviewing turns needs a git repository.", cx),
+        let Some(store) = lector_ui_git::store_for(ws.entity_id(), cx) else {
+            self.toast("Reviewing turns needs a git repository.", cx);
+            return;
+        };
+        let Some(review) = lector_ui_git::review_tab::open_review_view(&store, cs, window, cx)
+        else {
+            return;
+        };
+        if let Some(SummaryState::Ready(summary)) = self.summaries.get(&id).cloned() {
+            let panel = cx.entity().downgrade();
+            let header =
+                cx.new(|_| crate::summary_ui::SummaryHeader::new(summary, id, panel, &review));
+            review.update(cx, |r, cx| r.set_header_view(Some(header.into()), cx));
+        }
+        if let Some(target) = target {
+            // The review loads its files in the background: retry for a moment.
+            cx.spawn(async move |_, cx| {
+                for _ in 0..40 {
+                    let shown = review
+                        .update(cx, |r, cx| {
+                            r.show_file_at(&target.path, target.old_side, target.line, cx)
+                        })
+                        .unwrap_or(true);
+                    if shown {
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Starts the summary of every finished turn that changed files and has none yet.
+    fn ensure_summaries(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<(TurnId, lector_git::Changeset)> = self
+            .turns
+            .iter()
+            .filter(|t| t.state.is_finished() && !t.changed_files.is_empty())
+            .filter(|t| !self.summaries.contains_key(&t.id))
+            .filter_map(|t| t.changeset().map(|cs| (t.id, cs)))
+            .collect();
+        for (id, cs) in wanted {
+            self.summaries.insert(id, SummaryState::Computing);
+            let project = self.project.clone();
+            let work = cx.background_spawn(async move {
+                let repo = project.repo()?;
+                lector_agent::summary::TurnSummary::compute(
+                    repo,
+                    project.languages(),
+                    &cs,
+                    &lector_diff::DiffOptions::default(),
+                )
+                .ok()
+            });
+            cx.spawn(async move |this, cx| {
+                let result = work.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.summaries.insert(
+                        id,
+                        match result {
+                            Some(s) => SummaryState::Ready(std::rc::Rc::new(s)),
+                            None => SummaryState::Unavailable,
+                        },
+                    );
+                    cx.notify();
+                });
+            })
+            .detach();
         }
     }
 

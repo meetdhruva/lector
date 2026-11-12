@@ -33,6 +33,9 @@ lector-cli = { path = "crates/lector-cli" }
 lector-ui = { path = "crates/lector-ui" }
 lector-ui-git = { path = "crates/lector-ui-git" }
 lector-ui-agent = { path = "crates/lector-ui-agent" }
+lector-process = { path = "crates/lector-process" }
+lector-terminal = { path = "crates/lector-terminal" }
+lector-ui-terminal = { path = "crates/lector-ui-terminal" }
 # common
 anyhow = "1"
 thiserror = "2"

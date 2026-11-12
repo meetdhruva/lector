@@ -24,7 +24,7 @@ use std::sync::Arc;
 use lector_diff::moves::{detect_moved, detect_moved_across};
 use lector_diff::remap::{reanchor_with, Anchor, ReanchorOptions};
 use lector_workspace::review::{DiffKind, FileDiff};
-use lector_workspace::risk::{self, RiskKind, RiskLevel, RiskReport};
+use lector_workspace::risk::{self, RiskLevel, RiskReport};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
@@ -168,21 +168,13 @@ impl Default for AnalysisOptions {
     }
 }
 
-fn is_low_group(report: &RiskReport) -> bool {
-    report
-        .reasons
-        .iter()
-        .any(|r| matches!(r.kind, RiskKind::Generated | RiskKind::Lockfile))
-        || report.score <= 0.05
-}
-
 /// Orders, fingerprints and finds moves for `files` (blocking; run on a background thread).
 pub fn analyze(files: &[Arc<FileDiff>], opts: &AnalysisOptions) -> ChangesetAnalysis {
     let ranked = risk::rank_files(files);
     let mut attention = Vec::new();
     let mut low = Vec::new();
     for (index, report) in ranked {
-        let group = if is_low_group(&report) {
+        let group = if report.is_low_value() {
             QueueGroup::LowRisk
         } else {
             QueueGroup::Attention

@@ -316,10 +316,12 @@ impl Project {
                 Some(if s.is_empty() { s } else { format!("{s}/") })
             })
             .unwrap_or_default();
-        let lsp = settings
-            .lsp
-            .enabled
-            .then(|| LspManager::new(root.clone(), lsp_configs(&settings)));
+        let lsp = settings.lsp.enabled.then(|| {
+            let manager = LspManager::new(root.clone(), lsp_configs(&settings));
+            // Told to servers at `initialize`: set before any document is opened.
+            manager.set_completion_snippets(settings.editor.completion.snippets);
+            manager
+        });
         let inner = Inner {
             root,
             name,

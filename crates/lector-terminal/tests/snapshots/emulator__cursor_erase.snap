@@ -1,0 +1,9 @@
+---
+source: crates/lector-terminal/tests/emulator.rs
+expression: dump(&e.snapshot())
+---
+00|    456789| (wrap)
+01||
+02|    Y|
+03|la|
+cursor 3,2 visible=true

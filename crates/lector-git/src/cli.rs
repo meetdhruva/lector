@@ -3,14 +3,14 @@
 //!
 //! All invocations are read-only and run with `GIT_OPTIONAL_LOCKS=0` so git
 //! doesn't take the index lock to refresh stat data. The [`GitCli`] type is the
-//! single place that spawns processes, so it can be swapped for a gix-native
-//! implementation later.
+//! single place that spawns processes (under `lector-process`), so it can be swapped
+//! for a gix-native implementation later.
 
+use lector_process::{ProcessCommand, ProcessKind, RunOptions, Supervisor};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
 use crate::{BlameHunk, CommitInfo, Oid, Repo};
@@ -30,13 +30,16 @@ impl GitCli {
     }
 
     /// Run `git <args>` and return stdout. `what` names the feature for error messages.
+    ///
+    /// Runs under the global `lector_process::Supervisor` (own process group / job, killed
+    /// with Lector), both pipes drained concurrently, output captured without a limit.
     pub(crate) fn run<I, S>(&self, what: &'static str, args: I) -> Result<Vec<u8>>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let args: Vec<_> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-        let output = Command::new(&self.program)
+        let cmd = ProcessCommand::new(&self.program)
             .arg("-C")
             .arg(&self.workdir)
             .args([
@@ -56,16 +59,16 @@ impl GitCli {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    Error::GitNotInstalled(what)
-                } else {
-                    Error::Io(err)
-                }
-            })?;
-        if !output.status.success() {
+            .kind(ProcessKind::Git)
+            .label(format!("git ({what})"));
+        let opts = RunOptions {
+            capture_limit: usize::MAX,
+            ..RunOptions::default()
+        };
+        let output = Supervisor::global()
+            .run(&cmd, &opts)
+            .map_err(|err| crate::proc::map_process_error(err, what))?;
+        if !output.success() {
             return Err(Error::GitCommand {
                 command: args
                     .iter()

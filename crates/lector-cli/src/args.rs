@@ -58,6 +58,8 @@ pub enum Command {
     Undo(UndoArgs),
     /// Model Context Protocol server on stdin/stdout (JSON-RPC), for AI agents and tools.
     Mcp(McpArgs),
+    /// Local crash log and session health: sessions, crash-free rate and the latest crash reports.
+    Health(HealthArgs),
 }
 
 /// `lector status`.
@@ -193,4 +195,15 @@ pub struct McpArgs {
     /// with origin "mcp".
     #[arg(long)]
     pub allow_writes: bool,
+}
+
+/// `lector health`.
+#[derive(Args, Debug)]
+pub struct HealthArgs {
+    /// How many crash reports to list (newest first).
+    #[arg(short = 'n', long, value_name = "N", default_value_t = 5)]
+    pub limit: usize,
+    /// Machine-readable output.
+    #[arg(long)]
+    pub json: bool,
 }

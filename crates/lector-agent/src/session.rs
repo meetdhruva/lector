@@ -5,10 +5,10 @@
 //! only itself); each prompt runs on a turn thread that takes the checkpoints, waits for
 //! the answer (checking cancellation and the idle timeout) and finishes the turn.
 
+use lector_process::{ChildHandle, ProcessCommand, ProcessKind, StdinMode, Supervisor};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
@@ -125,7 +125,8 @@ impl Drop for Subscription {
 }
 
 struct Process {
-    child: Child,
+    /// The agent's process tree (supervised: killed on stop, on exit and when dropped).
+    child: ChildHandle,
     conn: Connection,
     /// Keeps the connection's handler alive.
     _handler: Arc<ConnHandler>,
@@ -501,8 +502,9 @@ impl AgentSession {
         let process = self.shared.state.lock().process.take();
         if let Some(mut p) = process {
             p.conn.mark_closed("stopped".into());
+            // The whole tree (the agent and everything it started), at once: this may run on
+            // the UI thread, so no grace period to wait for.
             let _ = p.child.kill();
-            let _ = p.child.wait();
         }
     }
 
@@ -513,14 +515,16 @@ impl AgentSession {
             name: cfg.name.clone(),
             message,
         };
-        let mut cmd = Command::new(&cfg.command);
-        cmd.args(&cfg.args)
+        // Under the process supervisor: its own process tree (session / job object), killed
+        // with everything it started on stop, cancel and app exit.
+        let cmd = ProcessCommand::new(&cfg.command)
+            .args(&cfg.args)
             .envs(cfg.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(shared.project.root())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = match cmd.spawn() {
+            .cwd(shared.project.root())
+            .stdin(StdinMode::Piped)
+            .kind(ProcessKind::Agent)
+            .label(format!("agent {}", cfg.name));
+        let mut child = match Supervisor::global().spawn(&cmd) {
             Ok(c) => c,
             Err(err) => {
                 let message = format!("`{}`: {err}", cfg.command_line());
@@ -528,11 +532,11 @@ impl AgentSession {
                 return Err(fail(message));
             }
         };
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             let _ = child.kill();
             return Err(fail("no stdio pipes".into()));
         };
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = child.take_stderr() {
             let tail = shared.stderr.clone();
             let eof = shared.stderr_eof.clone();
             eof.store(false, Ordering::Release);
@@ -583,7 +587,6 @@ impl AgentSession {
             Err(err) => {
                 conn.mark_closed("start failed".into());
                 let _ = child.kill();
-                let _ = child.wait();
                 shared.settle_stderr();
                 let message = with_stderr(&err.to_string(), &shared.stderr.lock());
                 self.set_status(SessionStatus::Crashed(message.clone()));

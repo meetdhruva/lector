@@ -1,0 +1,32 @@
+{
+  "id": "hn-auth-path-comment-only",
+  "split": "holdout",
+  "category": "hard-negative",
+  "language": "rust",
+  "description": "A comment-only change under an auth/ path must not outrank a real loss of error handling in billing.",
+  "risky": [
+    "src/billing/charge.rs"
+  ],
+  "files": [
+    {
+      "path": "src/auth/session.rs",
+      "base": "//! Session handling.\n//!\n//! Sessions expire after the configured idle time.\n\npub struct Session {\n    pub user: String,\n    pub idle_secs: u64,\n}\n\npub fn expired(s: &Session, limit: u64) -> bool {\n    s.idle_secs > limit\n}\n",
+      "head": "//! Session handling.\n//!\n//! Sessions expire after the configured idle time (in seconds).\n\npub struct Session {\n    pub user: String,\n    pub idle_secs: u64,\n}\n\npub fn expired(s: &Session, limit: u64) -> bool {\n    s.idle_secs > limit\n}\n"
+    },
+    {
+      "path": "src/billing/charge.rs",
+      "base": "pub fn charge(cents: u64) -> Result<u64, String> {\n    let confirmed = gateway(cents)?;\n    let receipt = store(confirmed)?;\n    Ok(receipt)\n}\n\nfn gateway(c: u64) -> Result<u64, String> { Ok(c) }\nfn store(c: u64) -> Result<u64, String> { Ok(c) }\n",
+      "head": "pub fn charge(cents: u64) -> Result<u64, String> {\n    let confirmed = gateway(cents).unwrap_or(0);\n    let receipt = store(confirmed).unwrap_or(0);\n    Ok(receipt)\n}\n\nfn gateway(c: u64) -> Result<u64, String> { Ok(c) }\nfn store(c: u64) -> Result<u64, String> { Ok(c) }\n"
+    },
+    {
+      "path": "src/stats.rs",
+      "base": "fn stat_0(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 0 {\n            acc += v * 1;\n        }\n    }\n    acc\n}\n\nfn stat_1(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 1 {\n            acc += v * 2;\n        }\n    }\n    acc\n}\n\nfn stat_2(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 2 {\n            acc += v * 3;\n        }\n    }\n    acc\n}\n\nfn stat_3(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 3 {\n            acc += v * 4;\n        }\n    }\n    acc\n}\n\nfn stat_4(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 4 {\n            acc += v * 5;\n        }\n    }\n    acc\n}\n\nfn stat_5(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 5 {\n            acc += v * 6;\n        }\n    }\n    acc\n}\n\nfn stat_6(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 6 {\n            acc += v * 7;\n        }\n    }\n    acc\n}\n\nfn stat_7(values: &[u32]) -> u32 {\n    let mut acc = 0;\n    for v in values {\n        if *v > 7 {\n            acc += v * 8;\n        }\n    }\n    acc\n}\n\n",
+      "head": "fn stat_0(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 0 {\n            total += value * 1;\n        }\n    }\n    total\n}\n\nfn stat_1(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 1 {\n            total += value * 2;\n        }\n    }\n    total\n}\n\nfn stat_2(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 2 {\n            total += value * 3;\n        }\n    }\n    total\n}\n\nfn stat_3(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 3 {\n            total += value * 4;\n        }\n    }\n    total\n}\n\nfn stat_4(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 4 {\n            total += value * 5;\n        }\n    }\n    total\n}\n\nfn stat_5(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 5 {\n            total += value * 6;\n        }\n    }\n    total\n}\n\nfn stat_6(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 6 {\n            total += value * 7;\n        }\n    }\n    total\n}\n\nfn stat_7(values: &[u32]) -> u32 {\n    let mut total = 0;\n    for value in values {\n        if *value > 7 {\n            total += value * 8;\n        }\n    }\n    total\n}\n\n"
+    },
+    {
+      "path": "docs/billing.md",
+      "base": "# Billing\n\nStep 0: configure the Billing option and restart the service.\n\nStep 1: configure the Billing option and restart the service.\n\nStep 2: configure the Billing option and restart the service.\n\nStep 3: configure the Billing option and restart the service.\n\nStep 4: configure the Billing option and restart the service.\n\nStep 5: configure the Billing option and restart the service.\n\nStep 6: configure the Billing option and restart the service.\n\nStep 7: configure the Billing option and restart the service.\n\n",
+      "head": "# Billing guide\n\nStep 0: configure the Billing option, then restart the service and check the logs.\n\nStep 1: configure the Billing option, then restart the service and check the logs.\n\nStep 2: configure the Billing option, then restart the service and check the logs.\n\nStep 3: configure the Billing option, then restart the service and check the logs.\n\nStep 4: configure the Billing option, then restart the service and check the logs.\n\nStep 5: configure the Billing option, then restart the service and check the logs.\n\nStep 6: configure the Billing option, then restart the service and check the logs.\n\nStep 7: configure the Billing option, then restart the service and check the logs.\n\n"
+    }
+  ]
+}

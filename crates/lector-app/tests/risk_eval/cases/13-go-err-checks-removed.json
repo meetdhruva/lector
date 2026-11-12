@@ -1,0 +1,32 @@
+{
+  "id": "go-err-checks-removed",
+  "split": "holdout",
+  "category": "error-handling",
+  "language": "go",
+  "description": "`if err != nil` checks around the write and chmod are deleted.",
+  "risky": [
+    "disk/save.go"
+  ],
+  "files": [
+    {
+      "path": "internal/stats/stats.go",
+      "base": "package util\n\nfunc Stat0(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 0 {\n\t\t\tacc += v * 1\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat1(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 1 {\n\t\t\tacc += v * 2\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat2(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 2 {\n\t\t\tacc += v * 3\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat3(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 3 {\n\t\t\tacc += v * 4\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat4(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 4 {\n\t\t\tacc += v * 5\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat5(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 5 {\n\t\t\tacc += v * 6\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat6(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 6 {\n\t\t\tacc += v * 7\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat7(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 7 {\n\t\t\tacc += v * 8\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat8(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 8 {\n\t\t\tacc += v * 9\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat9(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 9 {\n\t\t\tacc += v * 10\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat10(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 10 {\n\t\t\tacc += v * 11\n\t\t}\n\t}\n\treturn acc\n}\n\nfunc Stat11(values []int) int {\n\tacc := 0\n\tfor _, v := range values {\n\t\tif v > 11 {\n\t\t\tacc += v * 12\n\t\t}\n\t}\n\treturn acc\n}\n\n",
+      "head": "package util\n\nfunc Stat0(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 0 {\n\t\t\ttotal += value * 1\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat1(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 1 {\n\t\t\ttotal += value * 2\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat2(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 2 {\n\t\t\ttotal += value * 3\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat3(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 3 {\n\t\t\ttotal += value * 4\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat4(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 4 {\n\t\t\ttotal += value * 5\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat5(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 5 {\n\t\t\ttotal += value * 6\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat6(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 6 {\n\t\t\ttotal += value * 7\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat7(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 7 {\n\t\t\ttotal += value * 8\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat8(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 8 {\n\t\t\ttotal += value * 9\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat9(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 9 {\n\t\t\ttotal += value * 10\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat10(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 10 {\n\t\t\ttotal += value * 11\n\t\t}\n\t}\n\treturn total\n}\n\nfunc Stat11(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\tif value > 11 {\n\t\t\ttotal += value * 12\n\t\t}\n\t}\n\treturn total\n}\n\n"
+    },
+    {
+      "path": "pkg/extra/more.go",
+      "base": "package extra\n\nfunc Base(x int) int {\n\treturn x + 1\n}\n",
+      "head": "package extra\n\nfunc Base(x int) int {\n\treturn x + 1\n}\n\nfunc Scale0(x int) int {\n\treturn Base(x) * 2\n}\n\nfunc Scale1(x int) int {\n\treturn Base(x) * 3\n}\n\nfunc Scale2(x int) int {\n\treturn Base(x) * 4\n}\n\nfunc Scale3(x int) int {\n\treturn Base(x) * 5\n}\n"
+    },
+    {
+      "path": "disk/save.go",
+      "base": "package disk\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc Save(path string, data []byte) error {\n\tif err := os.WriteFile(path, data, 0o644); err != nil {\n\t\treturn fmt.Errorf(\"save %s: %w\", path, err)\n\t}\n\tif err := os.Chmod(path, 0o600); err != nil {\n\t\treturn fmt.Errorf(\"chmod %s: %w\", path, err)\n\t}\n\treturn nil\n}\n",
+      "head": "package disk\n\nimport (\n\t\"os\"\n)\n\nfunc Save(path string, data []byte) error {\n\t_ = os.WriteFile(path, data, 0o644)\n\t_ = os.Chmod(path, 0o600)\n\treturn nil\n}\n"
+    },
+    {
+      "path": "docs/disk.md",
+      "base": "# Disk\n\nStep 0: configure the Disk option and restart the service.\n\nStep 1: configure the Disk option and restart the service.\n\nStep 2: configure the Disk option and restart the service.\n\nStep 3: configure the Disk option and restart the service.\n\nStep 4: configure the Disk option and restart the service.\n\nStep 5: configure the Disk option and restart the service.\n\nStep 6: configure the Disk option and restart the service.\n\nStep 7: configure the Disk option and restart the service.\n\n",
+      "head": "# Disk guide\n\nStep 0: configure the Disk option, then restart the service and check the logs.\n\nStep 1: configure the Disk option, then restart the service and check the logs.\n\nStep 2: configure the Disk option, then restart the service and check the logs.\n\nStep 3: configure the Disk option, then restart the service and check the logs.\n\nStep 4: configure the Disk option, then restart the service and check the logs.\n\nStep 5: configure the Disk option, then restart the service and check the logs.\n\nStep 6: configure the Disk option, then restart the service and check the logs.\n\nStep 7: configure the Disk option, then restart the service and check the logs.\n\n"
+    }
+  ]
+}

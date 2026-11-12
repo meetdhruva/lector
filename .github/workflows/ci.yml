@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, "release/**"]
   pull_request:
+  # Manual run: the `perf` job re-measures and uploads a fresh perf/baseline.json artifact.
+  workflow_dispatch:
 
 env:
   # Pinned compiler: bump deliberately and fix new clippy lints in the same commit.
@@ -14,6 +16,7 @@ env:
 jobs:
   check:
     name: ${{ matrix.os }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -49,4 +52,34 @@ jobs:
           path: |
             target/release/lector
             target/release/lector.exe
+          if-no-files-found: ignore
+
+  # Deterministic instruction-count gates (valgrind/callgrind), see docs/PERFORMANCE.md.
+  perf:
+    name: perf gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+      - name: Instruction-count gates
+        if: github.event_name != 'workflow_dispatch'
+        run: scripts/perf-gate.sh
+      - name: Re-measure baseline (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: scripts/perf-gate.sh --update
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-baseline
+          path: |
+            perf/baseline.json
+            target/perf-results.json
           if-no-files-found: ignore

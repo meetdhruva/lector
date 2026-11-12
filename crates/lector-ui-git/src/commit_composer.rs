@@ -284,7 +284,9 @@ impl CommitComposer {
                 .flatten()
                 .and_then(|m| m.lines().next().map(str::to_string))
                 .unwrap_or_default();
-            Ok::<_, lector_git::Error>((oid, summary))
+            // For the toast's "Push" button (v0.7): is the branch ahead of its upstream?
+            let upstream = repo.upstream_status().ok();
+            Ok::<_, lector_git::Error>((oid, summary, upstream))
         });
         let store = self.store.clone();
         self.commit_task = Some(cx.spawn(async move |this, cx| {
@@ -292,15 +294,26 @@ impl CommitComposer {
             let _ = this.update(cx, |this, cx| {
                 this.committing = false;
                 match result {
-                    Ok((oid, summary)) => {
+                    Ok((oid, summary, upstream)) => {
                         let short = oid.short();
                         let verb = if this.amend { "Amended" } else { "Committed" };
                         this.amend = false;
                         this.saved_message = None;
                         this.editor.update(cx, |e, cx| e.set_text("", cx));
+                        let message = format!("{verb} {short}  {summary}");
+                        let offer = upstream.and_then(|st| push_offer(&st));
                         if let Some(ws) = store.read(cx).workspace.upgrade() {
-                            ws.update(cx, |ws, cx| {
-                                ws.show_toast(format!("{verb} {short}  {summary}"), cx)
+                            ws.update(cx, |ws, cx| match offer {
+                                Some((label, action)) => ws.show_action_toast(
+                                    message,
+                                    label,
+                                    lector_ui::views::workspace::UNDO_TOAST_DURATION,
+                                    move |_, window, cx| {
+                                        window.dispatch_action(action.boxed_clone(), cx)
+                                    },
+                                    cx,
+                                ),
+                                None => ws.show_toast(message, cx),
                             });
                         }
                         cx.emit(CommitComposerEvent::Committed(short));
@@ -569,39 +582,79 @@ impl Render for CommitComposer {
             )
             .child(self.render_identity(cx))
             .when_some(self.error.clone(), |el, error| {
-                el.child(
-                    v_flex()
-                        .relative()
-                        .rounded(metrics::radius())
-                        .border_1()
-                        .border_color(ui.error.hsla().opacity(0.7))
-                        .bg(ui.error.hsla().opacity(0.08))
-                        .child(
-                            div()
-                                .id("commit-error")
-                                .max_h(px(160.))
-                                .overflow_y_scroll()
-                                .p(px(8.))
-                                .pr(px(24.))
-                                .font_family(lector_ui::code_view::EditorSettings::get(cx).font_family)
-                                .text_size(metrics::text_xs())
-                                .text_color(ui.text.hsla())
-                                .child(error),
-                        )
-                        .child(
-                            div().absolute().top(px(2.)).right(px(2.)).child(
-                                IconButton::new("commit-error-close", IconName::Close)
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text("Dismiss"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.error = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                        ),
-                )
+                let entity = cx.entity().downgrade();
+                el.child(output_box(
+                    "commit-error",
+                    error,
+                    Some(Box::new(move |_, cx: &mut App| {
+                        let _ = entity.update(cx, |this, cx| {
+                            this.error = None;
+                            cx.notify();
+                        });
+                    })),
+                    cx,
+                ))
             })
     }
+}
+
+/// The button the commit toast offers (v0.7): "Push" when the branch is ahead of its
+/// upstream, "Publish" when it has none but a remote exists; `None` otherwise.
+pub fn push_offer(
+    st: &lector_git::UpstreamStatus,
+) -> Option<(&'static str, Box<dyn gpui::Action>)> {
+    if st.detached || st.branch.is_none() {
+        return None;
+    }
+    match (&st.upstream, &st.push_remote) {
+        (Some(_), _) if st.ahead > 0 => Some(("Push", Box::new(git_actions::Push))),
+        (None, Some(_)) => Some(("Publish", Box::new(git_actions::PublishBranch))),
+        _ => None,
+    }
+}
+
+/// Dismiss callback of an [`output_box`].
+pub type DismissOutput = Box<dyn Fn(&mut Window, &mut App)>;
+
+/// The scrollable monospace box that shows hook and git output (commit errors here; a
+/// declined `pre-push` hook in the sync failure dialog). `on_dismiss` adds a close button.
+pub fn output_box(
+    id: &'static str,
+    text: impl Into<SharedString>,
+    on_dismiss: Option<DismissOutput>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    let ui = &theme.ui;
+    v_flex()
+        .relative()
+        .rounded(metrics::radius())
+        .border_1()
+        .border_color(ui.error.hsla().opacity(0.7))
+        .bg(ui.error.hsla().opacity(0.08))
+        .child(
+            div()
+                .id(id)
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .p(px(8.))
+                .pr(px(24.))
+                .font_family(lector_ui::code_view::EditorSettings::get(cx).font_family)
+                .text_size(metrics::text_xs())
+                .text_color(ui.text.hsla())
+                .child(text.into()),
+        )
+        .when_some(on_dismiss, |el, on_dismiss| {
+            el.child(
+                div().absolute().top(px(2.)).right(px(2.)).child(
+                    IconButton::new((id, 1usize), IconName::Close)
+                        .icon_size(IconSize::XSmall)
+                        .tooltip(Tooltip::text("Dismiss"))
+                        .on_click(move |_, window, cx| on_dismiss(window, cx)),
+                ),
+            )
+        })
+        .into_any_element()
 }
 
 #[cfg(test)]

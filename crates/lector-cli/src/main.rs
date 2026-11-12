@@ -11,6 +11,10 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
+    // git / ssh asking for credentials (`GIT_ASKPASS` points here on Windows packages).
+    if let Some(code) = lector_cli::run_askpass_helper(&args) {
+        return code;
+    }
     let cli_arg = lector_cli::is_cli_invocation(&args)
         || args
             .get(1)
