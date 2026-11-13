@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 — unreleased
+## 0.7.0 — 2026-11-13
 
 Sync, terminal, completion, inline agent edits, and installs you can check.
 
