@@ -29,6 +29,9 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATE="${RELEASE_DATE:-$(date -u +%F)}"
 mkdir -p "$OUT/winget"
+# Absolute paths: the winget step changes directory before zipping.
+OUT="$(cd "$OUT" && pwd)"
+DIST="$(cd "$DIST" && pwd)"
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
