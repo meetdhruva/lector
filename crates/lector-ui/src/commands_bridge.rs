@@ -15,12 +15,15 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Context, Global, Window};
-use lector_app::commands::{Availability, CommandContext, Focus, Outcome, Source, UiRequest};
+use gpui::{App, Context, Global, PromptLevel, Window};
+use lector_app::commands::{
+    Availability, CommandContext, CommandSpec, Focus, NoticeLevel, Outcome, Source, UiRequest,
+};
 use lector_app::AppCore;
 use lector_git::Changeset;
 use serde_json::Value;
 
+use crate::views::workspace::ToastLevel;
 use crate::views::Workspace;
 
 /// The application core as a GPUI global.
@@ -30,11 +33,14 @@ impl Global for CoreGlobal {}
 
 type FocusProvider = Rc<dyn Fn(&Workspace, &mut Focus, &App)>;
 type ChangesetOpener = Rc<dyn Fn(&mut Workspace, Changeset, &mut Window, &mut Context<Workspace>)>;
+type UndoOffer =
+    Rc<dyn Fn(&mut Workspace, u64, String, ToastLevel, &mut Window, &mut Context<Workspace>)>;
 
 #[derive(Default)]
 struct Hooks {
     focus: Vec<FocusProvider>,
     open_changeset: Option<ChangesetOpener>,
+    offer_undo: Option<UndoOffer>,
 }
 
 impl Global for Hooks {}
@@ -83,6 +89,16 @@ pub fn set_changeset_opener(
     cx.default_global::<Hooks>().open_changeset = Some(Rc::new(f));
 }
 
+/// Sets how an undoable outcome is offered: `f(workspace, journal entry id, summary, ..)` shows
+/// "<summary> · Undo" (lector-ui-git undoes through the activity journal). Without it the
+/// summary is a plain toast.
+pub fn set_undo_offer(
+    cx: &mut App,
+    f: impl Fn(&mut Workspace, u64, String, ToastLevel, &mut Window, &mut Context<Workspace>) + 'static,
+) {
+    cx.default_global::<Hooks>().offer_undo = Some(Rc::new(f));
+}
+
 /// The command context of a workspace window: its project (None without a
 /// folder), the active file and its selections, plus registered focus providers.
 pub fn command_context(ws: &Workspace, cx: &App) -> CommandContext {
@@ -121,16 +137,37 @@ pub fn command_context(ws: &Workspace, cx: &App) -> CommandContext {
 pub struct PaletteEntry {
     /// Command id.
     pub id: &'static str,
-    /// "Category: Title".
+    /// "Category: Title" (the category is not repeated when the title already starts with it).
     pub label: String,
     /// The bound GPUI action, if any (the palette merges it with that action's row).
     pub ui_action: Option<&'static str>,
     /// Why it cannot run now.
     pub unavailable: Option<String>,
+    /// Running it from the palette asks first ([`needs_confirmation`]).
+    pub needs_confirmation: bool,
+}
+
+/// "Category: Title" for the palette. Some specs carry the namespace in their title
+/// ("Agent: List Agents"); it is not doubled.
+pub fn palette_label(spec: &CommandSpec) -> String {
+    let prefix = format!("{}:", spec.category);
+    if spec.title.starts_with(&prefix) {
+        spec.title.to_owned()
+    } else {
+        format!("{}: {}", spec.category, spec.title)
+    }
+}
+
+/// Whether the palette confirms before running a command that has no UI flow of its own:
+/// everything destructive, and writes that cannot be undone.
+pub fn needs_confirmation(spec: &CommandSpec) -> bool {
+    spec.destructive || (spec.writes && !spec.undoable)
 }
 
 /// Registry commands for the palette: those bound to a GPUI action (to annotate
-/// that row with availability) and those runnable without arguments.
+/// that row with availability) and those runnable without arguments. Commands whose
+/// GPUI action runs them through a UI flow ([`CommandSpec::ui_flow`]) are not listed:
+/// the action's own row is the entry point (it asks, shows progress and offers Undo).
 pub fn palette_entries(ctx: &CommandContext) -> Vec<PaletteEntry> {
     ctx.core
         .registry()
@@ -138,6 +175,9 @@ pub fn palette_entries(ctx: &CommandContext) -> Vec<PaletteEntry> {
         .into_iter()
         .filter_map(|c| {
             let spec = c.spec();
+            if spec.ui_flow.is_some() {
+                return None;
+            }
             let needs_args = spec
                 .args_schema
                 .get("required")
@@ -152,12 +192,47 @@ pub fn palette_entries(ctx: &CommandContext) -> Vec<PaletteEntry> {
             };
             Some(PaletteEntry {
                 id: spec.id,
-                label: format!("{}: {}", spec.category, spec.title),
+                label: palette_label(spec),
                 ui_action: spec.ui_action,
                 unavailable,
+                needs_confirmation: needs_confirmation(spec),
             })
         })
         .collect()
+}
+
+/// Runs a palette registry command: after a confirmation when `confirm` (no UI flow asks
+/// for it), then through [`invoke`]; the outcome toasts with Undo when it is undoable.
+pub fn invoke_from_palette(
+    ws: &mut Workspace,
+    entry_id: &'static str,
+    label: &str,
+    confirm: bool,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !confirm {
+        invoke(ws, entry_id, Value::Null, true, window, cx);
+        return;
+    }
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        &format!("Run \u{201c}{label}\u{201d}?"),
+        Some(
+            "This changes your files, your repository or an agent session and may not be undoable.",
+        ),
+        &["Run", "Cancel"],
+        cx,
+    );
+    cx.spawn_in(window, async move |this, cx| {
+        if !matches!(answer.await, Ok(0)) {
+            return;
+        }
+        let _ = this.update_in(cx, |ws, window, cx| {
+            invoke(ws, entry_id, Value::Null, true, window, cx)
+        });
+    })
+    .detach();
 }
 
 /// Runs a registry command for the workspace in the background, then executes
@@ -226,7 +301,22 @@ pub fn apply_outcome(
         }
     }
     if toast_summary && !toasted && !outcome.summary.is_empty() {
-        ws.show_toast(outcome.summary, cx);
+        let offer = match (&outcome.undo, outcome.journal_id) {
+            (Some(_), Some(entry)) => cx
+                .try_global::<Hooks>()
+                .and_then(|h| h.offer_undo.clone())
+                .map(|offer| (offer, entry)),
+            _ => None,
+        };
+        let level = match outcome.level {
+            NoticeLevel::Success => ToastLevel::Success,
+            NoticeLevel::Info => ToastLevel::Info,
+            NoticeLevel::Warning => ToastLevel::Warning,
+        };
+        match offer {
+            Some((offer, entry)) => offer(ws, entry, outcome.summary, level, window, cx),
+            None => ws.show_toast_level(outcome.summary, level, cx),
+        }
     }
 }
 

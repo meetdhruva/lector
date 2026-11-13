@@ -184,7 +184,8 @@ fn register_into(r: &CommandRegistry) {
                     )],
                     &[],
                 ),
-            ),
+            )
+            .with_ui_flow("agent::NewSession"),
             |cx, args| {
                 let project = cx.require_project()?;
                 let list = configs();
@@ -321,7 +322,8 @@ fn register_into(r: &CommandRegistry) {
                     &[],
                 ),
             )
-            .destructive(),
+            .destructive()
+            .with_ui_flow("agent::UndoLastTurn"),
             |cx, args| {
                 let session = session_of(cx)?;
                 let id = opt_turn(args, &session)?;
@@ -383,7 +385,8 @@ fn register_into(r: &CommandRegistry) {
                     ],
                     &[],
                 ),
-            ),
+            )
+            .with_ui_flow("agent::SendFeedback"),
             |cx, args| {
                 let session = session_of(cx)?;
                 let key = args

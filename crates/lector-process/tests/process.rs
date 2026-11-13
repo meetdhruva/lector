@@ -1,12 +1,12 @@
 //! Supervision end to end: streaming, large output, cancellation and timeouts that kill
 //! whole trees, handle drop, the registry. Unix tests use `sh`; Windows gets `cmd` basics.
 
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
-use lector_process::{
-    CancelToken, LineEnd, ProcessCommand, ProcessError, ProcessKind, RunOptions, StdinMode, Stream,
-    Supervisor,
-};
+#[cfg(unix)]
+use lector_process::{CancelToken, LineEnd, ProcessKind, StdinMode, Stream};
+use lector_process::{ProcessCommand, ProcessError, RunOptions, Supervisor};
 
 #[cfg(unix)]
 fn sh(script: &str) -> ProcessCommand {

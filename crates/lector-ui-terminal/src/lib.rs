@@ -391,9 +391,19 @@ fn register_actions(ws: &mut Workspace, panel: &Entity<TerminalPanel>) {
     let p = panel.clone();
     ws.register_action(move |ws, _: &actions::KillTerminal, window, cx| {
         let Some(view) = target_terminal(ws, &p, window, cx) else {
+            // Nothing to kill. With the (empty) panel focused the shortcut hides it; it never
+            // falls through to closing the window.
+            if p.read(cx).terminals().is_empty() && ws.is_bottom_panel_visible() {
+                ws.set_bottom_panel_visible(false, window, cx);
+            }
             return;
         };
         if p.read(cx).contains(&view) {
+            if p.read(cx).terminals().len() == 1 {
+                // The last terminal: a second press of Ctrl+Shift+W (the editor has focus
+                // then, where it means Close Window) must not close the window.
+                ws.guard_close_window(std::time::Duration::from_millis(1500));
+            }
             defer_panel(&p, window, cx, move |p, window, cx| {
                 p.kill(view, window, cx)
             });

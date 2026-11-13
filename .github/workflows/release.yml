@@ -7,7 +7,20 @@ name: Release
 #   - push a `release/**` branch for a dry run: everything is built and uploaded as
 #     workflow artifacts, nothing is published, and nothing is signed or notarized.
 #
-# Signing is optional and driven entirely by repository secrets (docs/RELEASING.md lists them):
+# Job layout (docs/RELEASING.md, "Trust boundaries"):
+#   * Build and package jobs hold NO secrets. They are the only jobs that run third-party downloads
+#     (rust toolchain, cargo-about, appimagetool, choco, WiX, ...).
+#   * Signing and publishing jobs hold the secrets and run no third-party downloads: only this
+#     repository's scripts, GitHub's own artifact actions, preinstalled tools and distro packages
+#     (minisign, rpm). Exceptions, both hash-pinned: the Azure signing client (a NuGet package that
+#     signtool loads, see scripts/sign-windows.ps1) and wingetcreate in the winget job.
+#   * Those jobs declare `environment: release`. Create that environment with required reviewers and
+#     move the secrets there (docs/RELEASING.md). With no protection rules, or when the environment
+#     does not exist yet (GitHub creates it on first use), the jobs simply run. Runs that cannot sign
+#     (dry runs) use the unprotected `release-preview` environment, which never holds secrets, so
+#     they never wait for an approval.
+#
+# Signing is optional and driven entirely by secrets (docs/RELEASING.md lists them):
 #   macOS    MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD [, MACOS_SIGNING_IDENTITY]
 #            + APPLE_API_KEY_P8_BASE64, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID  (notarization)
 #   Windows  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT,
@@ -16,10 +29,13 @@ name: Release
 #   Linux    LINUX_GPG_PRIVATE_KEY_BASE64 [, LINUX_GPG_PASSPHRASE]
 #   All      UPDATE_SIGNING_KEY [, UPDATE_SIGNING_KEY_PASSWORD]      (minisign signature of SHA256SUMS.txt)
 #   Package managers (optional pushes)   HOMEBREW_TAP_TOKEN, WINGET_TOKEN
+#   Variable (not secret, optional)      ARTIFACT_SIGNING_CLIENT_SHA256 (pins the Azure signing client)
 # Without a secret the matching step is skipped and that platform ships unsigned, clearly labelled
 # in the release notes. The workflow is green either way. Secrets cannot be tested in `if:`
-# expressions, so every job maps them to environment variables in a "Signing credentials" step that
-# publishes `enabled=true|false` as a step output.
+# expressions, so every signing job maps them to environment variables in a "Signing credentials"
+# step that publishes `enabled=true|false` as a step output.
+#
+# Third-party actions are pinned by full commit SHA with the version in a trailing comment.
 on:
   push:
     tags: ["v*"]
@@ -56,8 +72,19 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # appimagetool is pinned to a tagged release and verified by SHA-256 (never `continuous`).
+  # To bump: download both assets from the new release, run sha256sum, update all three values.
+  APPIMAGETOOL_VERSION: "1.9.1"
+  APPIMAGETOOL_SHA256_X86_64: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+  APPIMAGETOOL_SHA256_AARCH64: "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+  # wingetcreate (winget job), pinned the same way.
+  WINGETCREATE_VERSION: "1.28.1.0"
+  WINGETCREATE_SHA256: "63d980ba79e97042395bd6eb5992c2db9e01e9e7a8a22958a95c288f27310413"
 
 jobs:
+  # ------------------------------------------------------------------------------------------
+  # Version, signing decision, update-key sanity check. Only this job and the signing jobs see
+  # secrets; no third-party action runs here.
   prepare:
     name: Prepare
     runs-on: ubuntu-latest
@@ -67,8 +94,12 @@ jobs:
       prerelease: ${{ steps.meta.outputs.prerelease }}
       publish: ${{ steps.meta.outputs.publish }}
       sign: ${{ steps.meta.outputs.sign }}
+      # Environment of the secret-holding jobs: `release` when this run may sign / publish,
+      # the secret-free `release-preview` otherwise.
+      sign_environment: ${{ steps.meta.outputs.sign == 'true' && 'release' || 'release-preview' }}
+      publish_environment: ${{ steps.meta.outputs.publish == 'true' && 'release' || 'release-preview' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Resolve version
         id: meta
         shell: bash
@@ -113,7 +144,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Update key sanity check
         # A signing key without a matching committed public key would produce signatures that
-        # Lector cannot verify: stop now instead of after a two-hour build.
+        # Lector cannot verify: stop now instead of after a two-hour build. (Only sees the secret
+        # when it is a repository secret; scripts/sign-checksums.sh refuses the placeholder key too.)
         shell: bash
         env:
           SIGN: ${{ steps.meta.outputs.sign }}
@@ -125,29 +157,39 @@ jobs:
               exit 1
             fi
           fi
-      - uses: dtolnay/rust-toolchain@master
+
+  # Third-party crate licenses and a release-notes preview. No secrets.
+  meta:
+    name: Licenses and notes
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (pinned commit; toolchain comes from the `toolchain` input)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-about
       - name: Third-party crate licenses
         run: cargo about generate --workspace about.hbs -o THIRD_PARTY_CRATES.md
       - name: Release notes
-        # Preview without signing information (the publish job regenerates them from what the build jobs recorded).
+        # Preview without signing information (the publish job regenerates them from what the signing jobs recorded).
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: scripts/release-notes.sh "$VERSION" > RELEASE_NOTES.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-meta
           path: |
             THIRD_PARTY_CRATES.md
             RELEASE_NOTES.md
 
+  # ------------------------------------------------------------------------------------------
+  # Linux: build and package without secrets, then sign in a separate job.
   linux:
     name: Linux ${{ matrix.arch }}
-    needs: prepare
+    needs: [prepare, meta]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -158,16 +200,18 @@ jobs:
           - arch: x86_64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            appimagetool_sha256_var: APPIMAGETOOL_SHA256_X86_64
           - arch: aarch64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            appimagetool_sha256_var: APPIMAGETOOL_SHA256_AARCH64
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (pinned commit; toolchain comes from the `toolchain` input)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: dist-${{ matrix.target }}
       - name: System dependencies
@@ -175,7 +219,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
             libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev libssl-dev rpm desktop-file-utils
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-meta
           path: target
@@ -187,9 +231,15 @@ jobs:
           "$BIN" --version | grep -F "${{ needs.prepare.outputs.version }}"
           desktop-file-validate packaging/linux/io.github.meetdhruva.Lector.desktop
       - name: appimagetool
+        # A tagged release, verified by SHA-256 before it is made executable.
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          EXPECTED_SHA256: ${{ env[matrix.appimagetool_sha256_var] }}
         run: |
-          curl -fsSL -o appimagetool \
-            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.arch }}.AppImage"
+          curl -fsSL --retry 3 -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${ARCH}.AppImage"
+          echo "${EXPECTED_SHA256}  appimagetool" | sha256sum --check --strict -
           chmod +x appimagetool
       - name: Package
         env:
@@ -204,6 +254,29 @@ jobs:
           rpm -qip dist/*.rpm
           APPIMAGE="$(ls dist/*.AppImage)"
           APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --version | grep -F "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Secrets, no downloads: GPG-signs the packages built above (or passes them through unsigned).
+  sign-linux:
+    name: Sign Linux ${{ matrix.arch }}
+    needs: [prepare, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ needs.prepare.outputs.sign_environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-linux-${{ matrix.arch }}
+          path: dist
       - name: Signing credentials
         id: signing
         shell: bash
@@ -217,6 +290,12 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Linux packages are not GPG-signed (signing disabled for this run or LINUX_GPG_PRIVATE_KEY_BASE64 not set)."
           fi
+      - name: Tools for the embedded rpm signature
+        # rpmsign from the distribution's own archive (best effort in sign-linux.sh); not a download of third-party binaries.
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
       - name: Sign packages (GPG)
         if: steps.signing.outputs.enabled == 'true'
         env:
@@ -231,37 +310,35 @@ jobs:
         run: |
           mkdir -p signing-status
           printf 'platform=linux\nsigned=false\n' > "signing-status/linux-${{ matrix.arch }}.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signing-linux-${{ matrix.arch }}
           path: signing-status/*.txt
           if-no-files-found: error
 
+  # ------------------------------------------------------------------------------------------
+  # macOS: build the universal binary without secrets; sign, package and notarize in a second job.
   macos:
-    name: macOS universal
-    needs: prepare
+    name: macOS universal build
+    needs: [prepare, meta]
     runs-on: macos-latest
     timeout-minutes: 150
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (pinned commit; toolchain comes from the `toolchain` input)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: dist-macos-universal
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-meta
-          path: target
       - name: Build (Apple Silicon)
         run: cargo build --locked --profile dist -p lector --target aarch64-apple-darwin
       - name: Build (Intel)
@@ -273,6 +350,31 @@ jobs:
             target/aarch64-apple-darwin/dist/lector target/x86_64-apple-darwin/dist/lector
           lipo -info target/universal/lector
           target/universal/lector --version | grep -F "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-universal-binary
+          path: target/universal/lector
+          if-no-files-found: error
+
+  # Secrets, no downloads: bundle, sign, notarize, staple and verify (or package unsigned).
+  macos-package:
+    name: macOS package and sign
+    needs: [prepare, macos]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: ${{ needs.prepare.outputs.sign_environment }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: macos-universal-binary
+          path: target/universal
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-meta
+          path: target
+      - name: Restore executable bit
+        run: chmod +x target/universal/lector
       - name: Signing credentials
         id: signing
         shell: bash
@@ -333,20 +435,24 @@ jobs:
       - name: Remove signing material
         if: always() && steps.signing.outputs.sign == 'true'
         run: scripts/sign-macos.sh cleanup
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-macos-universal
           path: dist/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signing-macos
           path: signing-status/macos.txt
           if-no-files-found: error
 
+  # ------------------------------------------------------------------------------------------
+  # Windows: build (no secrets) → sign the binaries (secrets) → package with the installer tools
+  # (downloads, no secrets) → sign the installers (secrets). The binaries are signed before packaging
+  # so the portable zip, the installer and the MSI all contain signed binaries.
   windows:
-    name: Windows ${{ matrix.arch }}
-    needs: prepare
+    name: Windows ${{ matrix.arch }} build
+    needs: [prepare, meta]
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -359,18 +465,14 @@ jobs:
           - arch: arm64
             target: aarch64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (pinned commit; toolchain comes from the `toolchain` input)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: dist-${{ matrix.target }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-meta
-          path: target
       # lector.exe is a GUI-subsystem app (no console); lector-cli.exe is the console build of the
       # command line (no GUI dependencies) that the packages ship as lector-cli.exe and lector.com.
       - name: Build
@@ -387,6 +489,30 @@ jobs:
           if ($cli -notmatch [regex]::Escape("${{ needs.prepare.outputs.version }}")) { throw "unexpected lector-cli version output" }
           $status = (& "target\${{ matrix.target }}\dist\lector-cli.exe" status . --json | Out-String)
           if ($status -notmatch '"schema"') { throw "lector-cli status produced no JSON" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-bin-built-${{ matrix.arch }}
+          path: |
+            target/${{ matrix.target }}/dist/lector.exe
+            target/${{ matrix.target }}/dist/lector-cli.exe
+          if-no-files-found: error
+
+  sign-windows-binaries:
+    name: Sign Windows ${{ matrix.arch }} binaries
+    needs: [prepare, windows]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: ${{ needs.prepare.outputs.sign_environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-bin-built-${{ matrix.arch }}
+          path: bin
       - name: Signing credentials
         id: signing
         shell: bash
@@ -415,8 +541,7 @@ jobs:
             echo "::notice::Windows binaries and installers are not Authenticode-signed (signing disabled for this run or no signing secrets set)."
           fi
       - name: Sign binaries
-        # Before packaging, so the portable zip, the installer and the MSI all contain signed binaries.
-        # lector.com is a byte-for-byte copy of the signed lector-cli.exe.
+        # lector.com is a byte-for-byte copy of the signed lector-cli.exe (made by the packaging script).
         if: steps.signing.outputs.provider != 'none'
         shell: pwsh
         env:
@@ -430,10 +555,52 @@ jobs:
           WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+          ARTIFACT_SIGNING_CLIENT_SHA256: ${{ vars.ARTIFACT_SIGNING_CLIENT_SHA256 }}
         run: |
-          & scripts/sign-windows.ps1 -Files @(
-            "target\${{ matrix.target }}\dist\lector.exe",
-            "target\${{ matrix.target }}\dist\lector-cli.exe")
+          & scripts/sign-windows.ps1 -Files @("bin\lector.exe", "bin\lector-cli.exe")
+      - name: Verify binary signatures
+        if: steps.signing.outputs.provider != 'none'
+        shell: pwsh
+        run: |
+          & scripts/sign-windows.ps1 -Files @("bin\lector.exe", "bin\lector-cli.exe") -Verify
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-bin-${{ matrix.arch }}
+          path: bin/*.exe
+          if-no-files-found: error
+      - name: Record signing provider
+        shell: bash
+        env:
+          PROVIDER: ${{ steps.signing.outputs.provider }}
+        run: |
+          mkdir -p provider
+          printf '%s' "$PROVIDER" > provider/provider.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-provider-${{ matrix.arch }}
+          path: provider/provider.txt
+          if-no-files-found: error
+
+  # Installer tools are third-party downloads (choco, dotnet tool): no secrets here.
+  windows-package:
+    name: Windows ${{ matrix.arch }} installers
+    needs: [prepare, meta, sign-windows-binaries]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-meta
+          path: target
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-bin-${{ matrix.arch }}
+          path: bin
       - name: Installer tools
         shell: pwsh
         run: |
@@ -445,10 +612,45 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          pwsh scripts/package-windows.ps1 -Binary "target\${{ matrix.target }}\dist\lector.exe" `
-            -CliBinary "target\${{ matrix.target }}\dist\lector-cli.exe" `
+          pwsh scripts/package-windows.ps1 -Binary "bin\lector.exe" `
+            -CliBinary "bin\lector-cli.exe" `
             -Version "${{ needs.prepare.outputs.version }}" -Arch ${{ matrix.arch }} -OutDir dist
           Get-ChildItem dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  sign-windows-installers:
+    name: Sign Windows ${{ matrix.arch }} installers
+    needs: [prepare, windows-package, sign-windows-binaries]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: ${{ needs.prepare.outputs.sign_environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-windows-${{ matrix.arch }}
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-bin-${{ matrix.arch }}
+          path: bin
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-provider-${{ matrix.arch }}
+          path: provider
+      - name: Signing provider
+        # Decided by the binary-signing job; the credentials are mapped again below.
+        id: signing
+        shell: bash
+        run: echo "provider=$(cat provider/provider.txt)" >> "$GITHUB_OUTPUT"
       - name: Sign installers
         if: steps.signing.outputs.provider != 'none'
         shell: pwsh
@@ -463,6 +665,7 @@ jobs:
           WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+          ARTIFACT_SIGNING_CLIENT_SHA256: ${{ vars.ARTIFACT_SIGNING_CLIENT_SHA256 }}
         run: |
           $installers = @(Get-ChildItem dist -File | Where-Object { $_.Name -like "*-setup.exe" -or $_.Name -like "*.msi" } | ForEach-Object { $_.FullName })
           if ($installers.Count -lt 2) { throw "expected a setup.exe and an .msi in dist, found $($installers.Count) installer(s)" }
@@ -472,8 +675,8 @@ jobs:
         shell: pwsh
         run: |
           $files = @(Get-ChildItem dist -File | Where-Object { $_.Name -like "*-setup.exe" -or $_.Name -like "*.msi" } | ForEach-Object { $_.FullName })
-          $files += "target\${{ matrix.target }}\dist\lector.exe"
-          $files += "target\${{ matrix.target }}\dist\lector-cli.exe"
+          $files += "bin\lector.exe"
+          $files += "bin\lector-cli.exe"
           & scripts/sign-windows.ps1 -Files $files -Verify
       - name: Record signing status
         shell: bash
@@ -486,34 +689,32 @@ jobs:
           else
             printf 'platform=windows\nsigned=true\nprovider=%s\n' "$PROVIDER" > "signing-status/windows-${{ matrix.arch }}.txt"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-windows-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signing-windows-${{ matrix.arch }}
           path: signing-status/*.txt
           if-no-files-found: error
 
-  # Checksums, package-manager manifests and the release itself. Runs in dry runs too (everything
-  # except the final publishing steps), so a release/** branch exercises checksum and manifest
-  # generation and uploads the result as the `release-preview` artifact.
-  publish:
-    name: Checksums and publish
-    needs: [prepare, linux, macos, windows]
+  # ------------------------------------------------------------------------------------------
+  # Checksums and package-manager manifests. No secrets. Runs in dry runs too, so a release/**
+  # branch exercises checksum and manifest generation.
+  checksums:
+    name: Checksums and manifests
+    needs: [prepare, sign-linux, macos-package, sign-windows-installers]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: signing-*
           path: signing
@@ -531,6 +732,29 @@ jobs:
         run: |
           find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # `dist-*` is merged into the release files by the publish job.
+          name: dist-extra
+          path: |
+            dist/SHA256SUMS.txt
+            dist/lector.rb
+            dist/io.github.meetdhruva.Lector.yml
+            dist/*-winget-manifests.zip
+          if-no-files-found: error
+
+  # Secrets, no downloads: minisign signature of SHA256SUMS.txt (the file Lector verifies updates against).
+  sign-checksums:
+    name: Sign checksums
+    needs: [prepare, checksums]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.prepare.outputs.sign_environment }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-extra
+          path: dist
       - name: Signing credentials
         id: signing
         env:
@@ -551,13 +775,50 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           LECTOR_SIGNING_STATUS: signing/checksums.txt
         run: |
+          # minisign comes from the distribution's archive.
           sudo apt-get update
           sudo apt-get install -y minisign
           minisign -v | head -n 1
           scripts/sign-checksums.sh "$TAG" dist
       - name: Record checksum signing status (unsigned)
         if: steps.signing.outputs.enabled != 'true'
-        run: printf 'platform=checksums\nsigned=false\n' > signing/checksums.txt
+        run: |
+          mkdir -p signing
+          printf 'platform=checksums\nsigned=false\n' > signing/checksums.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signing-checksums
+          path: signing/checksums.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-checksum-signature
+          path: dist/SHA256SUMS.txt.minisig
+          if-no-files-found: ignore
+
+  # The release itself (or the dry-run preview). Holds write access to this repository and the
+  # package-manager tokens; runs the pinned release action and nothing else third-party.
+  publish:
+    name: Publish
+    needs: [prepare, checksums, sign-checksums]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.prepare.outputs.publish_environment }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: signing-*
+          path: signing
+          merge-multiple: true
+      - name: Release files
+        run: ls -la dist
       - name: Release notes
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -566,7 +827,7 @@ jobs:
           cat RELEASE_NOTES.md
       - name: Dry run preview
         if: needs.prepare.outputs.publish != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-preview
           path: |
@@ -578,7 +839,7 @@ jobs:
           if-no-files-found: error
       - name: Publish release
         if: needs.prepare.outputs.publish == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ github.sha }}
@@ -605,7 +866,7 @@ jobs:
           git -c "http.extraheader=Authorization: Basic $auth" clone --depth 1 https://github.com/meetdhruva/homebrew-tap.git tap
           mkdir -p tap/Casks
           cp dist/lector.rb tap/Casks/lector.rb
-          cd tap
+          cd tap || exit 1
           git add Casks/lector.rb
           if git diff --cached --quiet; then
             echo "tap already up to date"
@@ -618,11 +879,13 @@ jobs:
   # Optional: opens a pull request on microsoft/winget-pkgs for the new version. Needs WINGET_TOKEN
   # (a classic personal access token with public_repo) and a first manifest already accepted in
   # winget-pkgs (docs/RELEASING.md, "winget"). Without the secret the job only prints a notice.
+  # wingetcreate is a pinned release (WINGETCREATE_VERSION) verified by SHA-256, not `aka.ms/latest`.
   winget:
     name: winget submission
     needs: [prepare, publish]
     if: needs.prepare.outputs.publish == 'true' && needs.prepare.outputs.prerelease != 'true' && github.event.inputs.draft != 'true'
     runs-on: windows-latest
+    environment: ${{ needs.prepare.outputs.publish_environment }}
     steps:
       - name: Submit with wingetcreate
         shell: pwsh
@@ -634,7 +897,10 @@ jobs:
             Write-Host "::notice::WINGET_TOKEN not set: winget manifests are attached to the release but no pull request was opened."
             return
           }
-          Invoke-WebRequest -UseBasicParsing -Uri "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
+          Write-Host "::add-mask::$($env:WINGET_TOKEN)"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/microsoft/winget-create/releases/download/v$($env:WINGETCREATE_VERSION)/wingetcreate.exe" -OutFile wingetcreate.exe
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath wingetcreate.exe).Hash.ToLowerInvariant()
+          if ($actual -ne $env:WINGETCREATE_SHA256) { throw "wingetcreate.exe does not match the pinned SHA-256 (got $actual)" }
           $base = "https://github.com/meetdhruva/lector/releases/download/v$($env:VERSION)"
           .\wingetcreate.exe update meetdhruva.Lector --version $env:VERSION `
             --urls "$base/Lector-$($env:VERSION)-windows-x64-setup.exe|x64" "$base/Lector-$($env:VERSION)-windows-arm64-setup.exe|arm64" `

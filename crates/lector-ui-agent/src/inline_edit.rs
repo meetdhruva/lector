@@ -46,6 +46,7 @@ use lector_ui::editor::inline_diff::{
 };
 use lector_ui::editor::{DocumentModel, FileView};
 use lector_ui::scale::px;
+use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
 
@@ -242,11 +243,30 @@ impl InlineEdits {
     }
 
     fn toast(&self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.toast_level(message, ToastLevel::Success, cx);
+    }
+
+    /// A note that nothing happened (no check mark).
+    fn note(&self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.toast_level(message, ToastLevel::Info, cx);
+    }
+
+    /// Something did not work or needs a look.
+    fn warn(&self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.toast_level(message, ToastLevel::Warning, cx);
+    }
+
+    fn toast_level(
+        &self,
+        message: impl Into<SharedString>,
+        level: ToastLevel,
+        cx: &mut Context<Self>,
+    ) {
         let message = message.into();
         // Deferred: this runs inside the workspace's own action handlers, which hold its lease.
         let ws = self.workspace.clone();
         cx.defer(move |cx| {
-            let _ = ws.update(cx, |ws, cx| ws.show_toast(message, cx));
+            let _ = ws.update(cx, |ws, cx| ws.show_toast_level(message, level, cx));
         });
     }
 
@@ -255,7 +275,7 @@ impl InlineEdits {
     /// `agent::EditWithAgent`.
     pub fn start(&mut self, ws: &Workspace, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = ws.active_file_view(cx) else {
-            return self.toast("Open a text file to edit it with the agent.", cx);
+            return self.note("Open a text file to edit it with the agent.", cx);
         };
         let path = view.read(cx).path().to_path_buf();
         // The prompt box of a pending edit just comes back.
@@ -343,8 +363,9 @@ impl InlineEdits {
             let ws = self.workspace.clone();
             cx.defer(move |cx| {
                 let _ = ws.update(cx, |ws, cx| {
-                    ws.show_action_toast(
+                    ws.show_action_toast_level(
                         why.reason(),
+                        ToastLevel::Info,
                         "Set up an agent",
                         Duration::from_secs(8),
                         |_, window, cx| {
@@ -355,7 +376,7 @@ impl InlineEdits {
                 });
             });
         } else {
-            self.toast(why.reason(), cx);
+            self.note(why.reason(), cx);
         }
     }
 
@@ -439,7 +460,7 @@ impl InlineEdits {
             Err(InlineError::EmptyInstruction) => {
                 return self.open_prompt(path, follow_up, Some(text), window, cx)
             }
-            Err(e) => return self.toast(e.to_string(), cx),
+            Err(e) => return self.warn(e.to_string(), cx),
         };
         a.submitted = true;
         a.status = "Starting the agent\u{2026}".into();
@@ -512,7 +533,7 @@ impl InlineEdits {
             Err(why) => {
                 a.status = SharedString::default();
                 self.push_ui(path, cx);
-                self.toast(format!("Could not send the request: {why}"), cx);
+                self.warn(format!("Could not send the request: {why}"), cx);
                 self.open_prompt(path, follow_up, Some(text), window, cx);
             }
             Ok((session, turn)) => {
@@ -665,7 +686,7 @@ impl InlineEdits {
     ) {
         let turn = self.active.get(path).and_then(|a| a.edit.turn());
         self.clear(path, cx);
-        self.toast(reason.message(), cx);
+        self.warn(reason.message(), cx);
         if let (Some(turn), Some(panel)) = (turn, self.panel.upgrade()) {
             panel.update(cx, |p, cx| p.review_turn(turn, window, cx));
         }
@@ -820,7 +841,7 @@ impl InlineEdits {
             InlineEditAction::AcceptHunk(id) => {
                 if let Some(a) = self.active.get_mut(path) {
                     if let Err(e) = a.edit.accept(id as u32) {
-                        return self.toast(e.to_string(), cx);
+                        return self.warn(e.to_string(), cx);
                     }
                 }
                 self.after_decision(path, cx);
@@ -832,7 +853,7 @@ impl InlineEdits {
                 };
                 match edit {
                     Ok(edit) => self.apply(path, vec![edit], cx),
-                    Err(e) => return self.toast(e.to_string(), cx),
+                    Err(e) => return self.warn(e.to_string(), cx),
                 }
                 self.after_decision(path, cx);
             }
@@ -931,7 +952,7 @@ impl InlineEdits {
             .get(&path)
             .is_some_and(|a| a.edit.pending_count() > 0)
         {
-            return self.toast("No pending agent changes in this file.", cx);
+            return self.note("No pending agent changes in this file.", cx);
         }
         let action = match which {
             Decision::AcceptHunk | Decision::RejectHunk => {

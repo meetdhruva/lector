@@ -20,6 +20,7 @@ use lector_app::AppCore;
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::text_area::{TextArea, TextAreaEvent};
 use lector_ui::markdown::Block;
+use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
 use lector_workspace::Project;
 use serde_json::json;
@@ -242,10 +243,15 @@ impl AgentPanel {
         self.session.as_ref()
     }
 
+    /// A note (nothing to do, nothing happened): the info icon.
     pub(crate) fn toast(&self, msg: impl Into<SharedString>, cx: &mut App) {
+        self.toast_level(msg, ToastLevel::Info, cx);
+    }
+
+    fn toast_level(&self, msg: impl Into<SharedString>, level: ToastLevel, cx: &mut App) {
         let msg = msg.into();
         if let Some(ws) = self.workspace.upgrade() {
-            ws.update(cx, |ws, cx| ws.show_toast(msg, cx));
+            ws.update(cx, |ws, cx| ws.show_toast_level(msg, level, cx));
         }
     }
 
@@ -560,14 +566,15 @@ impl AgentPanel {
             let _ = this.update(cx, |this, cx| {
                 this.busy_turn_action = None;
                 match result {
-                    Ok(_) => this.toast(
+                    Ok(_) => this.toast_level(
                         format!("Undid turn {id}. Undo it again from the Activity Log."),
+                        ToastLevel::Success,
                         cx,
                     ),
                     Err(AgentError::UndoConflict { paths }) => {
                         this.undo_conflict = Some(UndoConflict { turn: id, paths });
                     }
-                    Err(e) => this.toast(e.to_string(), cx),
+                    Err(e) => this.toast_level(e.to_string(), ToastLevel::Warning, cx),
                 }
                 this.refresh(cx);
             });
@@ -676,7 +683,7 @@ impl AgentPanel {
                         context: PromptContext::Diff { label, diff: text },
                     }),
                     Ok(_) => this.toast("No uncommitted changes to attach.", cx),
-                    Err(e) => this.toast(e, cx),
+                    Err(e) => this.toast_level(e, ToastLevel::Warning, cx),
                 }
                 cx.notify();
             });

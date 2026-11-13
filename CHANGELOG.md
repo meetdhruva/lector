@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.7.0 — unreleased
+
+Sync, terminal, completion, inline agent edits, and installs you can check.
+
+- **Sync with the remote:** fetch, pull (fast-forward only, or rebase) and push from the Git menu, the
+  status bar and the palette, with progress, throughput and a Cancel button; a "Sync" action that
+  does the obvious next step; Publish Branch for branches without an upstream. Pulls never create an
+  implicit merge commit; a pull or stash pop that hits conflicts takes you to the Changes panel.
+  Force push exists only as force-with-lease, behind a confirmation. Credential prompts (passwords,
+  tokens, SSH key passphrases) and unknown-host-key questions appear in Lector, with Cancel as the
+  default for host keys; nothing is stored by Lector. Optional background fetch is off by default.
+- **Branches and stash:** create, switch, rename and delete branches, check out a remote branch; switching
+  refuses to carry a dirty tree over without asking. Stash, apply, pop and drop, each with the same
+  Undo and Activity log as other writes (a dropped stash can be brought back).
+- **Integrated terminal:** a panel with tabs, horizontal and vertical splits, profiles, and per-tab titles
+  that stay unique; "Open in Terminal" from the file tree and editor tabs; clickable URLs and
+  `file:line` references (confirmed before they open); find in scrollback; command marks (prompt to
+  prompt navigation, failed commands marked) where the shell supports integration; copy, paste with a
+  confirmation for multi-line text, drag selection, mouse reporting, IME; settings for the shell, font,
+  scrollback and shell integration. Sessions come back after a restart as placeholders and start only
+  when their tab is first shown. Agents get no terminal access: the terminal is for you.
+- **Code completion and signature help:** from your language servers only, no AI and no network of Lector's
+  own (Ctrl+Space, Ctrl+Shift+Space); accepting a completion applies the server's edits; snippets are off
+  by default (`editor.completion.snippets`). This replaces the "no code completion yet" limitation
+  listed under 0.2/0.3.
+- **Inline agent edit:** select code, press Ctrl/Cmd+I, describe the change, and review the agent's edit as
+  a diff inside the file's own tab: accept or reject per hunk or all at once, follow up, or open the full
+  review. Nothing is written to disk until you save. Turns also get a plain-language summary.
+- **Installs you can verify (groundwork):** the release workflow is signing-ready (macOS Developer ID and
+  notarization, Windows Authenticode, GPG for Linux packages, a minisign signature of `SHA256SUMS.txt`),
+  with signing and publishing jobs separated from the jobs that run downloaded tools. **Release builds
+  are signed only once the maintainer adds the certificates; none are configured yet, and the release
+  notes say what each release actually carries.** Manifests for Homebrew, winget and Flatpak are
+  included in the repository and attached to releases; they are not published to those package
+  managers yet. Help → Check for Updates is **notify-only** (Lector never downloads or installs
+  anything) and the automatic check is off until you enable it.
+- **Faster and tidier review:** the file finder is faster on very large trees; structural diff scales to
+  much larger files; risk ordering was tuned on a 60-case set of changes. That set is synthetic (written
+  for this purpose, not collected from real projects), so treat the improvement as a regression guard,
+  not as proof of accuracy on your code.
+- **Under the hood:** one process supervisor starts git, language servers and terminals in their own
+  process trees and kills the whole tree on cancel or quit; a local crash log and `lector health` show
+  whether sessions ended cleanly (nothing is sent anywhere); instruction-count performance gates in CI
+  (`scripts/perf-gate.sh`); scripted end-to-end journeys.
+- **Security hardening:** terminal titles and working-directory names are sanitized, OSC 52 clipboard reads
+  are denied, pasted text cannot end bracketed paste early, and Lector's own environment variables are
+  removed from shells; credential prompts run over a private socket with a per-process token, and prompt
+  text from servers is treated as untrusted; the Update dialog opens only
+  `github.com/meetdhruva/lector` pages and falls back to the release page otherwise; palette commands
+  without a dialog of their own (destructive or writing ones) ask before they run.
+- **Fixes found in review:** the command palette listed some Git and Agent commands twice and the duplicates
+  skipped their dialogs (Drop Stash ran at once); Ctrl+Shift+5 (split terminal) now works on X11; on macOS
+  Cmd+K clears the terminal instead of waiting for a chord, and Ctrl+K reaches your shell on Linux and
+  Windows; "Check for Updates" answers in the window that asked; Open in Terminal focuses the terminal;
+  pressing Ctrl+Shift+W repeatedly never closes the window; informational and partial-failure messages
+  no longer show the success check; quitting saves the session first and records a clean exit last.
+
+Known limitations (0.7): Sync has not been tested against real HTTPS or SSH remotes with credential
+prompts beyond a scripted helper. The Windows (ConPTY) and macOS terminal paths were verified only by CI
+tests, not on those systems. Inline agent edit has not yet been exercised with a real agent in a window.
+Shell integration (command marks, working-directory tracking) is unavailable for macOS login bash,
+PowerShell and cmd. The terminal scrollbar cannot be dragged. The file picker misses its 50 ms gate for
+some cold 6-character queries at 1M paths. There is no in-place updater: updates are downloaded by hand.
+Screen readers still need a GPUI version with AccessKit.
+
 ## 0.6.0 — 2026-11-06
 
 Team review. Released together with 0.5.0.

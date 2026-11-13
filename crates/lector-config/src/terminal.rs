@@ -2,7 +2,8 @@
 //!
 //! The shell program, its arguments, profiles and environment are **user-only**: a project's
 //! `.lector/settings.toml` cannot set them (opening a project must never choose a program to
-//! run), see `strip_user_only` in the settings module.
+//! run), see `strip_user_only` in the settings module. So are the paste confirmation (a
+//! safety prompt) and the scrollback size (memory).
 
 use std::collections::BTreeMap;
 
@@ -74,7 +75,7 @@ pub struct TerminalSettings {
     pub font_size: Option<f32>,
     /// Line height multiplier; unset = 1.2 (terminals pack lines tighter than code).
     pub line_height: Option<f32>,
-    /// Lines of scrollback kept per terminal.
+    /// Lines of scrollback kept per terminal. User-only.
     pub scrollback: usize,
     /// Default cursor shape.
     pub cursor_style: TerminalCursorStyle,
@@ -87,7 +88,8 @@ pub struct TerminalSettings {
     pub ctrl_c_copies_selection: bool,
     /// macOS: Option sends Meta (ESC prefix) instead of typing special characters.
     pub option_as_meta: bool,
-    /// Ask before pasting several lines when the program did not enable bracketed paste.
+    /// Ask before pasting several lines (or text with control characters) when the program
+    /// did not enable bracketed paste. User-only.
     pub confirm_multiline_paste: bool,
     /// Where "New Terminal" starts: "project" or "active_file".
     pub new_terminal_cwd: NewTerminalCwd,
@@ -125,5 +127,13 @@ impl Default for TerminalSettings {
 }
 
 /// Keys of `[terminal]` only the user's own settings file may set.
-pub(crate) const USER_ONLY_TERMINAL_KEYS: &[&str] =
-    &["shell", "profiles", "default_profile", "env"];
+/// `confirm_multiline_paste` is a safety prompt a project must not turn off; `scrollback`
+/// sizes memory per terminal, which a project must not inflate.
+pub(crate) const USER_ONLY_TERMINAL_KEYS: &[&str] = &[
+    "shell",
+    "profiles",
+    "default_profile",
+    "env",
+    "confirm_multiline_paste",
+    "scrollback",
+];

@@ -28,9 +28,13 @@ pub fn has_terminal(cx: &App) -> bool {
 
 /// Opens a terminal in `path` (a folder, or a file's folder). Does nothing without a
 /// handler. Never runs anything in the terminal: only the starting folder is set.
+///
+/// The terminal opens after the current effects have run: the context menu that called this
+/// restores the focus it had (the file tree, an editor) when it is dismissed, which happens
+/// after its entry's handler returns, and that must not take the focus from the new terminal.
 pub fn open_in_terminal(path: PathBuf, window: &mut Window, cx: &mut App) {
     let Some(open) = cx.try_global::<TerminalHook>().map(|h| h.open.clone()) else {
         return;
     };
-    open(path, window, cx);
+    window.defer(cx, move |window, cx| open(path, window, cx));
 }

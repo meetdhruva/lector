@@ -189,6 +189,25 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<TerminalView>> {
+        let view = self.build_view(request, profile, split, false, window, cx);
+        self.adopt(view.clone(), split, cx);
+        self.set_visible(true, window, cx);
+        let handle = view.read(cx).focus_handle.clone();
+        window.focus(&handle);
+        Some(view)
+    }
+
+    /// Creates a terminal view for `request`. `lazy`: a placeholder whose shell starts when it
+    /// is first shown ([`TerminalView::is_pending`]).
+    fn build_view(
+        &mut self,
+        request: CwdRequest,
+        profile: Option<&str>,
+        split: Option<SplitAxis>,
+        lazy: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
         let settings = terminal_settings(cx);
         let (root, active, has_folder) = match self.workspace.upgrade() {
             Some(ws) => {
@@ -225,8 +244,10 @@ impl TerminalPanel {
         let id = crate::next_id(cx);
         let workspace = self.workspace.clone();
         let spawn = self.spawn_processes;
-        let view = cx.new(|cx| {
-            if spawn {
+        cx.new(|cx| {
+            if lazy {
+                TerminalView::pending(id, options, workspace, window, cx)
+            } else if spawn {
                 TerminalView::new(id, options, workspace, window, cx)
             } else {
                 let cwd = options.cwd.clone().unwrap_or_default();
@@ -240,12 +261,19 @@ impl TerminalPanel {
                     cx,
                 )
             }
-        });
-        self.adopt(view.clone(), split, cx);
-        self.set_visible(true, window, cx);
-        let handle = view.read(cx).focus_handle.clone();
-        window.focus(&handle);
-        Some(view)
+        })
+    }
+
+    /// Starts the shells of restored tabs that are showing now (the active tab, panel shown).
+    fn start_visible(&mut self, cx: &mut Context<Self>) {
+        let spawn = self.spawn_processes;
+        if let Some(tab) = self.model.active_tab() {
+            for view in tab.panes.clone() {
+                if view.read(cx).is_pending() {
+                    view.update(cx, |v, cx| v.start_pending(spawn, cx));
+                }
+            }
+        }
     }
 
     /// Takes `view` into the panel (new tab or split).
@@ -516,7 +544,10 @@ impl TerminalPanel {
             .collect()
     }
 
-    /// Reopens saved tabs with fresh shells in their folders (nothing is run).
+    /// Reopens saved tabs as placeholders (title and folder) without starting anything. A
+    /// tab's shell starts, in its folder with fresh state (nothing is run in it), when the tab
+    /// is first shown: opening a project never runs the user's shell start-up files, and the
+    /// panel stays hidden until the user opens it.
     pub fn restore(&mut self, tabs: Vec<SavedTab>, window: &mut Window, cx: &mut Context<Self>) {
         for tab in tabs {
             let axis = if tab.vertical {
@@ -526,12 +557,13 @@ impl TerminalPanel {
             };
             for (i, cwd) in tab.cwds.iter().enumerate() {
                 let split = (i > 0).then_some(axis);
-                self.new_terminal(CwdRequest::Explicit(cwd.clone()), None, split, window, cx);
+                let request = CwdRequest::Explicit(cwd.clone());
+                let view = self.build_view(request, None, split, true, window, cx);
+                self.adopt(view, split, cx);
             }
             let ix = self.model.active_index();
             self.model.rename(ix, tab.title.clone());
         }
-        self.set_visible(false, window, cx);
         cx.notify();
     }
 
@@ -578,6 +610,30 @@ impl TerminalPanel {
         state
     }
 
+    /// The label of tab `ix` before the split marker: its name or the focused terminal's
+    /// title, numbered when an earlier tab shows the same one ("repo", "repo (2)").
+    fn base_title(&self, ix: usize, cx: &App) -> String {
+        let Some(tab) = self.model.tabs().get(ix) else {
+            return String::new();
+        };
+        tab.custom_title.clone().unwrap_or_else(|| {
+            tab.focused_pane()
+                .map(|v| v.read(cx).display_title())
+                .unwrap_or_else(|| "Terminal".to_owned())
+        })
+    }
+
+    /// [`Self::base_title`] made unique among the tabs by a counter.
+    pub(crate) fn unique_title(&self, ix: usize, cx: &App) -> String {
+        let base = self.base_title(ix, cx);
+        let earlier = (0..ix).filter(|&i| self.base_title(i, cx) == base).count();
+        if earlier == 0 {
+            base
+        } else {
+            format!("{base} ({})", earlier + 1)
+        }
+    }
+
     fn render_tab(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let ui = cx.theme().ui.clone();
         let tab = &self.model.tabs()[ix];
@@ -616,10 +672,8 @@ impl TerminalPanel {
             Some(v) => {
                 let v = v.read(cx);
                 (
-                    tab.custom_title
-                        .clone()
-                        .unwrap_or_else(|| v.display_title()),
-                    v.cwd().display().to_string(),
+                    self.unique_title(ix, cx),
+                    v.cwd_label(),
                     v.has_exited(),
                     v.last_command_failed(),
                 )
@@ -630,7 +684,7 @@ impl TerminalPanel {
         let bell = !active && views.iter().any(|v| v.read(cx).bell);
         let split_count = views.len();
         let title: SharedString = if split_count > 1 {
-            format!("{title} ({split_count})").into()
+            format!("{title} [{split_count}]").into()
         } else {
             title.into()
         };
@@ -774,6 +828,14 @@ fn dirs_home() -> Option<PathBuf> {
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.theme().ui.clone();
+        // The panel renders only while shown: restored tabs that are on screen now start.
+        let waiting = self
+            .model
+            .active_tab()
+            .is_some_and(|t| t.panes.iter().any(|v| v.read(cx).is_pending()));
+        if waiting {
+            cx.defer_in(window, |panel, _, cx| panel.start_visible(cx));
+        }
         let tabs: Vec<AnyElement> = (0..self.model.tabs().len())
             .map(|ix| self.render_tab(ix, window, cx))
             .collect();

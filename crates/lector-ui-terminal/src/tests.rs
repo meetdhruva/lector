@@ -50,7 +50,7 @@ fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("src/deep")).expect("mkdir");
     std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("write");
-    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
     Fixture { _dir: dir, root }
 }
 
@@ -197,6 +197,189 @@ fn open_in_terminal_folders(cx: &mut TestAppContext) {
     assert!(cx.update(|_, cx| lector_ui::terminal_hook::has_terminal(cx)));
 }
 
+/// "Open in Terminal" from a context menu leaves the focus in the new terminal: the menu
+/// restores the previous focus (the file tree) after its entry ran, which must not win.
+#[gpui::test]
+fn open_in_terminal_from_a_context_menu_focuses_the_terminal(cx: &mut TestAppContext) {
+    use lector_ui::components::context_menu::ContextMenu;
+    use lector_ui::components::popover::Popover;
+
+    init(cx, settings_with(|_| {}));
+    let f = fixture();
+    let (ws, panel, cx) = open_workspace(cx, &f.root);
+    let root = f.root.clone();
+    let before = cx.update(|window, cx| window.focused(cx));
+    let menu = cx.update(|window, cx| {
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            menu.entry("Open in Terminal", move |window, cx| {
+                lector_ui::terminal_hook::open_in_terminal(root.clone(), window, cx)
+            })
+        })
+    });
+    let mut popover: Popover<ContextMenu> = Popover::new();
+    ws.update_in(cx, |_, window, cx| {
+        popover.show(
+            menu.clone(),
+            gpui::point(gpui::px(10.), gpui::px(10.)),
+            gpui::Corner::TopLeft,
+            window,
+            cx,
+            |_, _, _| {},
+        )
+    });
+    menu.update_in(cx, |m, window, cx| m.activate(0, window, cx));
+    cx.run_until_parked();
+    let terminal = panel
+        .read_with(cx, |p, _| p.active_terminal())
+        .expect("terminal opened");
+    assert!(
+        cx.update(|window, cx| terminal.read(cx).focus_handle.is_focused(window)),
+        "the menu's focus restore won (before: {})",
+        before.is_some()
+    );
+    drop(popover);
+}
+
+fn pending_flags(panel: &Entity<TerminalPanel>, cx: &mut VisualTestContext) -> Vec<bool> {
+    cx.update(|_, cx| {
+        panel
+            .read(cx)
+            .terminals()
+            .iter()
+            .map(|v| v.read(cx).is_pending())
+            .collect()
+    })
+}
+
+fn redraw(cx: &mut VisualTestContext) {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Restored tabs are placeholders: nothing starts while the panel is hidden, and only the
+/// tab that is shown starts its shell.
+#[gpui::test]
+fn restore_is_lazy_until_a_tab_is_shown(cx: &mut TestAppContext) {
+    use crate::session::SavedTab;
+
+    init(cx, settings_with(|_| {}));
+    let f = fixture();
+    let (ws, panel, cx) = open_workspace(cx, &f.root);
+    let tabs = vec![
+        SavedTab {
+            cwds: vec![f.root.clone(), f.root.join("src")],
+            title: Some("build".into()),
+            vertical: false,
+        },
+        SavedTab {
+            cwds: vec![f.root.join("src/deep")],
+            ..SavedTab::default()
+        },
+    ];
+    panel.update_in(cx, |p, window, cx| p.restore(tabs, window, cx));
+    redraw(cx);
+    assert_eq!(pending_flags(&panel, cx), vec![true, true, true]);
+    assert!(!ws.read_with(cx, |ws, _| ws.is_bottom_panel_visible()));
+    // Titles and folders are known without a shell.
+    panel.read_with(cx, |p, _| {
+        assert_eq!(p.model.tabs().len(), 2);
+    });
+    // Showing the panel starts the active tab (both splits) only.
+    cx.dispatch_action(actions::TogglePanel);
+    redraw(cx);
+    assert!(ws.read_with(cx, |ws, _| ws.is_bottom_panel_visible()));
+    let (active, flags) = (
+        panel.read_with(cx, |p, _| p.model.active_index()),
+        pending_flags(&panel, cx),
+    );
+    let per_tab: Vec<Vec<bool>> = {
+        let mut i = 0;
+        panel.read_with(cx, |p, _| {
+            p.model
+                .tabs()
+                .iter()
+                .map(|t| {
+                    let n = t.panes.len();
+                    i += n;
+                    flags[i - n..i].to_vec()
+                })
+                .collect()
+        })
+    };
+    assert!(per_tab[active].iter().all(|pending| !pending));
+    assert!(per_tab
+        .iter()
+        .enumerate()
+        .filter(|(ix, _)| *ix != active)
+        .all(|(_, tab)| tab.iter().all(|pending| *pending)));
+    // Selecting the other tab starts it.
+    panel.update_in(cx, |p, window, cx| p.activate_relative(1, window, cx));
+    redraw(cx);
+    assert!(pending_flags(&panel, cx).iter().all(|pending| !pending));
+}
+
+/// Two tabs in the same folder are told apart ("repo", "repo (2)").
+#[gpui::test]
+fn tabs_with_the_same_title_are_numbered(cx: &mut TestAppContext) {
+    init(cx, settings_with(|_| {}));
+    let f = fixture();
+    let (_ws, panel, cx) = open_workspace(cx, &f.root);
+    for _ in 0..3 {
+        cx.dispatch_action(actions::NewTerminal);
+        cx.run_until_parked();
+    }
+    let titles: Vec<String> = cx.update(|_, cx| {
+        let panel = panel.read(cx);
+        (0..3).map(|ix| panel.unique_title(ix, cx)).collect()
+    });
+    let name = f.root.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        titles,
+        vec![name.clone(), format!("{name} (2)"), format!("{name} (3)")]
+    );
+}
+
+/// Ctrl+Shift+W on an empty panel hides it, and right after the last terminal went it does not
+/// close the window (the shortcut means Close Window once the editor has the focus).
+#[gpui::test]
+fn kill_terminal_never_closes_the_window(cx: &mut TestAppContext) {
+    use lector_ui::actions::workspace::CloseWindow;
+
+    init(cx, settings_with(|_| {}));
+    let f = fixture();
+    let (ws, panel, cx) = open_workspace(cx, &f.root);
+    cx.dispatch_action(actions::TogglePanel);
+    cx.run_until_parked();
+    assert_eq!(panel.read_with(cx, |p, _| p.terminals().len()), 1);
+    cx.dispatch_action(actions::KillTerminal);
+    cx.run_until_parked();
+    assert!(panel.read_with(cx, |p, _| p.terminals().is_empty()));
+    assert!(!ws.read_with(cx, |ws, _| ws.is_bottom_panel_visible()));
+    // The second press arrives with the editor focused: swallowed once, with a hint.
+    cx.update(|window, cx| {
+        let focus = ws.focus_handle(cx);
+        window.focus(&focus);
+    });
+    cx.dispatch_action(CloseWindow);
+    cx.run_until_parked();
+    let toast = ws.read_with(cx, |ws, _| ws.toast_message());
+    assert!(
+        toast.is_some_and(|t| t.contains("stays open")),
+        "the window must not close"
+    );
+    // An empty panel that is shown and focused hides on the shortcut.
+    ws.update_in(cx, |ws, window, cx| {
+        ws.set_bottom_panel_visible(true, window, cx)
+    });
+    cx.update(|window, cx| {
+        let focus = panel.read(cx).focus_handle(cx);
+        window.focus(&focus);
+    });
+    cx.dispatch_action(actions::KillTerminal);
+    cx.run_until_parked();
+    assert!(!ws.read_with(cx, |ws, _| ws.is_bottom_panel_visible()));
+}
+
 #[gpui::test]
 fn new_terminal_in_active_file_folder_when_configured(cx: &mut TestAppContext) {
     init(
@@ -241,6 +424,10 @@ impl Render for Harness {
             .on_action(cx.listener(|h, _: &WorkspaceThing, _, _| h.actions.push("workspace")))
             .on_action(cx.listener(|h, _: &Palette, _, _| h.actions.push("palette")))
             .on_action(cx.listener(|h, _: &actions::Copy, _, _| h.actions.push("copy")))
+            .on_action(cx.listener(|h, _: &actions::Clear, _, _| h.actions.push("clear")))
+            .on_action(
+                cx.listener(|h, _: &lector_ui::actions::git::Push, _, _| h.actions.push("push")),
+            )
             .child(
                 div()
                     .key_context("Terminal")
@@ -317,6 +504,67 @@ fn reserved_keys_route_through_key_contexts(cx: &mut TestAppContext) {
                 h.keys
             );
         }
+    });
+}
+
+/// The shipped defaults of `platform`, as lector-app binds them, plus the terminal pass-through.
+fn bind_defaults(cx: &mut App, platform: lector_config::Platform) {
+    let mut specs: Vec<KeySpec> = lector_config::default_keymap(platform)
+        .into_iter()
+        .map(|k| KeySpec {
+            keys: k.keys,
+            action: k.action,
+            context: k.context,
+        })
+        .collect();
+    let extra = passthrough_bindings(&specs);
+    specs.extend(extra);
+    lector_ui::keymap::bind_keymap(cx, &specs);
+}
+
+/// macOS: Cmd+K clears the focused terminal at once. The `cmd-k` chords of the workspace
+/// (push, pull, ...) neither delay it nor can be reached from a terminal.
+#[gpui::test]
+fn cmd_k_clears_a_terminal_immediately_and_sync_chords_stay_out(cx: &mut TestAppContext) {
+    let (harness, cx) = cx.add_window_view(|_, cx| Harness {
+        terminal: cx.focus_handle(),
+        keys: Vec::new(),
+        actions: Vec::new(),
+    });
+    cx.update(|window, cx| {
+        bind_defaults(cx, lector_config::Platform::MacOS);
+        let focus = harness.read(cx).terminal.clone();
+        window.focus(&focus);
+    });
+    // No timer is advanced: a chord prefix would still be waiting for its second key.
+    cx.simulate_keystrokes("cmd-k");
+    harness.read_with(cx, |h, _| {
+        assert_eq!(h.actions, vec!["clear"], "keys: {:?}", h.keys)
+    });
+    cx.simulate_keystrokes("cmd-k p");
+    harness.read_with(cx, |h, _| {
+        assert_eq!(h.actions, vec!["clear", "clear"], "push must not run");
+        assert_eq!(h.keys.last().map(String::as_str), Some("p"));
+    });
+}
+
+/// Linux / Windows: Ctrl+K is the shell's, and `ctrl-k p` does not push from a terminal.
+#[gpui::test]
+fn ctrl_k_reaches_the_shell_and_sync_chords_stay_out(cx: &mut TestAppContext) {
+    let (harness, cx) = cx.add_window_view(|_, cx| Harness {
+        terminal: cx.focus_handle(),
+        keys: Vec::new(),
+        actions: Vec::new(),
+    });
+    cx.update(|window, cx| {
+        bind_defaults(cx, lector_config::Platform::Linux);
+        let focus = harness.read(cx).terminal.clone();
+        window.focus(&focus);
+    });
+    cx.simulate_keystrokes("ctrl-k p");
+    harness.read_with(cx, |h, _| {
+        assert!(h.actions.is_empty(), "nothing ran: {:?}", h.actions);
+        assert_eq!(h.keys, vec!["ctrl-k", "p"]);
     });
 }
 

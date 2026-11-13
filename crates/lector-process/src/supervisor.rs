@@ -30,9 +30,10 @@ impl SupInner {
     }
 }
 
-/// Tracks every child process Lector runs (git, language servers, agents, terminals):
-/// spawns them in their own process group / Job Object, lists them, and kills every
-/// tree on [`shutdown`](Self::shutdown).
+/// Tracks the child processes Lector runs through it (git, language servers, agents,
+/// helpers): spawns them in their own process group / Job Object, lists them, and kills
+/// every tree on [`shutdown`](Self::shutdown). Integrated terminals are not among them:
+/// they run in a PTY from `portable-pty` (`lector-terminal`), which kills their trees itself.
 ///
 /// Cheap to clone (shared). Use [`Supervisor::global`] in the app; tests can make their own.
 #[derive(Clone)]
@@ -82,12 +83,20 @@ impl Supervisor {
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (handle, shared) = child::spawn(cmd, id, &self.inner)?;
-        self.inner
-            .live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, Arc::downgrade(&shared));
-        Ok(handle)
+        {
+            let mut live = self.inner.live.lock().unwrap_or_else(|e| e.into_inner());
+            live.insert(id, Arc::downgrade(&shared));
+            // `shutdown` sets the flag before it takes this lock to list the live trees:
+            // either it lists this child, or the flag is visible here.
+            if !self.inner.shutting_down.load(Ordering::SeqCst) {
+                return Ok(handle);
+            }
+            live.remove(&id);
+        }
+        // Shutdown started while this child was being spawned: dropping the handle kills
+        // its tree (outside the lock; the drop also unregisters, harmlessly, again).
+        drop(handle);
+        Err(ProcessError::ShuttingDown)
     }
 
     /// Every process whose handle is alive, by id.

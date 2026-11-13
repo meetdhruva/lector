@@ -79,6 +79,8 @@ pub(crate) struct FindState {
 pub struct TerminalView {
     pub(crate) id: u64,
     pub(crate) session: Option<Arc<Terminal>>,
+    /// How to start the shell of a restored tab once it is first shown.
+    pending_spawn: Option<SpawnOptions>,
     pub(crate) error: Option<String>,
     pub(crate) focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
@@ -137,6 +139,21 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::pending(id, options, workspace, window, cx);
+        this.start_pending(true, cx);
+        this
+    }
+
+    /// A view that remembers how to start its shell but does not start it yet: restored tabs
+    /// stay placeholders (title and folder) until they are first shown, so opening a project
+    /// never runs the user's shell start-up files. See [`TerminalView::start_pending`].
+    pub(crate) fn pending(
+        id: u64,
+        options: SpawnOptions,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let cwd = options
             .cwd
             .clone()
@@ -151,7 +168,24 @@ impl TerminalView {
             window,
             cx,
         );
+        this.pending_spawn = Some(options);
+        this
+    }
 
+    /// Whether this view still waits for its first showing to start its shell.
+    pub fn is_pending(&self) -> bool {
+        self.pending_spawn.is_some()
+    }
+
+    /// Starts the shell of a [`pending`](Self::pending) view (no-op otherwise). `spawn` false
+    /// only drops the request (tests without processes).
+    pub(crate) fn start_pending(&mut self, spawn: bool, cx: &mut Context<Self>) {
+        let Some(options) = self.pending_spawn.take() else {
+            return;
+        };
+        if !spawn {
+            return;
+        }
         // Wake: parser thread → at most one pending message → GPUI task.
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
         let pending = Arc::new(AtomicBool::new(false));
@@ -175,8 +209,8 @@ impl TerminalView {
             let result = spawn.await;
             let _ = this.update(cx, |view, cx| view.on_spawned(result, cx));
         });
-        this._tasks = vec![wake_task, spawn_task];
-        this
+        self._tasks = vec![wake_task, spawn_task];
+        cx.notify();
     }
 
     /// A view without a process (tests; a session that failed to start shows its error).
@@ -202,6 +236,7 @@ impl TerminalView {
         TerminalView {
             id,
             session: None,
+            pending_spawn: None,
             error: None,
             focus_handle,
             workspace,
@@ -346,21 +381,31 @@ impl TerminalView {
             .as_deref()
             .filter(|_| self.command_running)
         {
-            return truncate(cmd, 40);
+            return truncate(&lector_terminal::sanitize_title(cmd), 40);
         }
         if self.error.is_some() {
             return "Error".into();
         }
-        if let Some(name) = self.cwd.file_name() {
-            return name.to_string_lossy().into_owned();
+        // The folder may come from the program's own report (OSC 7): never shown raw.
+        if let Some(name) = lector_terminal::cwd_display_name(&self.cwd) {
+            return name;
         }
-        if let Some(t) = self.title.as_deref().filter(|t| !t.is_empty()) {
-            return truncate(t, 40);
+        let title = self.title.as_deref().map(lector_terminal::sanitize_title);
+        if let Some(t) = title.filter(|t| !t.is_empty()) {
+            return truncate(&t, 40);
         }
         if !self.cwd.as_os_str().is_empty() {
-            return self.cwd.display().to_string();
+            return self.cwd_label();
         }
         self.profile_name.clone()
+    }
+
+    /// The working directory for tooltips: control characters and bidi overrides removed.
+    pub fn cwd_label(&self) -> String {
+        truncate(
+            &lector_terminal::sanitize_title(&self.cwd.display().to_string()),
+            200,
+        )
     }
 
     /// The working directory (last OSC 7 report, else where it started).
@@ -619,14 +664,11 @@ impl TerminalView {
             self.after_input(window, cx);
             return;
         }
-        let lines = text.lines().count().max(2);
+        let (title, detail) = crate::routing::paste_prompt(&text);
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Paste {lines} lines into the terminal?"),
-            Some(
-                "The program did not enable bracketed paste, so the shell may run each line as \
-                 a command. (Turn this question off with terminal.confirm_multiline_paste.)",
-            ),
+            &title,
+            Some(detail),
             &["Paste", "Paste, Don't Ask Again", "Cancel"],
             cx,
         );

@@ -226,9 +226,10 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
     // v0.7 integrated terminal. `Terminal` is the focused terminal: keys bound in `Workspace`
     // are not seen there (they reach the shell) except a reserved few, see lector-ui-terminal.
     add(w, "ctrl-`".into(), "terminal::TogglePanel");
-    add(w, "ctrl-shift-`".into(), "terminal::NewTerminal");
-    // X11/Wayland and macOS report Shift+` as `~`.
+    // X11/Wayland and macOS report Shift+` as `~` (shift is dropped for symbols). Aliases come
+    // first: the last binding of an action is the one tooltips and menus show.
     add(w, "ctrl-~".into(), "terminal::NewTerminal");
+    add(w, "ctrl-shift-`".into(), "terminal::NewTerminal");
     let t = "Terminal";
     if mac {
         add(t, "cmd-c".into(), "terminal::Copy");
@@ -253,6 +254,15 @@ pub fn default_keymap(platform: Platform) -> Vec<KeyBinding> {
         add(t, "ctrl-shift-f".into(), "terminal::Find");
         add(t, "ctrl-shift-k".into(), "terminal::Clear");
         add(t, "ctrl-shift-w".into(), "terminal::KillTerminal");
+        // The panel itself (F6 focus, nothing to kill) must not hand Ctrl+Shift+W to
+        // Close Window.
+        add(
+            "TerminalPanel",
+            "ctrl-shift-w".into(),
+            "terminal::KillTerminal",
+        );
+        // Shift+5 arrives as `%` on X11/Wayland (shift is dropped for symbols and digits).
+        add(t, "ctrl-%".into(), "terminal::SplitTerminal");
         add(t, "ctrl-shift-5".into(), "terminal::SplitTerminal");
         add(t, "ctrl-pagedown".into(), "terminal::NextTerminal");
         add(t, "ctrl-pageup".into(), "terminal::PrevTerminal");
@@ -459,6 +469,44 @@ mod tests {
         assert_eq!(find(&lin, "editor::GoToDefinition"), ["f12"]);
         assert_eq!(find(&lin, "editor::TriggerSuggest"), ["ctrl-space"]);
         assert_eq!(find(&mac, "completion::AcceptOnEnter"), ["enter"]);
+    }
+
+    /// X11/Wayland report Ctrl+Shift+<symbol or digit> with the shifted character and no shift
+    /// modifier, so each such default has an alias on that character, listed before the
+    /// canonical spelling (tooltips show the last binding of an action).
+    #[test]
+    fn shifted_symbol_defaults_have_x11_aliases() {
+        let lin = default_keymap(Platform::Linux);
+        assert_eq!(
+            find(&lin, "terminal::SplitTerminal"),
+            ["ctrl-%", "ctrl-shift-5"]
+        );
+        assert_eq!(
+            find(&lin, "terminal::NewTerminal"),
+            ["ctrl-~", "ctrl-shift-`"]
+        );
+        // No new default uses Ctrl+Shift with a digit or symbol without such an alias.
+        let terminal_or_workspace = |b: &&KeyBinding| {
+            matches!(b.context.as_deref(), Some("Terminal") | Some("Workspace"))
+                && b.action.starts_with("terminal::")
+        };
+        for b in lin.iter().filter(terminal_or_workspace) {
+            for stroke in b.keys.split_whitespace() {
+                let Some(rest) = stroke.strip_prefix("ctrl-shift-") else {
+                    continue;
+                };
+                let single = rest.chars().count() == 1;
+                let c = rest.chars().next().unwrap_or('a');
+                if single && !c.is_ascii_alphabetic() {
+                    let others = find(&lin, &b.action);
+                    assert!(
+                        others.len() >= 2,
+                        "{stroke} ({}) needs the shifted-character alias",
+                        b.action
+                    );
+                }
+            }
+        }
     }
 
     /// The completion keys only bind while the popup is open, and after the plain CodeView

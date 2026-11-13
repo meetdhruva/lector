@@ -378,17 +378,34 @@ impl Repo {
 
     /// `git stash apply` / `pop stash@{index}`. Conflicts are reported in the outcome (not an
     /// error); a pop that conflicts keeps the stash, as git does. Local changes that would be
-    /// overwritten fail with [`SyncErrorKind::LocalChanges`].
+    /// overwritten fail with [`SyncErrorKind::LocalChanges`]. Same as
+    /// [`stash_apply_expecting`](Self::stash_apply_expecting) without an expected commit.
     pub fn stash_apply(&self, index: usize, pop: bool) -> Result<StashApplied> {
-        let stash = self.stash_at(index)?;
+        self.stash_apply_expecting(index, None, pop)
+    }
+
+    /// [`stash_apply`](Self::stash_apply) of the entry at `index`, refused with
+    /// [`SyncErrorKind::RefChanged`] ("the stash list changed — refresh") when that entry is
+    /// not commit `expected` (when given) or when `stash@{index}` moves between reading the
+    /// list and running git (another git process pushed or dropped a stash). An apply runs
+    /// on the commit itself; a pop names `stash@{index}`, re-checked right before.
+    pub fn stash_apply_expecting(
+        &self,
+        index: usize,
+        expected: Option<Oid>,
+        pop: bool,
+    ) -> Result<StashApplied> {
+        let workdir = self.require_workdir()?;
+        let stash = self.stash_at_expecting(index, expected)?;
+        let oid = stash.oid.to_string();
         let spec = format!("stash@{{{index}}}");
-        let verb = if pop { "pop" } else { "apply" };
-        let out = proc::write_raw(
-            self.require_workdir()?,
-            &["stash", verb, &spec],
-            None,
-            "applying a stash",
-        )?;
+        let args: [&str; 3] = if pop {
+            self.ensure_stash_unchanged(index, stash.oid)?;
+            ["stash", "pop", &spec]
+        } else {
+            ["stash", "apply", &oid]
+        };
+        let out = proc::write_raw(workdir, &args, None, "applying a stash")?;
         let conflicts: Vec<String> = self
             .status()?
             .into_iter()
@@ -407,12 +424,39 @@ impl Repo {
     }
 
     /// `git stash drop stash@{index}`; returns the dropped entry (its commit stays reachable
-    /// until gc, so [`stash_store`](Self::stash_store) can bring it back).
+    /// until gc, so [`stash_store`](Self::stash_store) can bring it back). Same as
+    /// [`stash_drop_expecting`](Self::stash_drop_expecting) without an expected commit.
     pub fn stash_drop(&self, index: usize) -> Result<Stash> {
-        let stash = self.stash_at(index)?;
+        self.stash_drop_expecting(index, None)
+    }
+
+    /// [`stash_drop`](Self::stash_drop), refused with [`SyncErrorKind::RefChanged`] when the
+    /// entry at `index` is not `expected` (when given) or `stash@{index}` moved just before
+    /// the drop would run.
+    pub fn stash_drop_expecting(&self, index: usize, expected: Option<Oid>) -> Result<Stash> {
+        let stash = self.stash_at_expecting(index, expected)?;
         let spec = format!("stash@{{{index}}}");
+        self.ensure_stash_unchanged(index, stash.oid)?;
         self.sync_write(&["stash", "drop", "-q", &spec], "dropping a stash")?;
         Ok(stash)
+    }
+
+    fn stash_at_expecting(&self, index: usize, expected: Option<Oid>) -> Result<Stash> {
+        let stash = self.stash_at(index)?;
+        if expected.is_some_and(|e| e != stash.oid) {
+            return Err(stash_list_changed());
+        }
+        Ok(stash)
+    }
+
+    /// `stash@{index}` still names `oid` (checked right before a command that takes the index).
+    fn ensure_stash_unchanged(&self, index: usize, oid: Oid) -> Result<()> {
+        let now = self.rev_parse_opt(&format!("stash@{{{index}}}"))?;
+        if now == Some(oid) {
+            Ok(())
+        } else {
+            Err(stash_list_changed())
+        }
     }
 
     /// `git stash store -m <message> <oid>`: puts a (dropped) stash commit back on top.
@@ -421,4 +465,13 @@ impl Repo {
         self.sync_write(&["stash", "store", "-m", message, &o], "restoring a stash")
             .map(drop)
     }
+}
+
+fn stash_list_changed() -> Error {
+    SyncError::new(
+        SyncErrorKind::RefChanged,
+        "the stash list changed \u{2014} refresh",
+    )
+    .with_hint("Refresh the stash list and pick the entry again.")
+    .into()
 }

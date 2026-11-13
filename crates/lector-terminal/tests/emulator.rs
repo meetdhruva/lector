@@ -569,7 +569,7 @@ fn modes_from_program() {
     assert!(m.wants_mouse());
     assert_eq!(
         e.encode_paste("x\x1b[201~y"),
-        b"\x1b[200~xy\x1b[201~".to_vec()
+        b"\x1b[200~x[201~y\x1b[201~".to_vec()
     );
     e.feed(b"\x1b[?1002l\x1b[?9h");
     assert_eq!(e.modes().mouse, lector_terminal::MouseMode::X10);

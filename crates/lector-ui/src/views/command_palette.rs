@@ -34,6 +34,9 @@ pub struct Command {
     pub binding: Option<SharedString>,
     /// Why the command cannot run now (greyed row, tooltip).
     pub unavailable: Option<SharedString>,
+    /// Ask before running a registry command (destructive, or a write that cannot be
+    /// undone, with no UI flow of its own that asks).
+    pub confirm: bool,
 }
 
 /// Palette delegate.
@@ -63,6 +66,7 @@ impl CommandPaletteDelegate {
                     command_id: None,
                     binding,
                     unavailable: None,
+                    confirm: false,
                 })
             })
             .collect();
@@ -87,6 +91,8 @@ impl CommandPaletteDelegate {
                         c.unavailable = reason;
                     }
                 }
+                // A title already listed (an action row of the same name) is not repeated.
+                None if commands.iter().any(|c| c.label.as_ref() == entry.label) => {}
                 None => commands.push(Command {
                     name: entry.id,
                     label: entry.label.into(),
@@ -94,6 +100,7 @@ impl CommandPaletteDelegate {
                     command_id: Some(entry.id),
                     binding: None,
                     unavailable: reason,
+                    confirm: entry.needs_confirmation,
                 }),
             }
         }
@@ -118,6 +125,19 @@ impl CommandPaletteDelegate {
             previous_focus,
             workspace,
         }
+    }
+
+    /// Every row's label, in display order (tests).
+    pub fn all_labels(&self) -> Vec<SharedString> {
+        self.commands.iter().map(|c| c.label.clone()).collect()
+    }
+
+    /// Registry command ids that have their own row, with whether running asks first (tests).
+    pub fn registry_rows(&self) -> Vec<(&'static str, bool)> {
+        self.commands
+            .iter()
+            .filter_map(|c| c.command_id.map(|id| (id, c.confirm)))
+            .collect()
     }
 
     /// Labels of current matches (tests).
@@ -180,6 +200,7 @@ impl PickerDelegate for CommandPaletteDelegate {
             let (Some(id), Some(ws)) = (command.command_id, self.workspace.clone()) else {
                 return;
             };
+            let (label, confirm) = (command.label.to_string(), command.confirm);
             cx.emit(DismissEvent);
             if let Some(focus) = self.previous_focus.clone() {
                 window.focus(&focus);
@@ -187,13 +208,8 @@ impl PickerDelegate for CommandPaletteDelegate {
             window.defer(cx, move |window, cx| {
                 if let Some(ws) = ws.upgrade() {
                     ws.update(cx, |ws, cx| {
-                        crate::commands_bridge::invoke(
-                            ws,
-                            id,
-                            serde_json::Value::Null,
-                            true,
-                            window,
-                            cx,
+                        crate::commands_bridge::invoke_from_palette(
+                            ws, id, &label, confirm, window, cx,
                         )
                     });
                 }

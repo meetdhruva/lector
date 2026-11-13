@@ -62,8 +62,13 @@ pub struct CommandSpec {
     pub destructive: bool,
     /// [`Outcome::undo`] is filled on success.
     pub undoable: bool,
-    /// The GPUI action ("git::Stage") that dispatches this command, if any.
+    /// The GPUI action ("git::Stage") that dispatches this command, if any. The generic
+    /// action bridge registers a handler that runs the command as is.
     pub ui_action: Option<&'static str>,
+    /// The GPUI action whose handler in a UI crate runs this command through its own flow
+    /// (selection, confirmation, progress, Undo toast). The bridge registers nothing for it
+    /// and the palette lists that action's row instead of a second row for the command.
+    pub ui_flow: Option<&'static str>,
 }
 
 impl CommandSpec {
@@ -83,6 +88,7 @@ impl CommandSpec {
             destructive: false,
             undoable: false,
             ui_action: None,
+            ui_flow: None,
         }
     }
 
@@ -102,6 +108,12 @@ impl CommandSpec {
     /// Sets [`CommandSpec::ui_action`].
     pub fn with_ui_action(mut self, action: &'static str) -> Self {
         self.ui_action = Some(action);
+        self
+    }
+
+    /// Sets [`CommandSpec::ui_flow`].
+    pub fn with_ui_flow(mut self, action: &'static str) -> Self {
+        self.ui_flow = Some(action);
         self
     }
 
@@ -137,6 +149,9 @@ impl CommandSpec {
         }
         if let Some(a) = self.ui_action {
             v["ui_action"] = json!(a);
+        }
+        if let Some(a) = self.ui_flow {
+            v["ui_flow"] = json!(a);
         }
         v
     }
@@ -297,6 +312,19 @@ pub enum UiRequest {
     Refresh,
 }
 
+/// How a UI shows an [`Outcome`]'s summary: a success, a note (nothing to do) or a warning
+/// (partly done, needs attention). Not part of the JSON of the CLI or MCP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NoticeLevel {
+    /// It worked.
+    #[default]
+    Success,
+    /// A note: nothing happened because nothing was needed ("already up to date").
+    Info,
+    /// It partly worked (applied with conflicts, pull stopped).
+    Warning,
+}
+
 /// Result of applying a command.
 #[derive(Debug, Clone, Default)]
 pub struct Outcome {
@@ -312,6 +340,8 @@ pub struct Outcome {
     pub paths: Vec<PathBuf>,
     /// Journal entry id, set by [`CommandRegistry::invoke`] when recorded.
     pub journal_id: Option<u64>,
+    /// How a UI shows [`Outcome::summary`].
+    pub level: NoticeLevel,
 }
 
 impl Outcome {
@@ -322,6 +352,12 @@ impl Outcome {
             data: Value::Null,
             ..Default::default()
         }
+    }
+
+    /// Sets [`Outcome::level`].
+    pub fn with_level(mut self, level: NoticeLevel) -> Self {
+        self.level = level;
+        self
     }
 
     /// Sets [`Outcome::data`].

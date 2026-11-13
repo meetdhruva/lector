@@ -43,9 +43,12 @@ pub use error::TerminalError;
 pub use geometry::{
     grid_to_viewport, viewport_to_grid, Direction, GridPoint, ScrollAmount, Side, TermSize,
 };
-pub use input::{Key, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+pub use input::{
+    paste_needs_confirmation, sanitize_paste, Key, Modifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 pub use links::{resolve_link, LinkCandidate, LinkSource, LinkTarget};
-pub use osc::{sanitize_title, MAX_TITLE_CHARS};
+pub use osc::{cwd_display_name, sanitize_title, MAX_CWD_NAME_CHARS, MAX_TITLE_CHARS};
 pub use session::{EmulatorGuard, ExitInfo, Terminal, WakeFn};
 pub use shell::{ShellKind, ShellProfile, SpawnOptions};
 pub use snapshot::{

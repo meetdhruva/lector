@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use lector_process::askpass::{
     run_askpass_client_with, AskpassClientError, AskpassServer, Endpoint, PromptKind, PromptReply,
-    PromptRequest, Secret, ENV_ENDPOINT, ENV_TOKEN, HELPER_FLAG, HELPER_NAME,
+    PromptRequest, Secret, ENV_TOKEN,
 };
+#[cfg(unix)]
+use lector_process::askpass::{ENV_ENDPOINT, HELPER_FLAG, HELPER_NAME};
 
 fn token_of(server: &AskpassServer) -> String {
     server
@@ -210,4 +212,88 @@ fn client_without_a_server_fails_cleanly() {
         ),
         "{err}"
     );
+}
+
+#[test]
+fn operation_ids_reach_the_handler() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let token = token_of(&server);
+    let mut out = Vec::new();
+    let answered = lector_process::askpass::run_askpass_client_for_op(
+        "Username for 'https://x': ",
+        Some(42),
+        server.endpoint(),
+        &token,
+        &mut out,
+    )
+    .unwrap();
+    assert!(answered);
+    ask(&server, &token, "Username for 'https://y': ").unwrap();
+    let ops: Vec<Option<u64>> = seen.lock().unwrap().iter().map(|r| r.op).collect();
+    assert_eq!(ops, vec![Some(42), None]);
+}
+
+fn frame(payload: &[u8]) -> Vec<u8> {
+    let mut f = (payload.len() as u32).to_be_bytes().to_vec();
+    f.extend_from_slice(payload);
+    f
+}
+
+#[test]
+fn version_1_requests_are_still_answered() {
+    use std::io::{Read as _, Write as _};
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let token = token_of(&server);
+    let Endpoint::Tcp(addr) = server.endpoint().clone() else {
+        panic!("tcp");
+    };
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    let mut req = frame(b"LECTOR-ASKPASS/1");
+    req.extend(frame(token.as_bytes()));
+    req.extend(frame(b"Username for 'https://x': "));
+    s.write_all(&req).unwrap();
+    let mut reply = Vec::new();
+    s.read_to_end(&mut reply).unwrap();
+    assert_eq!(reply, frame(b"Aann"));
+    assert_eq!(seen.lock().unwrap()[0].op, None);
+}
+
+#[test]
+fn idle_unauthenticated_connections_neither_take_prompt_slots_nor_linger() {
+    use std::io::Read as _;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let token = token_of(&server);
+    let Endpoint::Tcp(addr) = server.endpoint().clone() else {
+        panic!("tcp");
+    };
+    // More silent connections than there are prompt slots (8), fewer than handshake slots.
+    let mut idle: Vec<std::net::TcpStream> = (0..12)
+        .map(|_| std::net::TcpStream::connect(addr).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        ask(&server, &token, "Username for 'https://x': ")
+            .unwrap()
+            .as_deref(),
+        Some("ann\n")
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // The handshake deadline closes them (EOF or reset), well before the request timeout.
+    for s in &mut idle {
+        s.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+        let mut buf = [0u8; 1];
+        let closed = match s.read(&mut buf) {
+            Ok(n) => n == 0,
+            Err(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+        };
+        assert!(closed, "idle connection still open");
+    }
+    assert!(started.elapsed() < Duration::from_secs(8));
 }

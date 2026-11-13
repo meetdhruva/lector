@@ -13,6 +13,15 @@
 //! The helper program put into `GIT_ASKPASS` / `SSH_ASKPASS` is the server's generated shim
 //! (Unix) or hard link (Windows), see `lector_process::askpass`; the environment goes to
 //! [`SyncHost::set_askpass_env`] so only git network commands get it.
+//!
+//! **Attribution.** A prompt names the operation that asked when its git process carries
+//! `LECTOR_ASKPASS_OP` (`lector_process::askpass::op_env(<SyncHost operation id>)`): the
+//! operation is found among [`SyncHost::running`] and matched to the registered
+//! [`PromptContext`] by repository. Without it, a prompt is attributed only when exactly one
+//! operation is registered; otherwise the dialog names no operation and warns. The dialog
+//! always shows the URL / host the prompt itself names and warns when that host differs
+//! from the operation's remote. Prompt text is untrusted (an SSH server can choose it):
+//! structured dialogs only for exact templates, see `sync_model::prompt_spec`.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -26,7 +35,7 @@ use lector_process::askpass::{AskpassServer, PromptReply, PromptRequest};
 use lector_ui::views::Workspace;
 
 use crate::sync_dialogs::PromptDialog;
-use crate::sync_model::prompt_spec;
+use crate::sync_model::{prompt_spec_in, PromptContextInfo};
 
 /// How long git may wait for an answer before the prompt is cancelled.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -227,16 +236,26 @@ fn show_next(cx: &mut App) {
         let Some(pending) = host.queue.pop_front() else {
             return;
         };
-        let ctx = host.ops.last().cloned().or_else(|| fallback_context(cx));
-        let Some(ctx) = ctx else {
-            let _ = pending.reply.send(PromptReply::Cancel);
-            continue;
+        let (ctx, attributed) = match context_for(&pending.request, cx) {
+            Some(found) => found,
+            None => {
+                let _ = pending.reply.send(PromptReply::Cancel);
+                continue;
+            }
         };
         let Some(ws) = ctx.workspace.upgrade() else {
             let _ = pending.reply.send(PromptReply::Cancel);
             continue;
         };
-        let spec = prompt_spec(&pending.request.text, pending.request.kind);
+        let spec = prompt_spec_in(
+            &pending.request.text,
+            pending.request.kind,
+            &PromptContextInfo {
+                remote: ctx.remote.as_deref(),
+                attributed,
+                key_exists: &key_file_exists,
+            },
+        );
         let op_id = ctx.id;
         let label = ctx.label.clone();
         let remote = ctx.remote.clone();
@@ -277,6 +296,64 @@ fn show_next(cx: &mut App) {
             }
         }
     }
+}
+
+/// The operation a prompt belongs to, and whether Lector is sure of it:
+/// 1. the request's operation id (`LECTOR_ASKPASS_OP`) names a running [`SyncHost`]
+///    operation; the registered context whose workspace is in that repository;
+/// 2. exactly one registered operation;
+/// 3. several: the latest one's window, but no operation label or remote (`false`);
+/// 4. none: [`fallback_context`].
+fn context_for(request: &PromptRequest, cx: &App) -> Option<(PromptContext, bool)> {
+    let host = cx.try_global::<AskpassHost>()?;
+    if let Some(op) = request.op {
+        let core = lector_ui::commands_bridge::core(cx);
+        let repo = SyncHost::of(&core)
+            .running()
+            .into_iter()
+            .find(|r| r.id == op)
+            .map(|r| r.repo);
+        if let Some(repo) = repo {
+            let repo = dunce::canonicalize(&repo).unwrap_or(repo);
+            let found = host.ops.iter().rev().find(|ctx| {
+                ctx.workspace.upgrade().is_some_and(|ws| {
+                    let root = ws.read(cx).root().to_path_buf();
+                    let root = dunce::canonicalize(&root).unwrap_or(root);
+                    root.starts_with(&repo) || repo.starts_with(&root)
+                })
+            });
+            if let Some(ctx) = found {
+                return Some((ctx.clone(), true));
+            }
+        }
+    }
+    match host.ops.as_slice() {
+        [] => fallback_context(cx).map(|c| (c, true)),
+        [only] => Some((only.clone(), true)),
+        [.., last] => {
+            let mut ctx = last.clone();
+            ctx.label = "A git operation".into();
+            ctx.remote = None;
+            Some((ctx, false))
+        }
+    }
+}
+
+/// Whether the key file a passphrase prompt names exists (`~/` is the home directory).
+fn key_file_exists(path: &str) -> bool {
+    let home = || {
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+    };
+    let full = match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        Some(rest) => match home() {
+            Some(h) => h.join(rest),
+            None => return false,
+        },
+        None => PathBuf::from(path),
+    };
+    full.is_file()
 }
 
 /// Without a registered operation (a prompt from a git process Lector did not start through

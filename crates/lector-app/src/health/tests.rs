@@ -361,7 +361,13 @@ fn concurrent_processes_are_counted_exactly() {
     let message = crash.message.as_deref().unwrap_or_default();
     assert_eq!(message, "child boom while reading ~/secret/project.rs");
     let text = fs::read_to_string(&crash.path).expect("report");
-    assert!(!text.contains("zed"), "{text}");
+    // Look for the user's path, not for "zed" alone: macOS backtraces carry symbol names
+    // such as `..._initialized` / `synchronized` that contain those letters.
+    assert!(
+        !text.contains("/home/zed") && !text.contains("zed/secret"),
+        "{text}"
+    );
+    assert!(text.contains("~/secret/project.rs"), "{text}");
     assert!(text.contains("\nbacktrace:\n"));
     assert!(text.contains("\nsession: "));
 }

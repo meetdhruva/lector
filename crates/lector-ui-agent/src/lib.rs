@@ -139,3 +139,54 @@ fn reveal(ws: &mut Workspace, window: &mut Window, cx: &mut gpui::Context<Worksp
 
 /// Width the sidebar gets when the Agent panel is shown (a conversation needs room).
 const PANEL_WIDTH: gpui::Pixels = gpui::px(400.);
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, WeakEntity};
+    use lector_app::commands::{CommandContext, Source};
+    use lector_app::{AppCore, CoreOptions};
+    use lector_theme::{Appearance, ThemeRegistry};
+    use lector_ui::components::picker::Picker;
+    use lector_ui::theme::{ThemeMode, ThemeState};
+    use lector_ui::views::command_palette::CommandPaletteDelegate;
+
+    /// With every command of the app registered (agent commands included), the palette lists each
+    /// title once, never doubles a namespace ("Agent: Agent: ...") and runs no destructive
+    /// command without a UI flow or a confirmation.
+    #[gpui::test]
+    fn palette_over_the_full_registry_is_unique_and_guarded(cx: &mut TestAppContext) {
+        cx.update(|cx: &mut gpui::App| {
+            ThemeState::init(cx, ThemeRegistry::new(), ThemeMode::Dark, Appearance::Dark);
+        });
+        let core = AppCore::open(CoreOptions::for_tests());
+        lector_agent::commands::register(&core);
+        let ctx = CommandContext::new(core.clone(), None, Source::Ui);
+        let entries = lector_ui::commands_bridge::palette_entries(&ctx);
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            let delegate =
+                CommandPaletteDelegate::with_registry(None, entries, WeakEntity::new_invalid(), cx);
+            Picker::new(delegate, window, cx)
+        });
+        let (labels, rows) = picker.read_with(cx, |p, _| {
+            (p.delegate.all_labels(), p.delegate.registry_rows())
+        });
+        let mut seen = std::collections::HashSet::new();
+        for label in &labels {
+            assert!(seen.insert(label.clone()), "`{label}` is listed twice");
+            assert!(!label.contains("Agent: Agent:"), "doubled prefix: {label}");
+        }
+        assert!(labels.iter().any(|l| l.as_ref() == "Agent: List Agents"));
+        for command in core.registry().list() {
+            let spec = command.spec();
+            if spec.destructive && spec.ui_action.is_none() && spec.ui_flow.is_none() {
+                if let Some((_, confirm)) = rows.iter().find(|(id, _)| *id == spec.id) {
+                    assert!(confirm, "`{}` runs from the palette unconfirmed", spec.id);
+                }
+            }
+        }
+        // The agent commands that have a panel flow do not get a second row.
+        for id in ["agent.start", "agent.undo_turn", "agent.send_comments"] {
+            assert!(!rows.iter().any(|(r, _)| *r == id), "{id} duplicated");
+        }
+    }
+}

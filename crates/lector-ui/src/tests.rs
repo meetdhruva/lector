@@ -159,6 +159,164 @@ fn command_palette_filters_actions(cx: &mut TestAppContext) {
     });
 }
 
+/// Every registry command is reachable from the palette exactly once, and none can write
+/// without either a UI flow (which asks / offers Undo) or the palette's own confirmation.
+#[gpui::test]
+fn command_palette_rows_are_unique_and_guarded(cx: &mut TestAppContext) {
+    use lector_app::commands::{CommandContext, Source};
+    use lector_app::{AppCore, CoreOptions};
+
+    init(cx);
+    let core = AppCore::open(CoreOptions::for_tests());
+    let ctx = CommandContext::new(core.clone(), None, Source::Ui);
+    let entries = crate::commands_bridge::palette_entries(&ctx);
+    let (picker, cx) = cx.add_window_view(|window, cx| {
+        let delegate = CommandPaletteDelegate::with_registry(
+            None,
+            entries,
+            gpui::WeakEntity::new_invalid(),
+            cx,
+        );
+        Picker::new(delegate, window, cx)
+    });
+    let (labels, rows, actions) = picker.read_with(cx, |p, cx| {
+        (
+            p.delegate.all_labels(),
+            p.delegate.registry_rows(),
+            cx.all_action_names().to_vec(),
+        )
+    });
+    let mut seen = std::collections::HashSet::new();
+    for label in &labels {
+        assert!(seen.insert(label.clone()), "palette lists `{label}` twice");
+        assert!(
+            !label.contains("Agent: Agent:"),
+            "doubled prefix in `{label}`"
+        );
+    }
+    for command in core.registry().list() {
+        let spec = command.spec();
+        // A named UI action must exist, otherwise the command would silently lose its entry.
+        for action in [spec.ui_action, spec.ui_flow].into_iter().flatten() {
+            assert!(
+                actions.contains(&action),
+                "`{}` names unknown action `{action}`",
+                spec.id
+            );
+        }
+        let row = rows.iter().find(|(id, _)| *id == spec.id);
+        if spec.ui_flow.is_some() {
+            assert!(row.is_none(), "`{}` has a UI flow and its own row", spec.id);
+        }
+        if crate::commands_bridge::needs_confirmation(spec) {
+            if let Some((_, confirm)) = row {
+                assert!(confirm, "`{}` runs from the palette unconfirmed", spec.id);
+            }
+        }
+        if spec.destructive {
+            assert!(
+                spec.ui_action.is_some()
+                    || spec.ui_flow.is_some()
+                    || row.is_none_or(|(_, confirm)| *confirm),
+                "destructive `{}` is neither mapped nor confirmed",
+                spec.id
+            );
+        }
+    }
+    assert_eq!(
+        labels
+            .iter()
+            .filter(|l| l.as_ref() == "Git: Drop Stash")
+            .count(),
+        1
+    );
+    assert!(!rows.iter().any(|(id, _)| *id == "git.stash_drop"));
+}
+
+/// `reveal_panel` (used after a pull leaves conflicts) never hides an open panel, unlike the
+/// toggling `show_panel` behind the `ShowChanges` action.
+#[gpui::test]
+fn reveal_panel_does_not_toggle(cx: &mut TestAppContext) {
+    use crate::views::sidebar::SidebarPanel;
+    use crate::views::Workspace;
+
+    init(cx);
+    let mut settings = lector_config::Settings::default();
+    settings.lsp.enabled = false;
+    settings.session.restore = false;
+    let applied = settings.clone();
+    cx.update(|cx: &mut App| {
+        cx.set_global(crate::settings::AppSettings {
+            settings: std::sync::Arc::new(applied),
+            warnings: Default::default(),
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    let project = lector_workspace::Project::open(dir.path(), settings).unwrap();
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
+    let shown = |ws: &Workspace, cx: &App| ws.is_panel_shown(SidebarPanel::Changes, cx);
+
+    ws.update_in(cx, |ws, window, cx| {
+        ws.reveal_panel(SidebarPanel::Changes, window, cx)
+    });
+    assert!(ws.read_with(cx, shown));
+    ws.update_in(cx, |ws, window, cx| {
+        ws.reveal_panel(SidebarPanel::Changes, window, cx)
+    });
+    assert!(
+        ws.read_with(cx, shown),
+        "revealing an open panel keeps it open"
+    );
+    ws.update_in(cx, |ws, window, cx| {
+        ws.show_panel(SidebarPanel::Changes, window, cx)
+    });
+    assert!(!ws.read_with(cx, shown), "show_panel still toggles");
+    ws.update_in(cx, |ws, window, cx| {
+        ws.reveal_panel(SidebarPanel::Changes, window, cx)
+    });
+    assert!(ws.read_with(cx, shown));
+}
+
+/// Outcomes that are notes or partial results do not get the success check.
+#[gpui::test]
+fn outcome_toasts_use_the_level_icon(cx: &mut TestAppContext) {
+    use crate::views::workspace::ToastLevel;
+    use crate::views::Workspace;
+    use lector_app::commands::{NoticeLevel, Outcome};
+
+    init(cx);
+    let mut settings = lector_config::Settings::default();
+    settings.lsp.enabled = false;
+    settings.session.restore = false;
+    let applied = settings.clone();
+    cx.update(|cx: &mut App| {
+        cx.set_global(crate::settings::AppSettings {
+            settings: std::sync::Arc::new(applied),
+            warnings: Default::default(),
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let project = lector_workspace::Project::open(dir.path(), settings).unwrap();
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
+    for (level, want) in [
+        (NoticeLevel::Success, ToastLevel::Success),
+        (NoticeLevel::Info, ToastLevel::Info),
+        (NoticeLevel::Warning, ToastLevel::Warning),
+    ] {
+        ws.update_in(cx, |ws, window, cx| {
+            crate::commands_bridge::apply_outcome(
+                ws,
+                Outcome::new("Popped with conflicts").with_level(level),
+                true,
+                window,
+                cx,
+            )
+        });
+        assert_eq!(ws.read_with(cx, |ws, _| ws.toast_level_shown()), Some(want));
+    }
+}
+
 struct TestTree;
 
 impl TreeDelegate for TestTree {

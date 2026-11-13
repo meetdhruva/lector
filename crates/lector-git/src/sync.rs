@@ -10,10 +10,12 @@
 //!   never go into argv, and messages are passed through [`redact_credentials`].
 //! * Pull never creates a merge commit: fast-forward only (`--no-rebase --ff-only`) or
 //!   `--rebase`. Push never force-pushes except `--force-with-lease` with an explicit
-//!   expected value, on request.
+//!   expected value, on request, and only when that fetched value is integrated locally
+//!   (the `--force-if-includes` rule, checked by Lector so it works with any git version).
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::path::Path;
 
 use lector_process::{Line, LineEnd, Stream};
 
@@ -265,26 +267,87 @@ fn parse_size(text: &str) -> Option<u64> {
 
 /// Replaces the user-info part of URLs (`https://user:token@host` → `https://***@host`), so
 /// credentials embedded in remote URLs never reach the UI or logs.
+///
+/// Works line by line. For every `scheme://` the user info is everything up to the **last**
+/// `@` of the following whitespace-free run (passwords may contain `/`, quotes, `:`), or,
+/// when that run looks like `user:pass` without a `/`, up to an `@` later on the same line
+/// (a password with a space). Over-redacting (a URL with `@` in its path) is preferred to
+/// leaking. scp-like addresses keep a plain user name (`git@github.com:o/r`: no secret) but
+/// lose `user:secret@`.
 pub fn redact_credentials(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    text.split_inclusive('\n')
+        .map(|line| redact_scp_like(&redact_scheme_urls(line)))
+        .collect()
+}
+
+/// `scheme://userinfo@host` → `scheme://***@host` within one line.
+fn redact_scheme_urls(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
     while let Some(pos) = rest.find("://") {
         let (head, tail) = rest.split_at(pos + 3);
         out.push_str(head);
-        let end = tail
-            .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
-            .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        match authority.rfind('@') {
+        // The next URL starts a new authority.
+        let limit = tail.find("://").unwrap_or(tail.len());
+        let run_end = tail
+            .find(char::is_whitespace)
+            .unwrap_or(tail.len())
+            .min(limit);
+        let run = &tail[..run_end];
+        let at = run.rfind('@').or_else(|| {
+            // `user:pa ss@host`: a run with a colon, no slash and no `@`, then an `@` on the
+            // same line before the next `/`.
+            if run.contains('/') || !run.contains(':') {
+                return None;
+            }
+            let after = &tail[run_end..limit];
+            let stop = after.find(['/', '\n']).unwrap_or(after.len());
+            after[..stop].rfind('@').map(|i| run_end + i)
+        });
+        match at {
             Some(at) => {
                 out.push_str("***");
-                out.push_str(&authority[at..]);
+                rest = &tail[at..];
             }
-            None => out.push_str(authority),
+            None => {
+                out.push_str(run);
+                rest = &tail[run_end..];
+            }
         }
-        rest = &tail[end..];
     }
     out.push_str(rest);
+    out
+}
+
+/// scp-like `user:secret@host:path` → `***@host:path`; a plain `user@host` is kept.
+fn redact_scp_like(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut token_start: Option<usize> = None;
+    let flush = |out: &mut String, token: &str| {
+        let lead = token.len() - token.trim_start_matches(['\'', '"', '(', '<', '[']).len();
+        let (prefix, body) = token.split_at(lead);
+        out.push_str(prefix);
+        match body.rfind('@') {
+            Some(at) if !body.contains("://") && body[..at].contains(':') => {
+                out.push_str("***");
+                out.push_str(&body[at..]);
+            }
+            _ => out.push_str(body),
+        }
+    };
+    for (i, c) in line.char_indices() {
+        if c.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                flush(&mut out, &line[start..i]);
+            }
+            out.push(c);
+        } else if token_start.is_none() {
+            token_start = Some(i);
+        }
+    }
+    if let Some(start) = token_start {
+        flush(&mut out, &line[start..]);
+    }
     out
 }
 
@@ -692,6 +755,9 @@ pub struct UpstreamStatus {
     pub behind: u32,
 }
 
+/// Reflog entries of the local branch examined by the force-with-lease integration check.
+const MAX_REFLOG_ENTRIES: usize = 1000;
+
 fn reject_option_like(what: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.starts_with('-') {
         return Err(SyncError::new(
@@ -747,6 +813,47 @@ impl Repo {
             return Ok(None);
         }
         Ok(out.stdout_text().trim().parse::<Oid>().ok())
+    }
+
+    /// Whether `oid` is reachable from `local_ref` or from one of the commits its reflog
+    /// recorded (the most recent [`MAX_REFLOG_ENTRIES`]): the `--force-if-includes` rule.
+    /// Revisions go through stdin (no command-line length limit on Windows).
+    fn is_integrated(&self, workdir: &Path, local_ref: &str, oid: &str) -> Result<bool> {
+        let reflog = proc::read(
+            workdir,
+            &["log", "-g", "--format=%H", local_ref, "--"],
+            "reading the branch reflog",
+        )
+        .unwrap_or_default();
+        let mut input = format!("{oid}\n^{local_ref}\n");
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in String::from_utf8_lossy(&reflog).lines() {
+            let entry = entry.trim();
+            if seen.len() >= MAX_REFLOG_ENTRIES {
+                break;
+            }
+            if entry.len() >= 40
+                && entry.bytes().all(|b| b.is_ascii_hexdigit())
+                && seen.insert(entry.to_owned())
+            {
+                input.push('^');
+                input.push_str(entry);
+                input.push('\n');
+            }
+        }
+        let out = proc::write_raw(
+            workdir,
+            &["rev-list", "--count", "--stdin"],
+            Some(input.as_bytes()),
+            "checking the lease",
+        )?;
+        if !out.success() {
+            return Err(proc::command_error(
+                ["rev-list", "--count", "--stdin"].map(OsStr::new),
+                &out,
+            ));
+        }
+        Ok(out.stdout_text().trim() == "0")
     }
 
     pub(crate) fn count_commits(&self, range: &str) -> Result<u32> {
@@ -1004,11 +1111,28 @@ impl Repo {
         }
         if opts.force_with_lease {
             let tracking = format!("refs/remotes/{remote}/{remote_branch}");
-            let expected = self
-                .rev_parse_opt(&tracking)?
-                .map(|o| o.to_string())
-                .unwrap_or_default();
+            let expected = self.rev_parse_opt(&tracking)?;
+            // The lease alone only proves the remote did not move since the last fetch; a
+            // fetch (auto-fetch included) that brought a teammate's commits makes it pass
+            // although those commits would be overwritten unseen. So the fetched tip must
+            // also be integrated: reachable from the local branch or one of its reflog
+            // entries (what `git push --force-if-includes` checks; that option is a no-op
+            // with an explicit lease value, which is kept to avoid racing a fetch).
+            if let Some(oid) = expected {
+                if !self.is_integrated(workdir, &local_ref, &oid.to_string())? {
+                    return Err(SyncError::new(
+                        SyncErrorKind::StaleLease,
+                        format!(
+                            "{remote}/{remote_branch} has commits that were fetched but never \
+                             integrated into {branch}; a forced push would discard them"
+                        ),
+                    )
+                    .with_hint("Pull (or rebase onto the remote branch), review, then push again.")
+                    .into());
+                }
+            }
             // Empty expectation = the remote branch must not exist yet.
+            let expected = expected.map(|o| o.to_string()).unwrap_or_default();
             args.push(format!(
                 "--force-with-lease=refs/heads/{remote_branch}:{expected}"
             ));
@@ -1197,6 +1321,57 @@ mod tests {
             "https://***@host/a and ssh://***@host:22/b and http://plain/c"
         );
         assert_eq!(redact_credentials("no urls here"), "no urls here");
+    }
+
+    #[test]
+    fn redaction_handles_hostile_user_info() {
+        let cases = [
+            // `/`, quotes and colons inside the password.
+            ("https://u:ab/cd@host/x.git", "https://***@host/x.git"),
+            ("'https://u:a'b\"c@host/x'", "'https://***@host/x'"),
+            ("https://u:p:q@host:443/x", "https://***@host:443/x"),
+            // A space inside the password.
+            (
+                "fatal: https://u:pa ss@host/x failed",
+                "fatal: https://***@host/x failed",
+            ),
+            // Several URLs and lines.
+            (
+                "a https://x:y@h1/p b http://h2/q\nc ssh://git:t/k@h3:22/r",
+                "a https://***@h1/p b http://h2/q\nc ssh://***@h3:22/r",
+            ),
+            // scp-like: the plain user name stays, a secret goes.
+            (
+                "git@github.com:owner/repo.git",
+                "git@github.com:owner/repo.git",
+            ),
+            (
+                "'ann:s3cret@example.com:repo.git'",
+                "'***@example.com:repo.git'",
+            ),
+            // Nothing to redact.
+            ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+            (
+                "Signed-off-by: A <a@b.example>",
+                "Signed-off-by: A <a@b.example>",
+            ),
+            ("ends with scheme://", "ends with scheme://"),
+            ("", ""),
+        ];
+        for (input, want) in cases {
+            assert_eq!(redact_credentials(input), want, "{input:?}");
+        }
+        for input in [
+            "https://u:ab/cd@host",
+            "x 'https://tok\"en@h/' y",
+            "https://u:pa ss@host/x",
+            "u:hunter2@host:r",
+        ] {
+            let out = redact_credentials(input);
+            for secret in ["ab/cd", "tok", "pa ss", "hunter2"] {
+                assert!(!out.contains(secret), "{input:?} -> {out:?}");
+            }
+        }
     }
 
     #[test]

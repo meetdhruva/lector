@@ -114,6 +114,12 @@ fn init_command_hooks(cx: &mut App) {
             focus.changeset = active_changeset(ws, cx);
         }
     });
+    lector_ui::commands_bridge::set_undo_offer(cx, |ws, entry, summary, level, _window, cx| {
+        match store_for(cx.entity_id(), cx) {
+            Some(store) => activity::offer_undo(ws, &store, entry, summary, level, cx),
+            None => ws.show_toast_level(summary, level, cx),
+        }
+    });
     lector_ui::commands_bridge::set_changeset_opener(cx, |_ws, cs, window, cx| {
         let Some(store) = store_for(cx.entity_id(), cx) else {
             return;
@@ -399,8 +405,7 @@ fn register_git_actions(
     });
     let c = changes.clone();
     ws.register_action(move |ws, _: &git_actions::FocusCommitMessage, window, cx| {
-        let showing = ws.is_sidebar_visible()
-            && ws.sidebar().read(cx).active_panel() == SidebarPanel::Changes;
+        let showing = ws.is_panel_shown(SidebarPanel::Changes, cx);
         let c = c.clone();
         window.defer(cx, move |window, cx| {
             if !showing {

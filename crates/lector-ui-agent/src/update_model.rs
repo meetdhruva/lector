@@ -149,6 +149,40 @@ pub fn verification_text(v: Verification) -> &'static str {
     }
 }
 
+/// The page "Open release page" and every fallback lead to.
+pub fn canonical_release_page() -> String {
+    format!(
+        "https://github.com/{}/releases/latest",
+        lector_forge::releases::RELEASES_REPO
+    )
+}
+
+/// `url` when it is an HTTPS link into Lector's own GitHub repository, else the canonical release
+/// page. The links come out of the API response (a compromised or spoofed response must not turn
+/// a button into an arbitrary link); the browser follows GitHub's own redirects (for example to
+/// `objects.githubusercontent.com`) after it opened the repository URL.
+pub fn safe_release_url(url: &str) -> String {
+    let prefix = format!(
+        "https://github.com/{}/",
+        lector_forge::releases::RELEASES_REPO
+    );
+    let rest = url.strip_prefix(&prefix);
+    let ok = rest.is_some_and(|rest| {
+        !rest.is_empty()
+            && !rest
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == '\\' || c == '%')
+            && !rest
+                .split(['/', '?', '#'])
+                .any(|seg| seg == "." || seg == "..")
+    });
+    if ok {
+        url.to_owned()
+    } else {
+        canonical_release_page()
+    }
+}
+
 /// Maps a check result to the dialog. `manual`: the user asked (Help, Check for Updates...), so
 /// "up to date" and failures are shown as answers; automatic checks only ever surface an
 /// available update.
@@ -204,7 +238,7 @@ pub fn dialog_model(status: &UpdateStatus, current_version: &str) -> UpdateDialo
                 UpdateAction::Download { asset } => {
                     buttons.push(UpdateButton {
                         label: format!("Download {}", asset.name),
-                        action: UpdateButtonAction::OpenUrl(asset.url.clone()),
+                        action: UpdateButtonAction::OpenUrl(safe_release_url(&asset.url)),
                         primary: true,
                     });
                     details.push(
@@ -227,7 +261,7 @@ pub fn dialog_model(status: &UpdateStatus, current_version: &str) -> UpdateDialo
                 UpdateAction::ReleasePage => {
                     buttons.push(UpdateButton {
                         label: "Open release page".into(),
-                        action: UpdateButtonAction::OpenUrl(notes_url.clone()),
+                        action: UpdateButtonAction::OpenUrl(safe_release_url(notes_url)),
                         primary: true,
                     });
                 }
@@ -238,7 +272,7 @@ pub fn dialog_model(status: &UpdateStatus, current_version: &str) -> UpdateDialo
             if !matches!(action, UpdateAction::ReleasePage) {
                 buttons.push(UpdateButton {
                     label: "Release notes".into(),
-                    action: UpdateButtonAction::OpenUrl(notes_url.clone()),
+                    action: UpdateButtonAction::OpenUrl(safe_release_url(notes_url)),
                     primary: false,
                 });
             }
@@ -298,7 +332,7 @@ mod tests {
     fn asset(sha: Option<&str>) -> ReleaseAsset {
         ReleaseAsset {
             name: "lector-0.7.1-linux-x86_64.tar.gz".into(),
-            url: "https://example.test/lector.tar.gz".into(),
+            url: "https://github.com/meetdhruva/lector/releases/download/v0.7.1/lector-0.7.1-linux-x86_64.tar.gz".into(),
             size: 10,
             sha256: sha.map(String::from),
         }
@@ -307,7 +341,7 @@ mod tests {
     fn available(verified: bool, action: UpdateAction) -> UpdateStatus {
         UpdateStatus::Available {
             version: "0.7.1".into(),
-            notes_url: "https://example.test/notes".into(),
+            notes_url: "https://github.com/meetdhruva/lector/releases/tag/v0.7.1".into(),
             published_at: Some(1_700_000_000),
             prerelease: false,
             assets: vec![],
@@ -316,6 +350,59 @@ mod tests {
             action,
             hint: None,
         }
+    }
+
+    #[test]
+    fn release_links_stay_inside_the_repository() {
+        let ok = "https://github.com/meetdhruva/lector/releases/download/v0.7.1/a.tar.gz";
+        assert_eq!(safe_release_url(ok), ok);
+        let page = canonical_release_page();
+        for bad in [
+            "https://evil.example/meetdhruva/lector/releases",
+            "http://github.com/meetdhruva/lector/releases/tag/v1",
+            "https://github.com.evil.example/meetdhruva/lector/x",
+            "https://github.com/meetdhruva/lector-evil/releases",
+            "https://github.com/meetdhruva/lectorx/",
+            "https://github.com/someone-else/lector/releases/tag/v1",
+            "https://github.com@evil.example/meetdhruva/lector/x",
+            "https://github.com/meetdhruva/lector/../../evil/x",
+            "https://github.com/meetdhruva/lector/releases/a b",
+            "https://github.com/meetdhruva/lector/releases/\u{7}",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert_eq!(safe_release_url(bad), page, "{bad}");
+        }
+        // The dialog never carries an off-repository link either.
+        let status = UpdateStatus::Available {
+            version: "0.7.1".into(),
+            notes_url: "https://evil.example/notes".into(),
+            published_at: None,
+            prerelease: false,
+            assets: vec![],
+            verified: false,
+            install_kind: InstallKind::Tarball,
+            action: UpdateAction::Download {
+                asset: ReleaseAsset {
+                    name: "x".into(),
+                    url: "https://evil.example/x".into(),
+                    size: 1,
+                    sha256: None,
+                },
+            },
+            hint: None,
+        };
+        let model = dialog_model(&status, "0.7.0");
+        for b in &model.buttons {
+            if let UpdateButtonAction::OpenUrl(url) = &b.action {
+                assert_eq!(url, &page);
+            }
+        }
+        assert!(model
+            .buttons
+            .iter()
+            .any(|b| matches!(b.action, UpdateButtonAction::OpenUrl(_))));
     }
 
     #[test]
@@ -381,17 +468,17 @@ mod tests {
         assert_eq!(m.copyable, Some(("Expected SHA-256".into(), sum.clone())));
         assert_eq!(
             m.buttons[0].action,
-            UpdateButtonAction::OpenUrl("https://example.test/lector.tar.gz".into())
+            UpdateButtonAction::OpenUrl("https://github.com/meetdhruva/lector/releases/download/v0.7.1/lector-0.7.1-linux-x86_64.tar.gz".into())
         );
         assert!(m.buttons[0].primary);
         assert!(m
             .buttons
             .iter()
             .any(|b| b.action == UpdateButtonAction::Copy(sum.clone())));
-        assert!(m
-            .buttons
-            .iter()
-            .any(|b| b.action == UpdateButtonAction::OpenUrl("https://example.test/notes".into())));
+        assert!(m.buttons.iter().any(|b| b.action
+            == UpdateButtonAction::OpenUrl(
+                "https://github.com/meetdhruva/lector/releases/tag/v0.7.1".into()
+            )));
     }
 
     #[test]
@@ -444,7 +531,9 @@ mod tests {
         assert_eq!(m.buttons.len(), 1);
         assert_eq!(
             m.buttons[0].action,
-            UpdateButtonAction::OpenUrl("https://example.test/notes".into())
+            UpdateButtonAction::OpenUrl(
+                "https://github.com/meetdhruva/lector/releases/tag/v0.7.1".into()
+            )
         );
     }
 

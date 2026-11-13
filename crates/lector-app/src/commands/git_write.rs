@@ -14,7 +14,9 @@
 //!
 //! No command sets `ui_action`: the git views in `lector-ui-git` own the GPUI `git::*` actions (they
 //! need the selection, the commit message, toasts with Undo) and call these commands through
-//! `staging::run_op`; the generic action bridge must not register a second handler.
+//! `staging::run_op`; the generic action bridge must not register a second handler. Commands whose UI
+//! action already has such a flow (the stash commands) say so with `ui_flow`, which keeps them out of
+//! the palette's registry rows.
 //!
 //! Path arguments are repository-relative (`/`-separated) or absolute inside the work tree.
 
@@ -326,7 +328,8 @@ fn stage() -> FnCommand {
                 &[],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::Stage"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let rels = path_args(cx, repo, args)?;
@@ -378,7 +381,8 @@ fn unstage() -> FnCommand {
                 &[],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::Unstage"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let mut rels = path_args(cx, repo, args)?;
@@ -442,7 +446,8 @@ fn stage_all() -> FnCommand {
             "Git",
             object(&[], &[]),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::StageAll"),
         |cx, _args| {
             let repo = cx.require_repo()?;
             let rels = all_paths_for_stage(&repo.status()?);
@@ -479,7 +484,8 @@ fn unstage_all() -> FnCommand {
             "Git",
             object(&[], &[]),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::UnstageAll"),
         |cx, _args| {
             let repo = cx.require_repo()?;
             let status = repo.status()?;
@@ -588,7 +594,8 @@ fn discard() -> FnCommand {
             ),
         )
         .destructive()
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::DiscardChanges"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let rels = path_args(cx, repo, args)?;
@@ -613,7 +620,8 @@ fn discard_all() -> FnCommand {
             ),
         )
         .destructive()
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::DiscardAll"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let scope = args.get("scope").and_then(Value::as_str).unwrap_or("unstaged");
@@ -792,7 +800,8 @@ fn stage_hunk() -> FnCommand {
             "Git",
             hunk_schema(),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::StageHunk"),
         |cx, args| apply_hunk(cx, args, HunkAction::Stage),
     )
     .with_available(needs_repo)
@@ -806,7 +815,8 @@ fn unstage_hunk() -> FnCommand {
             "Git",
             hunk_schema(),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::UnstageHunk"),
         |cx, args| apply_hunk(cx, args, HunkAction::Unstage),
     )
     .with_available(needs_repo)
@@ -821,7 +831,8 @@ fn discard_hunk() -> FnCommand {
             hunk_schema(),
         )
         .destructive()
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::DiscardHunk"),
         |cx, args| apply_hunk(cx, args, HunkAction::Discard),
     )
     .with_available(needs_repo)
@@ -845,7 +856,8 @@ fn commit() -> FnCommand {
                 ],
                 &["message"],
             ),
-        ),
+        )
+        .with_ui_flow("git::Commit"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let message = args.get("message").and_then(Value::as_str).unwrap_or_default();
@@ -945,7 +957,8 @@ fn mark_resolved() -> FnCommand {
                 &[],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::MarkResolved"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let rel = one_path(cx, repo, args)?;
@@ -1059,7 +1072,8 @@ fn continue_operation() -> FnCommand {
             "Continue Merge / Rebase",
             "Git",
             object(&[("kind", kind_schema())], &[]),
-        ),
+        )
+        .with_ui_flow("git::ContinueOperation"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let kind = operation_kind(repo, args)?;
@@ -1079,7 +1093,8 @@ fn abort_operation() -> FnCommand {
             "Git",
             object(&[("kind", kind_schema())], &[]),
         )
-        .destructive(),
+        .destructive()
+        .with_ui_flow("git::AbortOperation"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let kind = operation_kind(repo, args)?;

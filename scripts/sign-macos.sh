@@ -44,6 +44,9 @@ cmd_setup() {
     security create-keychain -p "$pw" "$kc"
     security set-keychain-settings -lut 21600 "$kc"
     security unlock-keychain -p "$pw" "$kc"
+    # The password travels on argv (`security import -P`): mask it in the log first, in case a tool
+    # echoes the command line on failure. (GitHub already masks the secret itself.)
+    echo "::add-mask::$MACOS_CERTIFICATE_PASSWORD"
     security import "$p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc" >/dev/null
     rm -f "$p12"
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc" >/dev/null

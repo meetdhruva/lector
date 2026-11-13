@@ -286,15 +286,47 @@ fn encode_char(c: char, mods: Modifiers, modes: &TerminalModes, out: &mut Vec<u8
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Whether pasted text keeps `c`: everything except control characters (C0, DEL, C1),
+/// with tab and line endings allowed.
+fn paste_keeps(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r') || !c.is_control()
+}
+
+/// Removes the control characters a paste must not deliver: every C0 control except
+/// tab, line feed and carriage return, plus DEL and C1 controls. Without bracketed paste a
+/// pasted `\x0f` (Ctrl+O) or `\x03` would act as a key press in the shell; with bracketed
+/// paste ESC is what could end the paste early, and the rest are never legitimate text.
+/// The same filter applies in both modes.
+pub fn sanitize_paste(text: &str) -> String {
+    text.chars().filter(|&c| paste_keeps(c)).collect()
+}
+
+/// Whether pasting `text` should be confirmed by the user before it is sent: the program
+/// did not enable bracketed paste (`bracketed` is false, so the shell sees the paste as
+/// typing) and the text contains a line ending (each line would run at once) or a control
+/// character that [`sanitize_paste`] removes (the user should see that the clipboard held
+/// more than what will be pasted). With bracketed paste nothing runs before the program
+/// decides, so no confirmation is needed. User settings (`terminal.confirm_multiline_paste`,
+/// "don't ask again") are the caller's to apply on top.
+pub fn paste_needs_confirmation(text: &str, bracketed: bool) -> bool {
+    !bracketed
+        && text
+            .chars()
+            .any(|c| matches!(c, '\n' | '\r') || !paste_keeps(c))
+}
+
 /// Encodes pasted text.
 ///
-/// Line endings become CR (what the Enter key sends). With bracketed paste the
-/// text is wrapped in `ESC[200~` / `ESC[201~` and every embedded start/end
-/// marker is removed first (repeatedly, so nested fragments cannot reassemble
-/// into a marker): otherwise pasted text could end the paste early and have
-/// the rest executed as typed commands.
+/// Control characters are removed first ([`sanitize_paste`]). Line endings become CR
+/// (what the Enter key sends). With bracketed paste the text is wrapped in `ESC[200~` /
+/// `ESC[201~`; since ESC is removed no embedded marker can survive, and every embedded
+/// start/end marker is still removed (repeatedly, so nested fragments cannot reassemble
+/// into a marker): otherwise pasted text could end the paste early and have the rest
+/// executed as typed commands.
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
-    let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+    let normalized = sanitize_paste(text)
+        .replace("\r\n", "\r")
+        .replace('\n', "\r");
     let mut bytes = normalized.into_bytes();
     if !bracketed {
         return bytes;
@@ -636,13 +668,48 @@ mod tests {
         assert_eq!(encode_paste("ls", true), b"\x1b[200~ls\x1b[201~".to_vec());
         let evil = "echo hi\x1b[201~rm -rf ~\n";
         let out = encode_paste(evil, true);
-        assert_eq!(out, b"\x1b[200~echo hirm -rf ~\r\x1b[201~".to_vec());
+        assert_eq!(out, b"\x1b[200~echo hi[201~rm -rf ~\r\x1b[201~".to_vec());
         // Fragments that reassemble into a marker after one removal pass.
         let nested = "a\x1b[20\x1b[201~1~b";
         let out = encode_paste(nested, true);
         let inner = &out[PASTE_START.len()..out.len() - PASTE_END.len()];
         assert!(!inner.windows(PASTE_END.len()).any(|w| w == PASTE_END));
         assert!(!inner.windows(PASTE_START.len()).any(|w| w == PASTE_START));
+    }
+
+    #[test]
+    fn paste_strips_control_characters() {
+        // Ctrl+O (bash: operate-and-get-next), Ctrl+C, DEL and a C1 CSI are dropped; tab
+        // and line endings are kept, with or without bracketed paste.
+        let text = "ls\x0f -l\x03\x7f\u{9b}\tx\r\ny\n";
+        assert_eq!(sanitize_paste(text), "ls -l\tx\r\ny\n");
+        assert_eq!(encode_paste(text, false), b"ls -l\tx\ry\r".to_vec());
+        assert_eq!(
+            encode_paste("a\x1bb\x00c", true),
+            b"\x1b[200~abc\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn paste_confirmation_predicate() {
+        let cases = [
+            ("echo hi", false, false),
+            ("echo hi\n", false, true),
+            ("echo hi\r", false, true),
+            ("a\nb", true, false),
+            ("ls\x0f", false, true),
+            ("ls\x1b[A", false, true),
+            ("tab\there", false, false),
+            ("ls\x0f", true, false),
+            ("caf\u{e9} \u{1F600}", false, false),
+        ];
+        for (text, bracketed, want) in cases {
+            assert_eq!(
+                paste_needs_confirmation(text, bracketed),
+                want,
+                "{text:?} bracketed={bracketed}"
+            );
+        }
     }
 
     #[test]

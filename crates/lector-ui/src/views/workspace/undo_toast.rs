@@ -15,6 +15,38 @@ use crate::theme::{ActiveTheme, ColorExt};
 /// Callback of the toast's button.
 pub type ToastAction = Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
 
+/// What a toast reports; picks its icon (a check only for things that worked).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToastLevel {
+    /// It worked.
+    #[default]
+    Success,
+    /// A note: nothing happened or nothing was needed ("No agent is set up yet").
+    Info,
+    /// It partly worked or needs attention ("Popped ... with conflicts").
+    Warning,
+}
+
+impl ToastLevel {
+    /// The icon of the toast.
+    pub(super) fn icon(self) -> IconName {
+        match self {
+            ToastLevel::Success => IconName::CircleCheck,
+            ToastLevel::Info => IconName::Info,
+            ToastLevel::Warning => IconName::AlertTriangle,
+        }
+    }
+
+    /// The color of the icon.
+    pub(super) fn color(self, ui: &lector_theme::UiColors) -> gpui::Hsla {
+        match self {
+            ToastLevel::Success => ui.accent.hsla(),
+            ToastLevel::Info => ui.info.hsla(),
+            ToastLevel::Warning => ui.warning.hsla(),
+        }
+    }
+}
+
 /// How long the Undo toast stays up.
 pub const UNDO_TOAST_DURATION: Duration = Duration::from_secs(8);
 
@@ -22,6 +54,7 @@ pub const UNDO_TOAST_DURATION: Duration = Duration::from_secs(8);
 pub(super) struct ActionToast {
     message: SharedString,
     label: SharedString,
+    level: ToastLevel,
     id: u64,
     action: ToastAction,
 }
@@ -37,10 +70,24 @@ impl Workspace {
         action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
         cx: &mut Context<Self>,
     ) {
+        self.show_action_toast_level(message, ToastLevel::Success, label, duration, action, cx);
+    }
+
+    /// [`Self::show_action_toast`] with the icon of `level`.
+    pub fn show_action_toast_level(
+        &mut self,
+        message: impl Into<SharedString>,
+        level: ToastLevel,
+        label: impl Into<SharedString>,
+        duration: Duration,
+        action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.action_toast.as_ref().map(|t| t.id + 1).unwrap_or(0);
         self.action_toast = Some(ActionToast {
             message: message.into(),
             label: label.into(),
+            level,
             id,
             action: Rc::new(action),
         });
@@ -69,6 +116,16 @@ impl Workspace {
         self.action_toast.as_ref().map(|t| t.message.clone())
     }
 
+    /// Level of the visible plain toast, if one is showing (tests).
+    pub fn toast_level_shown(&self) -> Option<ToastLevel> {
+        self.toast.as_ref().map(|_| self.toast_level)
+    }
+
+    /// Level of the visible action toast, if one is showing (tests).
+    pub fn action_toast_level(&self) -> Option<ToastLevel> {
+        self.action_toast.as_ref().map(|t| t.level)
+    }
+
     /// Text of the visible plain toast (tests, screenshots).
     pub fn toast_message(&self) -> Option<SharedString> {
         self.toast.as_ref().map(|(message, _)| message.clone())
@@ -76,10 +133,11 @@ impl Workspace {
 
     pub(super) fn render_action_toast(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let toast = self.action_toast.as_ref()?;
-        let (message, label, action) = (
+        let (message, label, action, level) = (
             toast.message.clone(),
             toast.label.clone(),
             toast.action.clone(),
+            toast.level,
         );
         let ui = cx.theme().ui.clone();
         let this = cx.entity().downgrade();
@@ -104,9 +162,9 @@ impl Workspace {
                     h_flex()
                         .gap(px(8.))
                         .child(
-                            Icon::new(IconName::CircleCheck)
+                            Icon::new(level.icon())
                                 .size(IconSize::Small)
-                                .color(ui.accent.hsla()),
+                                .color(level.color(&ui)),
                         )
                         .child(div().min_w_0().overflow_hidden().child(message))
                         .child(

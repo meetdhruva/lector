@@ -6,7 +6,10 @@
 //!    [`RESERVED_ACTIONS`], [`passthrough_bindings`] adds a `zed::NoAction` binding with the
 //!    same keys in `Terminal`: the deeper context wins, the binding is disabled while a
 //!    terminal has focus, and the key reaches the shell. Users rebind by adding their own
-//!    `Terminal` bindings (they replace the generated ones).
+//!    `Terminal` bindings (they replace the generated ones). Bindings on the platform key stay
+//!    active (a shell never sees them), except chords whose first keystroke is a `Terminal`
+//!    binding itself (macOS `cmd-k` clears; `cmd-k p` must neither wait for a second key nor
+//!    reach `git::Push` from a terminal).
 //! 2. **Unbound keys** arrive as key-down events and are translated by [`route_keystroke`]:
 //!    plain text goes through the input handler (IME, dead keys, compose), everything else is
 //!    encoded by the core.
@@ -51,6 +54,11 @@ fn uses_platform_key(keys: &str) -> bool {
     })
 }
 
+/// The first keystroke of a chord (`"cmd-k p"` → `"cmd-k"`).
+fn first_keystroke(keys: &str) -> &str {
+    keys.split_whitespace().next().unwrap_or("")
+}
+
 /// `Terminal`-context bindings that disable every non-reserved binding visible from a
 /// focused terminal (see the module docs). Registered as a keymap extension.
 pub fn passthrough_bindings(specs: &[KeySpec]) -> Vec<KeySpec> {
@@ -62,6 +70,18 @@ pub fn passthrough_bindings(specs: &[KeySpec]) -> Vec<KeySpec> {
         .iter()
         .filter(|s| mentions_terminal(s.context.as_deref()))
         .map(|s| s.keys.as_str())
+        .collect();
+    // Single keystrokes bound by a real action in `Terminal`: chords starting with one would
+    // make GPUI wait for the chord instead of running it.
+    let terminal_single_keys: Vec<&str> = specs
+        .iter()
+        .filter(|s| mentions_terminal(s.context.as_deref()))
+        .filter(|s| {
+            let action = s.action.trim();
+            !(action.is_empty() || action.eq_ignore_ascii_case("none") || action == NO_ACTION)
+        })
+        .map(|s| s.keys.as_str())
+        .filter(|k| k.split_whitespace().count() == 1)
         .collect();
     let active = |spec: &KeySpec| match spec.context.as_deref() {
         None => true,
@@ -84,7 +104,9 @@ pub fn passthrough_bindings(specs: &[KeySpec]) -> Vec<KeySpec> {
             || action == NO_ACTION
             || is_reserved(action)
             || mentions_terminal(spec.context.as_deref())
-            || uses_platform_key(&spec.keys)
+            || (uses_platform_key(&spec.keys)
+                && !(spec.keys.split_whitespace().count() > 1
+                    && terminal_single_keys.contains(&first_keystroke(&spec.keys))))
             || user_terminal_keys.contains(&spec.keys.as_str())
             || reserved_keys.contains(&spec.keys.as_str())
         {

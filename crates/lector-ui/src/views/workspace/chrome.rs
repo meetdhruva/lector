@@ -377,6 +377,10 @@ impl Workspace {
     }
 
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_window_guarded() {
+            self.show_toast("The window stays open: press again to close it", cx);
+            return;
+        }
         let confirm = self.confirm_close(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if confirm.await {

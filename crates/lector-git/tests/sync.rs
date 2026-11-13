@@ -4,11 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use lector_git::CancelToken;
 use lector_git::{
-    CancelToken, Error, FetchOptions, PullMode, PullStatus, PushOptions, PushRefStatus, Repo,
-    StashPushOptions, SyncError, SyncErrorKind, SyncEvent, SyncOptions,
+    Error, FetchOptions, PullMode, PullStatus, PushOptions, PushRefStatus, Repo, StashPushOptions,
+    SyncError, SyncErrorKind, SyncEvent, SyncOptions,
 };
 
 fn hermetic() {
@@ -434,6 +437,45 @@ fn force_with_lease_only_when_the_remote_did_not_move() {
 }
 
 #[test]
+fn force_with_lease_refuses_fetched_but_unintegrated_commits() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    // A teammate pushes; we fetch (the remote-tracking ref moves, so the lease value is
+    // current) but never integrate their commit, then rewrite our own history.
+    git_in(&fx.b, &["pull", "-q"]);
+    let theirs = fx.commit(&fx.b, "t.txt", "t\n", "teammate");
+    git_in(&fx.b, &["push", "-q"]);
+    repo.fetch(
+        &FetchOptions::default(),
+        &SyncOptions::default(),
+        &mut no_events(),
+    )
+    .unwrap();
+    fx.commit(&fx.a, "m.txt", "m\n", "mine");
+    let lease = PushOptions {
+        force_with_lease: true,
+        ..PushOptions::default()
+    };
+    let err = sync_err(
+        repo.push(&lease, &SyncOptions::default(), &mut no_events())
+            .unwrap_err(),
+    );
+    assert_eq!(err.kind, SyncErrorKind::StaleLease, "{err}");
+    assert_eq!(
+        git_in(&fx.remote, &["rev-parse", "refs/heads/main"]),
+        theirs,
+        "the teammate's commit is still on the remote"
+    );
+    // Once integrated (rebased onto it), the rewrite may be pushed with the lease.
+    git_in(&fx.a, &["rebase", "-q", "origin/main"]);
+    git_in(&fx.a, &["commit", "-q", "--amend", "-m", "mine, reworded"]);
+    let out = repo
+        .push(&lease, &SyncOptions::default(), &mut no_events())
+        .unwrap();
+    assert_eq!(out.refs[0].status, PushRefStatus::FastForward);
+}
+
+#[test]
 fn hooks_that_decline_report_their_output() {
     let fx = Fx::new();
     let repo = fx.repo(&fx.a);
@@ -703,7 +745,18 @@ fn stash_round_trip_and_conflicts() {
     git_in(&fx.a, &["checkout", "-q", "--", "f.txt"]);
     std::fs::remove_file(fx.a.join("new.txt")).unwrap();
 
-    let dropped = repo.stash_drop(0).unwrap();
+    // An index whose entry is not the one the caller saw is refused, nothing is dropped.
+    let other: lector_git::Oid = git_in(&fx.a, &["rev-parse", "HEAD"]).parse().unwrap();
+    let stale = sync_err(repo.stash_drop_expecting(0, Some(other)).unwrap_err());
+    assert_eq!(stale.kind, SyncErrorKind::RefChanged, "{stale}");
+    let stale = sync_err(
+        repo.stash_apply_expecting(0, Some(other), true)
+            .unwrap_err(),
+    );
+    assert_eq!(stale.kind, SyncErrorKind::RefChanged, "{stale}");
+    assert_eq!(repo.stash_index_of(st.oid).unwrap(), Some(0));
+
+    let dropped = repo.stash_drop_expecting(0, Some(st.oid)).unwrap();
     assert!(repo.stashes().unwrap().is_empty());
     repo.stash_store(dropped.oid, &dropped.message).unwrap();
     assert_eq!(repo.stash_index_of(dropped.oid).unwrap(), Some(0));

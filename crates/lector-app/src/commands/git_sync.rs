@@ -29,7 +29,9 @@ use serde_json::{json, Value};
 
 use super::git_write::{backup_files, backup_index, files_undo, index_undo, needs_repo};
 use super::schema::{object, prop};
-use super::{CommandContext, CommandRegistry, CommandSpec, FnCommand, Outcome, UiRequest};
+use super::{
+    CommandContext, CommandRegistry, CommandSpec, FnCommand, NoticeLevel, Outcome, UiRequest,
+};
 use crate::core::AppCore;
 use crate::journal::UndoRecord;
 
@@ -209,7 +211,14 @@ impl SyncHost {
             repo: repo.workdir().to_path_buf(),
             command,
             options: SyncOptions::default()
-                .with_env(self.env.read().clone())
+                .with_env({
+                    // Tag the operation so a credential prompt can be matched to it.
+                    let mut env = self.env.read().clone();
+                    if !env.is_empty() {
+                        env.push(lector_process::askpass::op_env(id));
+                    }
+                    env
+                })
                 .with_cancel(token),
         }
     }
@@ -387,7 +396,8 @@ fn fetch() -> FnCommand {
                 ],
                 &[],
             ),
-        ),
+        )
+        .with_ui_flow("git::Fetch"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let host = SyncHost::of(&cx.core);
@@ -407,6 +417,11 @@ fn fetch() -> FnCommand {
                 )
             };
             Ok(Outcome::new(summary)
+                .with_level(if out.updated.is_empty() {
+                    NoticeLevel::Info
+                } else {
+                    NoticeLevel::Success
+                })
                 .with_data(data(&out))
                 .with_paths(vec![repo.git_dir().to_path_buf()])
                 .with_ui(UiRequest::Refresh))
@@ -430,7 +445,8 @@ fn pull() -> FnCommand {
                 &[],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::Pull"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let mode = match str_arg(args, "mode") {
@@ -471,7 +487,13 @@ fn pull() -> FnCommand {
                 }
                 _ => None,
             };
+            let level = match out.status {
+                PullStatus::UpToDate => NoticeLevel::Info,
+                PullStatus::Conflicts => NoticeLevel::Warning,
+                _ => NoticeLevel::Success,
+            };
             let outcome = Outcome::new(summary)
+                .with_level(level)
                 .with_data(data(&out))
                 .with_paths(vec![repo.workdir().to_path_buf()])
                 .with_ui(UiRequest::Refresh);
@@ -496,7 +518,8 @@ fn push() -> FnCommand {
                 ],
                 &[],
             ),
-        ),
+        )
+        .with_ui_flow("git::Push"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let opts = PushOptions {
@@ -519,6 +542,11 @@ fn push() -> FnCommand {
                 s
             };
             Ok(Outcome::new(summary)
+                .with_level(if out.up_to_date {
+                    NoticeLevel::Info
+                } else {
+                    NoticeLevel::Success
+                })
                 .with_data(data(&out))
                 .with_paths(vec![repo.git_dir().to_path_buf()])
                 .with_ui(UiRequest::Refresh))
@@ -546,7 +574,8 @@ fn create_branch() -> FnCommand {
                 &["name"],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::NewBranch"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let name = str_arg(args, "name").unwrap_or_default();
@@ -599,7 +628,8 @@ fn switch_branch() -> FnCommand {
                 &["name"],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::SwitchBranch"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let name = str_arg(args, "name").unwrap_or_default();
@@ -670,7 +700,8 @@ fn rename_branch() -> FnCommand {
                 &["new_name"],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::RenameBranch"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let old = match str_arg(args, "name") {
@@ -707,7 +738,8 @@ fn delete_branch() -> FnCommand {
             ),
         )
         .destructive()
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::DeleteBranch"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let name = str_arg(args, "name").unwrap_or_default();
@@ -752,7 +784,8 @@ fn set_upstream() -> FnCommand {
                 &["upstream"],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::SetUpstream"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let branch = match str_arg(args, "branch") {
@@ -869,7 +902,8 @@ fn stash_push() -> FnCommand {
                 &[],
             ),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::StashChanges"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let stash = repo.stash_push(&StashPushOptions {
@@ -877,9 +911,9 @@ fn stash_push() -> FnCommand {
                 include_untracked: flag(args, "include_untracked"),
             })?;
             let Some(stash) = stash else {
-                return Ok(
-                    Outcome::new("No local changes to stash").with_data(json!({ "stash": null }))
-                );
+                return Ok(Outcome::new("No local changes to stash")
+                    .with_level(NoticeLevel::Info)
+                    .with_data(json!({ "stash": null })));
             };
             Ok(Outcome::new(format!("Stashed: {}", stash.message))
                 .with_data(json!({ "stash": data(&stash) }))
@@ -932,7 +966,13 @@ fn stash_apply_impl(cx: &CommandContext, args: &Value, pop: bool) -> anyhow::Res
             if pop { " (the stash was kept)" } else { "" }
         );
     }
+    let level = if applied.conflicts.is_empty() {
+        NoticeLevel::Success
+    } else {
+        NoticeLevel::Warning
+    };
     let outcome = Outcome::new(summary)
+        .with_level(level)
         .with_data(data(&applied))
         .with_paths(
             paths
@@ -957,7 +997,8 @@ fn stash_apply() -> FnCommand {
             "Git",
             object(&[ix, oid, ("allow_without_backup", allow_prop())], &[]),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::ApplyStash"),
         |cx, args| stash_apply_impl(cx, args, false),
     )
     .with_available(needs_repo)
@@ -972,7 +1013,8 @@ fn stash_pop() -> FnCommand {
             "Git",
             object(&[ix, oid, ("allow_without_backup", allow_prop())], &[]),
         )
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::PopStash"),
         |cx, args| stash_apply_impl(cx, args, true),
     )
     .with_available(needs_repo)
@@ -988,7 +1030,8 @@ fn stash_drop() -> FnCommand {
             object(&[ix, oid], &[]),
         )
         .destructive()
-        .undoable(),
+        .undoable()
+        .with_ui_flow("git::DropStash"),
         |cx, args| {
             let repo = cx.require_repo()?;
             let index = stash_index(repo, args)?;

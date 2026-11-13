@@ -1,15 +1,17 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroize as _;
 
 /// Largest frame accepted either way.
 pub const MAX_FRAME: usize = 64 * 1024;
 
-/// First frame of every request.
-pub(crate) const MAGIC: &[u8] = b"LECTOR-ASKPASS/1";
+/// First frame of a version 1 request (token, prompt follow).
+pub(crate) const MAGIC_V1: &[u8] = b"LECTOR-ASKPASS/1";
+/// First frame of a version 2 request (token, operation id, prompt follow).
+pub(crate) const MAGIC: &[u8] = b"LECTOR-ASKPASS/2";
 
 /// Reply tags.
 pub(crate) const TAG_ANSWER: u8 = b'A';
@@ -118,6 +120,52 @@ pub(crate) fn read_frame(r: &mut dyn Read) -> io::Result<Vec<u8>> {
         return Err(err);
     }
     Ok(buf)
+}
+
+/// Reads one frame (at most `max` bytes) that must arrive completely before `deadline`:
+/// the read timeout is re-armed with the time left before every read, so a peer trickling
+/// bytes cannot hold the connection past the deadline.
+pub(crate) fn read_frame_until(
+    conn: &mut dyn Conn,
+    max: usize,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    read_exact_until(conn, &mut len, deadline)?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > max.min(MAX_FRAME) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "askpass frame too large",
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    if let Err(err) = read_exact_until(conn, &mut buf, deadline) {
+        buf.zeroize();
+        return Err(err);
+    }
+    Ok(buf)
+}
+
+fn read_exact_until(conn: &mut dyn Conn, mut buf: &mut [u8], deadline: Instant) -> io::Result<()> {
+    while !buf.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "askpass request too slow",
+            ));
+        }
+        // A zero timeout means "block forever" to the OS; `left` is never zero here.
+        conn.set_read_timeout(Some(left))?;
+        match conn.read(buf) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => buf = &mut buf[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Constant-time comparison (the token check must not leak how many bytes matched).

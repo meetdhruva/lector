@@ -23,6 +23,8 @@ rustix = { version = "1.1.6", default-features = false, features = ["std", "proc
 
 [dev-dependencies]
 tempfile.workspace = true
+# Only for `tests/scrub.rs`: the terminal scrub list covers every askpass variable.
+lector-process.workspace = true
 proptest.workspace = true
 insta.workspace = true
 

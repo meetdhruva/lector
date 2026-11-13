@@ -7,14 +7,25 @@ use std::time::{Duration, Instant};
 use lector_terminal::{Emulator, ShellProfile, SpawnOptions, TermSize, Terminal, TerminalEvent};
 
 const DEADLINE: Duration = Duration::from_secs(30);
+/// The flood tests move megabytes through the PTY; slow CI runners need more time.
+const FLOOD_DEADLINE: Duration = Duration::from_secs(180);
 
-fn wait_until(term: &Terminal, what: &str, mut pred: impl FnMut(&mut Emulator) -> bool) {
+fn wait_until(term: &Terminal, what: &str, pred: impl FnMut(&mut Emulator) -> bool) {
+    wait_until_for(term, what, DEADLINE, pred);
+}
+
+fn wait_until_for(
+    term: &Terminal,
+    what: &str,
+    deadline: Duration,
+    mut pred: impl FnMut(&mut Emulator) -> bool,
+) {
     let start = Instant::now();
     loop {
         if pred(&mut term.lock()) {
             return;
         }
-        if start.elapsed() > DEADLINE {
+        if start.elapsed() > deadline {
             let screen = term.lock().screen_text();
             panic!("timed out waiting for {what}; screen:\n{screen}");
         }
@@ -45,10 +56,14 @@ fn wait_event(
     }
 }
 
-/// Text of a line without a leading `$ ` prompt (output of type-ahead can share the prompt line).
+/// Text of a line without leading `$ ` prompts (output of type-ahead can share the prompt
+/// line, and type-ahead that was already echoed leaves several prompts in a row).
 fn strip_prompt(line: &str) -> &str {
-    let t = line.trim();
-    t.strip_prefix("$ ").unwrap_or(t).trim()
+    let mut t = line.trim();
+    while let Some(rest) = t.strip_prefix("$ ") {
+        t = rest.trim_start();
+    }
+    t.trim()
 }
 
 /// Some line of the buffer (screen or scrollback) equals `want` after trimming.
@@ -196,6 +211,13 @@ mod unix {
 
     #[test]
     fn flood_is_bounded_and_input_gets_through() {
+        // macOS PTYs move far fewer bytes per second than Linux ones and CI runners are
+        // slow, so the flood is smaller there; the behaviour under test is the same.
+        let (flood_bytes, junk_lines): (u64, usize) = if cfg!(target_os = "linux") {
+            (20_000_000, 8192)
+        } else {
+            (4_000_000, 2048)
+        };
         let mut o = sh_options();
         o.scrollback = 2000;
         let term = Terminal::spawn(o, None).unwrap_or_else(|e| panic!("spawn: {e}"));
@@ -203,18 +225,31 @@ mod unix {
         #[cfg(target_os = "linux")]
         let before = rss_kib();
         let start = Instant::now();
-        // 20 MB of output, then input queued behind it.
-        term.send_text(
-            "yes 'flood flood flood flood flood flood flood' | head -c 20000000; echo flood-done\r",
-        );
+        // The flood, then input queued behind it while the shell is not reading.
+        term.send_text(&format!(
+            "yes 'flood flood flood flood flood flood flood' | head -c {flood_bytes}; echo flood-done\r"
+        ));
         let t = Instant::now();
-        term.write(vec![b'#'; 1 << 20]);
-        term.send_text("\recho after-flood\r");
+        // Typed-ahead input is made of complete lines (shell comments): a canonical-mode
+        // tty keeps only ~1 KiB (macOS) / 4 KiB (Linux) of an unfinished line and drops the
+        // rest, including a later newline on macOS, so one huge line would make the test
+        // depend on the kernel's line discipline instead of on Lector. Hundreds of KiB of
+        // complete lines fill the PTY input queue and block the writer thread until the
+        // shell reads again, which must never block the caller.
+        let mut junk = Vec::with_capacity(junk_lines * 80);
+        for _ in 0..junk_lines {
+            junk.extend_from_slice(&[b'#'; 79]);
+            junk.push(b'\r');
+        }
+        term.write(junk);
+        term.send_text("echo after-flood\r");
         assert!(
             t.elapsed() < Duration::from_millis(500),
             "write must not block"
         );
-        wait_until(&term, "after-flood", |e| has_line(e, "after-flood"));
+        wait_until_for(&term, "after-flood", FLOOD_DEADLINE, |e| {
+            has_line(e, "after-flood")
+        });
         let elapsed = start.elapsed();
         let em = term.lock();
         assert!(em.history_size() <= 2000);
@@ -224,7 +259,7 @@ mod unix {
             // Scrollback of 2000 lines plus channels: far below the 20 MB that went through.
             assert!(b.saturating_sub(a) < 64 * 1024, "RSS grew by {} KiB", b - a);
         }
-        eprintln!("flood of 20 MB through the PTY took {elapsed:?}");
+        eprintln!("flood of {flood_bytes} bytes through the PTY took {elapsed:?}");
     }
 
     #[test]
@@ -397,7 +432,9 @@ mod windows {
         let term = Terminal::spawn(o, None).unwrap_or_else(|e| panic!("spawn: {e}"));
         term.send_text("for /L %i in (1,1,20000) do @echo flood line %i\r");
         term.send_text("echo after-flood\r");
-        wait_until(&term, "after-flood", |e| has_line(e, "after-flood"));
+        wait_until_for(&term, "after-flood", FLOOD_DEADLINE, |e| {
+            has_line(e, "after-flood")
+        });
         assert!(term.lock().history_size() <= 2000);
     }
 }

@@ -61,3 +61,57 @@ pub(crate) fn first_paint_probe() -> Option<AnyElement> {
         .into_any_element(),
     )
 }
+
+/// Runs `work` as the very last step of quitting.
+///
+/// GPUI calls every quit hook in registration order and runs the synchronous part of each one
+/// first; the futures they return are awaited afterwards (and after the windows are gone). Work
+/// done inside the returned future therefore starts only once every hook has finished its own
+/// synchronous work (sessions saved, terminals killed, the askpass server removed), however
+/// late those hooks were registered. `lector` uses it for stopping child process trees and the
+/// clean-exit marker.
+pub fn on_quit_last(cx: &mut gpui::App, work: impl FnOnce() + 'static) {
+    let work = std::cell::RefCell::new(Some(work));
+    cx.on_app_quit(move |_| {
+        let work = work.borrow_mut().take();
+        async move {
+            if let Some(work) = work {
+                work();
+            }
+        }
+    })
+    .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[gpui::test]
+    fn quit_last_runs_after_the_other_hooks_whenever_registered(cx: &mut gpui::TestAppContext) {
+        let log: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        cx.update(|cx| {
+            let l = log.clone();
+            super::on_quit_last(cx, move || l.borrow_mut().push("shutdown + end_clean"));
+            // Registered later, still runs first (like a window's session save).
+            let l = log.clone();
+            cx.on_app_quit(move |_| {
+                l.borrow_mut().push("save sessions");
+                async {}
+            })
+            .detach();
+            let l = log.clone();
+            cx.on_app_quit(move |_| {
+                l.borrow_mut().push("kill terminals");
+                async {}
+            })
+            .detach();
+            cx.shutdown();
+        });
+        assert_eq!(
+            *log.borrow(),
+            vec!["save sessions", "kill terminals", "shutdown + end_clean"]
+        );
+    }
+}

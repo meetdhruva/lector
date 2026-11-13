@@ -210,11 +210,19 @@ impl Default for SpawnOptions {
 
 /// Inherited variables removed before spawning. A trailing `*` matches a prefix.
 ///
-/// Lector's own `LECTOR_*` settings, stale size hints, and the identity of
-/// whatever terminal Lector itself was started from (which would mislead
-/// programs about the terminal they run in).
+/// Lector's own `LECTOR_*` settings (this includes the askpass endpoint, token and
+/// operation id), the askpass hooks git and ssh would otherwise use instead of prompting on
+/// the terminal, stale size hints, and the identity of whatever terminal Lector itself was
+/// started from (which would mislead programs about the terminal they run in).
+///
+/// Invariant: every name in `lector_process::askpass::SCRUB_ENV` is matched here (this crate
+/// does not depend on `lector-process`; `tests/scrub.rs` checks it).
 pub const DEFAULT_ENV_SCRUB: &[&str] = &[
     "LECTOR_*",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "SSH_ASKPASS_REQUIRE",
+    "GIT_TERMINAL_PROMPT",
     "COLUMNS",
     "LINES",
     "TERMCAP",
@@ -555,6 +563,15 @@ mod tests {
         assert!(env_is_scrubbed("LECTOR_DATA_DIR", &pats));
         assert!(env_is_scrubbed("COLUMNS", &pats));
         assert!(env_is_scrubbed("WEZTERM_PANE", &pats));
+        for askpass in [
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "SSH_ASKPASS_REQUIRE",
+            "GIT_TERMINAL_PROMPT",
+            "LECTOR_ASKPASS_TOKEN",
+        ] {
+            assert!(env_is_scrubbed(askpass, &pats), "{askpass}");
+        }
         assert!(!env_is_scrubbed("HOME", &pats));
         assert!(!env_is_scrubbed("PATH", &pats));
     }

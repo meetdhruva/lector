@@ -32,6 +32,8 @@ use lector_ui::components::popover::Popover;
 use lector_ui::components::{h_flex, metrics, Button, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
+use lector_ui::views::sidebar::SidebarPanel;
+use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
 use serde_json::{json, Value};
@@ -419,11 +421,22 @@ impl SyncController {
         self.store.read(cx).workspace.upgrade()
     }
 
+    /// A note (blocked, nothing to do, already there): the info icon. Results that worked go
+    /// through [`Self::toast_level`] with their outcome's level.
     fn toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.toast_level(message, ToastLevel::Info, cx);
+    }
+
+    fn toast_level(
+        &mut self,
+        message: impl Into<SharedString>,
+        level: ToastLevel,
+        cx: &mut Context<Self>,
+    ) {
         let message = message.into();
         self.last_message = Some(message.clone());
         if let Some(ws) = self.workspace_entity(cx) {
-            ws.update(cx, |ws, cx| ws.show_toast(message, cx));
+            ws.update(cx, |ws, cx| ws.show_toast_level(message, level, cx));
         }
     }
 
@@ -656,7 +669,7 @@ impl SyncController {
                 };
                 let push_after = std::mem::take(&mut self.push_after_pull);
                 if view.conflicts {
-                    self.toast(view.message, cx);
+                    self.toast_level(view.message, ToastLevel::Warning, cx);
                     self.show_changes(cx);
                 } else if let Some(oid) = stashed {
                     let this = cx.entity().downgrade();
@@ -687,7 +700,7 @@ impl SyncController {
                     self.last_message = Some(view.message.clone().into());
                     crate::activity::show_undo_toast(&self.store, id, view.message, cx);
                 } else {
-                    self.toast(view.message, cx);
+                    self.toast_level(view.message, toast_level(last), cx);
                 }
             }
             OpKind::StashApply(_) => {
@@ -696,28 +709,43 @@ impl SyncController {
                     .get("conflicts")
                     .and_then(Value::as_array)
                     .is_some_and(|c| !c.is_empty());
-                self.report_with_undo(last.summary.clone(), undo, cx);
+                self.report_with_undo(last.summary.clone(), undo, toast_level(last), cx);
                 if conflicts {
                     self.show_changes(cx);
                 }
             }
-            _ => self.report_with_undo(last.summary.clone(), undo, cx),
+            _ => self.report_with_undo(last.summary.clone(), undo, toast_level(last), cx),
         }
     }
 
-    fn report_with_undo(&mut self, summary: String, undo: Option<u64>, cx: &mut Context<Self>) {
+    fn report_with_undo(
+        &mut self,
+        summary: String,
+        undo: Option<u64>,
+        level: ToastLevel,
+        cx: &mut Context<Self>,
+    ) {
         match undo {
             Some(id) => {
                 self.last_message = Some(summary.clone().into());
-                crate::activity::show_undo_toast(&self.store, id, summary, cx);
+                crate::activity::show_undo_toast_level(&self.store, id, summary, level, cx);
             }
-            None => self.toast(summary, cx),
+            None => self.toast_level(summary, level, cx),
         }
     }
 
+    /// Reveals the Changes panel (conflicts to resolve). `ShowChanges` toggles, so this goes
+    /// through [`Workspace::reveal_panel`]: an open panel stays open.
     fn show_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(ws) = self.store.read(cx).workspace.upgrade() else {
+            return;
+        };
         let _ = self.window.update(cx, |_, window, cx| {
-            window.dispatch_action(Box::new(ws_actions::ShowChanges), cx)
+            window.defer(cx, move |window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.reveal_panel(SidebarPanel::Changes, window, cx)
+                })
+            });
         });
     }
 
@@ -1307,7 +1335,9 @@ impl SyncController {
                 let choices = work.await;
                 let _ = cx.update(|window, cx| {
                     if choices.is_empty() {
-                        ws.update(cx, |ws, cx| ws.show_toast("No matching branches", cx));
+                        ws.update(cx, |ws, cx| {
+                            ws.show_toast_level("No matching branches", ToastLevel::Info, cx)
+                        });
                         return;
                     }
                     crate::ref_picker::pick_ref(
@@ -1410,7 +1440,9 @@ impl SyncController {
                 let stashes = work.await;
                 let _ = cx.update(|window, cx| {
                     if stashes.is_empty() {
-                        ws.update(cx, |ws, cx| ws.show_toast("No stashes", cx));
+                        ws.update(cx, |ws, cx| {
+                            ws.show_toast_level("No stashes", ToastLevel::Info, cx)
+                        });
                         return;
                     }
                     let choices = stashes
@@ -1899,4 +1931,14 @@ pub fn register(
             control.update(cx, |ctl, cx| ctl.deploy_menu(position, window, cx));
         });
     });
+}
+
+/// The toast icon of a command outcome.
+fn toast_level(outcome: &Outcome) -> ToastLevel {
+    use lector_app::commands::NoticeLevel;
+    match outcome.level {
+        NoticeLevel::Success => ToastLevel::Success,
+        NoticeLevel::Info => ToastLevel::Info,
+        NoticeLevel::Warning => ToastLevel::Warning,
+    }
 }

@@ -28,22 +28,33 @@
 //! must not inherit the askpass variables: [`SCRUB_ENV`] lists them and
 //! [`crate::ProcessCommand`] removes them for those [`crate::ProcessKind`]s.
 //!
-//! Wire protocol (version 1), length-prefixed frames (`u32` big endian + bytes, at most
-//! [`MAX_FRAME`]): client → server `"LECTOR-ASKPASS/1"`, token, prompt (UTF-8);
-//! server → client one frame: `b'A'` + answer, or `b'C'` (cancelled). Connections without
-//! the right token are closed without a reply. Answers are never logged and the buffers
-//! holding them are zeroed after use.
+//! Wire protocol, length-prefixed frames (`u32` big endian + bytes, at most [`MAX_FRAME`]):
+//! client → server `"LECTOR-ASKPASS/2"`, token, operation id (ASCII digits from
+//! [`ENV_OP`], or empty), prompt (UTF-8); version 1 (`"LECTOR-ASKPASS/1"`, token, prompt) is
+//! still accepted. Server → client one frame: `b'A'` + answer, or `b'C'` (cancelled).
+//! Connections without the right token are closed without a reply; the magic and token must
+//! arrive within [`HANDSHAKE_TIMEOUT`](server::HANDSHAKE_TIMEOUT) in total, and only
+//! authenticated connections count against the limit of prompts handled at once. Answers
+//! are never logged and the buffers holding them are zeroed after use.
+//!
+//! **Prompt text is untrusted**: parts of it can come from the SSH server
+//! (keyboard-interactive). [`parse_prompt`] gives a structured [`PromptKind`] only for exact
+//! OpenSSH / git templates; see the `prompt` module documentation.
 
 mod client;
+mod prompt;
 mod protocol;
 mod server;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub use client::{run_askpass_client, run_askpass_client_with, AskpassClientError};
+pub use client::{
+    run_askpass_client, run_askpass_client_for_op, run_askpass_client_with, AskpassClientError,
+};
+pub use prompt::{parse_prompt, sanitize_prompt_text, ParsedPrompt, MAX_PROMPT_CHARS};
 pub use protocol::{Endpoint, MAX_FRAME};
-pub use server::{AskpassError, AskpassServer};
+pub use server::{AskpassError, AskpassServer, HANDSHAKE_TIMEOUT};
 
 /// Hidden first argument that selects the helper mode (passed by the Unix shim script).
 pub const HELPER_FLAG: &str = "--lector-askpass-helper";
@@ -54,6 +65,24 @@ pub const HELPER_NAME: &str = "lector-askpass";
 pub const ENV_ENDPOINT: &str = "LECTOR_ASKPASS_ENDPOINT";
 /// The per-session token.
 pub const ENV_TOKEN: &str = "LECTOR_ASKPASS_TOKEN";
+/// The id of the operation whose git process may prompt (set per operation with
+/// [`op_env`]); the helper echoes it so the UI can tell which operation asked.
+pub const ENV_OP: &str = "LECTOR_ASKPASS_OP";
+
+/// The environment entry that tags one operation's git process with `op` (add it next to
+/// [`AskpassServer::env`] when running that operation). Prompts from it arrive with
+/// [`PromptRequest::op`] = `Some(op)`.
+pub fn op_env(op: u64) -> (OsString, OsString) {
+    (ENV_OP.into(), op.to_string().into())
+}
+
+/// Parses an operation id as the helper reads it from [`ENV_OP`]: 1 to 20 ASCII digits.
+pub(crate) fn parse_op(text: &str) -> Option<u64> {
+    if text.is_empty() || text.len() > 20 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
 
 /// Environment variables the askpass setup adds to git network commands. Children that are
 /// not git network operations (integrated terminal, language servers, agents) must not
@@ -68,6 +97,7 @@ pub const SCRUB_ENV: &[&str] = &[
     "LECTOR_ASKPASS",
     ENV_ENDPOINT,
     ENV_TOKEN,
+    ENV_OP,
 ];
 
 /// Whether `token` looks like a server token (64 lowercase hex digits).
@@ -78,8 +108,8 @@ pub fn is_valid_token(token: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// What a prompt asks for, classified from its text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// What a prompt asks for, classified from its text by exact templates ([`parse_prompt`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PromptKind {
     /// `Username for 'https://host': ` (git).
     Username,
@@ -90,7 +120,10 @@ pub enum PromptKind {
     /// `Are you sure you want to continue connecting (yes/no/[fingerprint])?` (ssh). The
     /// answer must be the literal text `yes` (or `no`, or the fingerprint).
     HostKeyConfirm,
-    /// Anything else (OTP codes, PINs, ...); show the text and take free input.
+    /// Anything else (OTP codes, PINs, keyboard-interactive prompts of the server, text that
+    /// only resembles a template, ...); show the sanitized text as something the server asks
+    /// and take free, masked input.
+    #[default]
     Other,
 }
 
@@ -104,20 +137,10 @@ impl PromptKind {
     }
 }
 
-/// Classifies a prompt by its text (case-insensitive).
+/// Classifies a prompt by exact OpenSSH / git templates (`parse_prompt(text).kind`); text
+/// that merely contains the right words is [`PromptKind::Other`].
 pub fn classify_prompt(text: &str) -> PromptKind {
-    let t = text.to_ascii_lowercase();
-    if t.contains("continue connecting") || t.contains("(yes/no") {
-        PromptKind::HostKeyConfirm
-    } else if t.contains("passphrase") {
-        PromptKind::Passphrase
-    } else if t.starts_with("username") || t.contains("username for") {
-        PromptKind::Username
-    } else if t.contains("password") {
-        PromptKind::Password
-    } else {
-        PromptKind::Other
-    }
+    parse_prompt(text).kind
 }
 
 /// A prompt delivered to the [`AskpassServer`] handler.
@@ -127,6 +150,8 @@ pub struct PromptRequest {
     pub text: String,
     /// Its classification.
     pub kind: PromptKind,
+    /// The operation id the helper found in [`ENV_OP`] (`None`: not set, or an older helper).
+    pub op: Option<u64>,
 }
 
 /// A string that is zeroed when dropped and never shown by `Debug`.
@@ -235,6 +260,11 @@ mod tests {
                 PromptKind::HostKeyConfirm,
             ),
             ("Verification code: ", PromptKind::Other),
+            (
+                "(git@evil) Enter passphrase for key '/home/ann/.ssh/id_ed25519': ",
+                PromptKind::Other,
+            ),
+            ("Type yes (yes/no) to go on: ", PromptKind::Other),
         ];
         for (text, kind) in cases {
             assert_eq!(classify_prompt(text), kind, "{text}");
@@ -284,6 +314,17 @@ mod tests {
             Some("Username: ")
         );
         assert_eq!(prompt_for_invocation(link, &args(&["x", "a", "b"])), None);
+    }
+
+    #[test]
+    fn operation_ids_are_digits_only() {
+        assert_eq!(parse_op("42"), Some(42));
+        assert_eq!(parse_op(""), None);
+        assert_eq!(parse_op("4 2"), None);
+        assert_eq!(parse_op("-1"), None);
+        assert_eq!(parse_op(&"9".repeat(21)), None);
+        let (k, v) = op_env(7);
+        assert_eq!((k.to_str(), v.to_str()), (Some(ENV_OP), Some("7")));
     }
 
     #[test]

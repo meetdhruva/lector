@@ -103,11 +103,10 @@ impl Shared {
     fn signal_terminate(&self) {
         let mut state = self.lock();
         state.sweep_on_exit = true;
-        if state.status.is_some() {
-            return;
-        }
+        // No early `return`: with the Unix block compiled out it would be a needless
+        // trailing return (clippy on Windows).
         #[cfg(unix)]
-        {
+        if state.status.is_none() {
             let _ = state.child.signal(SIGTERM);
         }
     }

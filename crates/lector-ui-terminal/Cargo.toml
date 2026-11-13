@@ -21,6 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+dunce.workspace = true
 lector-config = { workspace = true, features = ["test-support"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile.workspace = true

@@ -27,7 +27,7 @@ use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, Toolti
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
-use lector_ui::views::workspace::UNDO_TOAST_DURATION;
+use lector_ui::views::workspace::{ToastLevel, UNDO_TOAST_DURATION};
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
 
@@ -63,19 +63,52 @@ fn toast(store: &Entity<GitStore>, message: impl Into<SharedString>, cx: &mut Ap
 
 /// Shows "<summary> · Undo" for eight seconds (`entry_id` is the journal entry to undo).
 pub fn show_undo_toast(store: &Entity<GitStore>, entry_id: u64, summary: String, cx: &mut App) {
+    show_undo_toast_level(store, entry_id, summary, ToastLevel::Success, cx)
+}
+
+/// [`show_undo_toast`] with the icon of `level` (a warning for "applied with conflicts").
+pub fn show_undo_toast_level(
+    store: &Entity<GitStore>,
+    entry_id: u64,
+    summary: String,
+    level: ToastLevel,
+    cx: &mut App,
+) {
     let Some(ws) = store.read(cx).workspace.upgrade() else {
         return;
     };
     let store = store.clone();
     ws.update(cx, |ws, cx| {
-        ws.show_action_toast(
+        ws.show_action_toast_level(
             summary,
+            level,
             "Undo",
             UNDO_TOAST_DURATION,
             move |_, window, cx| undo_entry(&store, entry_id, UndoMode::Check, window, cx),
             cx,
         );
     });
+}
+
+/// [`show_undo_toast`] from inside a workspace update (the command palette and menus run
+/// registry commands through `lector_ui::commands_bridge`).
+pub fn offer_undo(
+    ws: &mut Workspace,
+    store: &Entity<GitStore>,
+    entry_id: u64,
+    summary: String,
+    level: ToastLevel,
+    cx: &mut Context<Workspace>,
+) {
+    let store = store.clone();
+    ws.show_action_toast_level(
+        summary,
+        level,
+        "Undo",
+        UNDO_TOAST_DURATION,
+        move |_, window, cx| undo_entry(&store, entry_id, UndoMode::Check, window, cx),
+        cx,
+    );
 }
 
 /// Undoes journal entry `id` in the background, then refreshes the git views and toasts

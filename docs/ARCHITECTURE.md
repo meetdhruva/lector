@@ -1420,7 +1420,9 @@ pub struct JobHandle<T>;   // cancel(), is_finished(), try_take(), into_future()
 pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'static str, pub category: &'static str,
                          pub args_schema: serde_json::Value /* JSON Schema */, pub writes: bool /* journaled */,
                          pub destructive: bool, pub undoable: bool,
-                         pub ui_action: Option<&'static str> /* "git::Stage" — the GPUI action that dispatches it */ }
+                         pub ui_action: Option<&'static str> /* "git::Stage" — the GPUI action that dispatches it */,
+                         pub ui_flow: Option<&'static str> /* v0.7: "git::DropStash" — the UI action that is the interactive
+                                                              entry point; the palette lists that action, not this command */ }
 pub enum Availability { Available, Unavailable(String /* why, shown as tooltip */) }
 pub struct CommandContext { pub core: AppCore, pub project: Option<Project>, pub focus: Focus /* active path, selections, changeset, hunk */ }
 // is_sandboxed(): source is Mcp or Agent; confine_path(path) -> Result<PathBuf>: for sandboxed callers, path
@@ -1482,10 +1484,17 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   and runs it as a keyed job `delay` after the last call; `cancel_key`, `pending()`, `wait_idle(timeout)`; panics in
   jobs are caught (handle → `None`). `JobHandle::{cancel, token, is_finished, try_take, into_future, wait}` (`wait` blocks;
   never from a worker). Workers stop when the last `Scheduler` clone drops. `CancelToken` = `lector_search::CancelToken`.
-* **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, ui_action }` built with
-  `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.destructive()`, `.undoable()`; `to_json()` is the
-  MCP/CLI description. `Outcome { summary, undo, data, ui, paths, journal_id }` (`Outcome::new(..).with_data/with_ui/
-  with_undo/with_paths`). `CommandContext { core, project, focus: Focus { path, selections: Vec<Range<Point>>,
+* **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, ui_action, ui_flow }` built with
+  `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.with_ui_flow(..)`, `.destructive()`, `.undoable()`;
+  `to_json()` is the MCP/CLI description (`ui_flow` is added next to `ui_action`). **`ui_action` vs `ui_flow` (v0.7):**
+  `ui_action` means "the bridge registers this GPUI action and it runs the command"; `ui_flow` names a UI action that
+  already has its own handler (lector-ui-git sync, branch and stash flows; the agent panel) which asks, shows progress and
+  offers Undo, and that handler calls the command itself. The bridge registers nothing for a `ui_flow` and the palette omits
+  the command, so the command never appears twice and never bypasses the flow. Every v0.7 sync, branch and stash command
+  and `agent.start` / `agent.undo_turn` / `agent.send_comments` set it. MCP, CLI and agents are unaffected.
+  `Outcome { summary, undo, data, ui, paths, journal_id, level }` (`Outcome::new(..).with_data/with_ui/
+  with_undo/with_paths/with_level`; `level: NoticeLevel::{Success (default), Info, Warning}` is how the summary is toasted:
+  "nothing to stash" or a pull that stopped on conflicts are not successes). `CommandContext { core, project, focus: Focus { path, selections: Vec<Range<Point>>,
   changeset, hunk }, source: Source::{Ui, Cli, Mcp, Agent, Internal} }`. `CommandRegistry::{register, register_arc, get,
   for_ui_action, list (sorted by id), invoke, invoke_async}`; `invoke` = validate args (`commands::schema`: type incl.
   unions, properties, required, `additionalProperties: false`, items, enum, minimum/maximum; `null` args = `{}`) →
@@ -1530,7 +1539,14 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   GPUI action named by a `CommandSpec::ui_action` is registered on each workspace (`Workspace::register_boxed_action`)
   and runs `invoke` (unavailable → toast with the reason). The palette (`CommandPaletteDelegate::with_registry`) greys
   action rows whose command is unavailable (reason as tooltip; confirm does nothing) and adds argument-free registry
-  commands without an action ("Git: List Changes"). `Workspace` file-tree status and `GitStore` both subscribe to the
+  commands without an action ("Git: List Changes") — except commands with a `ui_flow`, and rows are de-duplicated by
+  label (a test fails if a title appears twice). **Palette guard (v0.7):** a registry row for a command with no UI flow
+  that is `destructive`, or writes without being `undoable` (`commands_bridge::needs_confirmation`), asks first
+  (`invoke_from_palette`: "Run “<title>”?" with Run / Cancel); the test
+  `command_palette_rows_are_unique_and_guarded` checks that every such registry command is mapped to a flow or confirmed.
+  **Undo offer:** an outcome with an undo record is toasted as "<summary> · Undo" through
+  `commands_bridge::set_undo_offer` (installed by lector-ui-git, which undoes through the activity journal), with the
+  outcome's `NoticeLevel` mapped to `ToastLevel`. `Workspace` file-tree status and `GitStore` both subscribe to the
   shared `RepoState` (`Project::set_git_status(&[StatusEntry])` builds the tree's map from the shared status);
   `GitStore` keeps its public fields/API (`head`, `status`, `conflicts`, `review` (db-backed), `generation`, `refresh`)
   plus `repo_state()` / `refresh_and_notify()`, and no longer polls. `lector_ui_git::store_for(workspace_id, cx)`.
@@ -1651,7 +1667,7 @@ operation, plus round trips (binary, empty, symlink, exec bit, deleted, nested, 
   the undo's own journal entry, so an undo is undoable (redo) and so is "Restore anyway". `Invoke` runs the inverse
   command through the registry (its own entry is the undo entry); `Multi` undoes last first. Errors: `UndoError::
   {NotFound, AlreadyUndone, NotUndoable(reason), Changed, BackupGone, Failed}` — every refusal writes nothing.
-* **Git write commands** (`commands::git_write`, JSON schemas, `Outcome { summary, undo }`, none sets `ui_action`):
+* **Git write commands** (`commands::git_write`, JSON schemas, `Outcome { summary, undo }`, none sets `ui_action`; v0.7 stash commands set `ui_flow`):
   `git.stage {paths}`, `git.unstage {paths}`, `git.discard {paths, allow_without_backup?}` (restores tracked paths from
   the index, deletes untracked ones; backed up first), `git.stage_hunk` / `git.unstage_hunk` / `git.discard_hunk {path,
   changeset?, hunk? | old_lines/new_lines?, content_id?, allow_without_backup?}` (a stale `content_id` is refused),
@@ -1711,12 +1727,32 @@ pub enum ProcessError { NotFound{program}, Spawn{program, source}, Cancelled, Ti
   children (Unix sessions are detached; the Job Object is created without kill-on-close): children see EOF on stdin.
   **The app must call `Supervisor::global().shutdown(grace)` when it quits.**
 * **Askpass** (`lector_process::askpass`). `AskpassServer::start(runtime_dir, handler)`: Unix domain socket `s` in a fresh
-  `0700` directory `lector-askpass-<random>` under `runtime_dir` (temp dir if the path would exceed `sun_path`), socket
-  `0600`; loopback TCP on Windows (`start_tcp`, also used in tests). A 256-bit random token per server. Protocol v1:
-  length-prefixed frames (u32 BE, ≤ 64 KiB): `"LECTOR-ASKPASS/1"`, token, prompt → `b'A'`+answer | `b'C'`; wrong token =
-  closed without reply (constant-time compare); ≤ 8 prompts at once; a panicking handler = cancel. `handler:
-  Fn(PromptRequest { text, kind: PromptKind::{Username, Password, Passphrase, HostKeyConfirm, Other} }) -> PromptReply::
-  {Answer(Secret), Cancel}` runs on a connection thread and may block while the user answers. `classify_prompt(text)`.
+  `0700` directory `lector-askpass-<random>` under `runtime_dir` (temp dir if the path would exceed `sun_path`, which
+  is 104 bytes on macOS; paths are kept ≤ 100), socket `0600`; loopback TCP on Windows (`start_tcp`, also used in
+  tests). The directory holds a `pid` file; at start the server removes directories of its own name pattern under the
+  same base whose owner process is gone (real directory, on Unix owned by us and `0700`; no pid file / unknown
+  liveness = kept), so a crash or `SIGTERM` leaves nothing behind for long. A 256-bit random token per server.
+  Protocol v2: length-prefixed frames (u32 BE, ≤ 64 KiB): `"LECTOR-ASKPASS/2"`, token, operation id (digits or empty),
+  prompt → `b'A'`+answer | `b'C'` (v1 = no operation-id frame, still accepted); wrong token = closed without reply
+  (constant-time compare). The magic and token must arrive within `HANDSHAKE_TIMEOUT` (2 s) in total (deadline
+  re-armed per read, no slowloris), at most 16 connections in the handshake; only authenticated connections take one
+  of the 8 prompt slots; the rest of the request within 10 s. A panicking handler = cancel. `handler:
+  Fn(PromptRequest { text, kind: PromptKind::{Username, Password, Passphrase, HostKeyConfirm, Other}, op: Option<u64> })
+  -> PromptReply::{Answer(Secret), Cancel}` runs on a connection thread and may block while the user answers.
+  `op` comes from `LECTOR_ASKPASS_OP` in the helper's environment (`askpass::op_env(id)`; the app tags each sync
+  operation's git process with its `SyncHost` operation id) so the UI can attribute the prompt.
+  **Prompt text is untrusted** (an SSH server's keyboard-interactive prompts reach askpass verbatim):
+  `parse_prompt(text) -> ParsedPrompt { kind, url, host, key_path, key_type, fingerprint }` and `classify_prompt(text)`
+  give a structured kind only for exact, anchored OpenSSH / git templates (`Username for '<url>': `, `Password for
+  '<url>': `, `<user>@<host>'s password: `, `Password: `, `Enter passphrase for key '<abs path>': `, `Enter passphrase
+  for <abs path>[ (will confirm each use)]: `, the multi-line unknown-host-key confirmation); anything else, including
+  every `(user@host) `-prefixed keyboard-interactive prompt and any text with control/bidi characters, is `Other` with
+  no fields. `sanitize_prompt_text` neutralizes control characters (U+FFFD), drops bidi controls and caps at 2000
+  chars for display. Residual risk: ssh < 8.3 does not prefix keyboard-interactive prompts; the UI therefore also
+  requires the key file of a passphrase prompt to exist, and the host-key dialog only ever answers `yes`. Windows
+  listener: std has no `SO_EXCLUSIVEADDRUSE`; another process *of the same user* could in principle bind the port
+  with `SO_REUSEADDR` (other users cannot since Windows Server 2003's socket security), and that user can read the
+  token from git's environment anyway.
   `server.helper_program(current_exe)` creates the helper program (once) in the server's private directory (also created
   on Windows); `server.env(helper)` = `GIT_ASKPASS`/`SSH_ASKPASS` = helper, `SSH_ASKPASS_REQUIRE=force`,
   `GIT_TERMINAL_PROMPT=0`, `LECTOR_ASKPASS_ENDPOINT`, `LECTOR_ASKPASS_TOKEN` (`credential.helper` untouched: helpers
@@ -1740,16 +1776,21 @@ pub enum ProcessError { NotFound{program}, Spawn{program, source}, Cancelled, Ti
     when the server stops (`lector-ui-git` stops it on app quit). The token and endpoint only ever go into the
     environment of git network commands (`SyncOptions::env` via `SyncHost`), never into Lector's own environment.
   * **Scrubbing**: `askpass::SCRUB_ENV` = `GIT_ASKPASS`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `GIT_TERMINAL_PROMPT`,
-    `LECTOR_ASKPASS` (pre-0.7.1 flag), `LECTOR_ASKPASS_ENDPOINT`, `LECTOR_ASKPASS_TOKEN`. `ProcessCommand` removes them
+    `LECTOR_ASKPASS` (pre-0.7.1 flag), `LECTOR_ASKPASS_ENDPOINT`, `LECTOR_ASKPASS_TOKEN`, `LECTOR_ASKPASS_OP`. `ProcessCommand` removes them
     from the inherited environment of `ProcessKind::{LanguageServer, Agent, Terminal}` children
     (`ProcessKind::scrubs_askpass_env`; variables set explicitly with `.env()` are kept). Terminals spawned outside the
-    supervisor must add the same names to their own scrub list (`SpawnOptions.env_scrub`).
+    supervisor must add the same names to their own scrub list (`lector_terminal::shell::DEFAULT_ENV_SCRUB` does).
 * Tests: `tests/process.rs` (env/cwd, arrival order with `\r` updates, 3 MB on stderr then stdout, 2 MB stdin echo,
   bounded capture, cancel and timeout kill grandchildren (`sh -c 'sleep 1000 & wait'`), graceful TERM trap, drop kills
   the tree, leftovers killed unless `kill_tree_on_exit(false)`, shutdown, killer), `tests/askpass.rs` (TCP and Unix round
   trips, token rejection, 0700/0600 permissions and cleanup, concurrent prompts, panicking handler),
   `tests/askpass_git.rs` (`harness = false`: the test binary is the helper; real `git credential fill` gets username and
-  password through the server; cancel makes git fail). Unix-only tests are `cfg(unix)`; Windows runs `cmd /C` basics.
+  password through the server; cancel makes git fail), plus operation ids, v1 compatibility, idle unauthenticated
+  connections (closed by the handshake deadline, no prompt slot taken), template/spoofing tables and the stale
+  directory sweep. Unix-only tests are `cfg(unix)`; Windows runs `cmd /C` basics.
+* `Supervisor::spawn` registers the child under the registry lock and re-checks the shutting-down flag there: a spawn
+  racing `shutdown` either is listed by it or kills its own child and returns `ShuttingDown`. Integrated terminals
+  are not supervised (portable-pty; `lector-terminal` kills their trees).
 
 ### git sync (v0.7) — lector-git `sync` + branch API, lector-app `commands::git_sync` — as implemented
 All through the git CLI (`git -C <workdir> --no-pager -c core.quotepath=off`, `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0`,
@@ -1780,9 +1821,13 @@ impl Repo {
     pub fn stash_push(&self, &StashPushOptions { message, include_untracked }) -> Result<Option<Stash>>;   // None = nothing to stash
     pub fn stash_apply(&self, index, pop: bool) -> Result<StashApplied { stash, conflicts, dropped }>;
     pub fn stash_drop(&self, index) -> Result<Stash>;  stash_store(oid, message);  stash_at(index);  stash_index_of(oid);  stash_paths(index);
+    pub fn stash_apply_expecting(&self, index, expected: Option<Oid>, pop) -> Result<StashApplied>;   // RefChanged when the
+    pub fn stash_drop_expecting(&self, index, expected: Option<Oid>) -> Result<Stash>;                 // entry is not `expected`
 }
 pub fn parse_progress(&str) -> Option<Progress>;  parse_push_porcelain(&str) -> Vec<PushedRef>;  classify_failure(&str) -> Option<SyncErrorKind>;
-pub fn redact_credentials(&str) -> String;        // https://user:token@host → https://***@host (all surfaced messages)
+pub fn redact_credentials(&str) -> String;        // https://user:token@host → https://***@host (all surfaced messages);
+                                                  // last `@` of the run (passwords with `/`, quotes), `user:pa ss@`,
+                                                  // scp `user:secret@host:` (a plain `git@host:` is kept)
 // Error::Sync(Box<SyncError { kind, message, hint, paths, hook_output, alternatives }>), Error::Cancelled, Error::TimedOut
 pub enum SyncErrorKind { NoUpstream, NoRemote, DetachedHead, Rejected /* hint "Pull first" */, StaleLease, AuthenticationFailed,
     HostKeyUnknown, HostKeyChanged, NetworkUnreachable, RemoteNotFound, HookDeclined /* hook_output */, Diverged,
@@ -1791,7 +1836,13 @@ pub enum SyncErrorKind { NoUpstream, NoRemote, DetachedHead, Rejected /* hint "P
 ```
 * Push: explicit refspec `refs/heads/<b>:refs/heads/<remote branch>` (upstream's branch when pushing to the upstream
   remote, else the same name), `--set-upstream` only when none is configured, `--force-with-lease=refs/heads/<rb>:<last
-  fetched oid>` (empty = must not exist) only on request; plain force is never offered. `--porcelain` decides the outcome
+  fetched oid>` (empty = must not exist) only on request; plain force is never offered. Before it, the fetched oid
+  must be integrated: reachable from the local branch or one of its last 1000 reflog entries (`git rev-list --count
+  --stdin`), else `StaleLease` ("fetched but never integrated"). That is the `--force-if-includes` rule, checked by
+  Lector because git ignores `--force-if-includes` when the lease has an explicit value, and the explicit value is kept
+  so a background fetch between the check and the push cannot move the lease. Stash apply runs on the commit itself;
+  pop/drop name `stash@{n}` and re-check right before that it still is the entry read from the list
+  (`RefChanged`, "the stash list changed — refresh"). `--porcelain` decides the outcome
   (`!` + `stale info` → `StaleLease`, `remote rejected`/`hook declined` → `HookDeclined`, other `!` → `Rejected`); a local
   `pre-push` failure (no ref lines) → `HookDeclined` with its output. Network commands use `kill_tree_on_exit(false)`.
 * Conflicts: a rebase pull that stops is `PullStatus::Conflicts` (the repo is in the rebase state the existing conflict
@@ -1892,15 +1943,25 @@ CommandBlock { id, prompt_line: i32, command_start: Option<GridPoint>, output_li
   file sourcing the system bashrc, `~/.bashrc`, then the snippet; only for interactive non-login bash without
   arguments). PowerShell/cmd: no clean mechanism, no injection (users dot-source the snippet).
 - **Environment.** `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Lector`, `TERM_PROGRAM_VERSION`;
-  `DEFAULT_ENV_SCRUB` removes `LECTOR_*`, `COLUMNS`/`LINES` and other terminals' identity variables.
+  `DEFAULT_ENV_SCRUB` removes `LECTOR_*` (askpass endpoint, token and operation id included), `GIT_ASKPASS`,
+  `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `GIT_TERMINAL_PROMPT` (a `git push` in the terminal prompts in the terminal),
+  `COLUMNS`/`LINES` and other terminals' identity variables. It must cover every `lector_process::askpass::SCRUB_ENV`
+  name; `tests/scrub.rs` (dev-dependency on `lector-process`) checks it.
 - **Process lifetime.** Drop/kill: Unix collects every process of the shell's session (`/proc` on Linux, `ps`
   descendants elsewhere) while the shell is alive, sends SIGHUP+SIGCONT to them and their groups, and SIGKILLs
   survivors after 500 ms on a reaper thread (drop never blocks). Windows: `taskkill /T /F` then `TerminateProcess`.
 - **Security.** Nothing received from the program is executed. OSC 52: copy reported as `ClipboardCopy` (UI decides),
   read denied (`ClipboardReadDenied`; alacritty `Osc52::OnlyCopy`). Titles: control and bidi-override characters
   stripped, 256 chars max. Link targets are untrusted data (the UI asks before opening); file links are resolved
-  (exists check, `a/`/`b/` diff prefixes) only on demand for the hovered/clicked candidate, cancellable. Bracketed
-  paste strips embedded `ESC[200~`/`ESC[201~` repeatedly; newlines become CR.
+  (exists check, `a/`/`b/` diff prefixes) only on demand for the hovered/clicked candidate, cancellable. Pastes:
+  `input::sanitize_paste` removes every control character except tab, LF and CR (C0, DEL, C1: a pasted `\x0f` would
+  run as Ctrl+O in bash) in both modes; bracketed paste also strips embedded `ESC[200~`/`ESC[201~` repeatedly;
+  newlines become CR. `input::paste_needs_confirmation(text, bracketed) -> bool` (also
+  `Terminal::paste_needs_confirmation(text)`, using the current mode): without bracketed paste, a line ending or a
+  stripped control character asks first (the UI adds the setting and "don't ask again"). OSC 7 reports whose path
+  contains control characters or bidi controls are ignored; `cwd_display_name(&Path) -> Option<String>` /
+  `Terminal::cwd_display_name()` give the folder name for tab titles, sanitized like titles and capped at
+  `MAX_CWD_NAME_CHARS` (64).
 - **Measured.** Parse throughput (release, 2-core sandbox, `cargo bench -p lector-terminal`): 115 MiB/s plain text,
   69 MiB/s mixed (SGR, CJK, OSC 133/7 every few lines). 20 MB `yes | head` through the PTY with bounded RSS.
 
@@ -1918,6 +1979,7 @@ TerminalView::new(id, SpawnOptions, WeakEntity<Workspace>, window, cx)   // spaw
 TerminalPanel: new_terminal(CwdRequest::{Explicit(path), Default}, profile: Option<&str>, split: Option<SplitAxis>, ..)
   toggle; kill(view) (asks when a command runs); activate_relative; focus_split_relative; start_rename;
   choose_profile; saved_tabs() / restore(Vec<SavedTab>); active_terminal(); terminals()
+TerminalView::pending(..) / is_pending() / start_pending(spawn, cx)   // a tab whose shell has not been spawned yet
 TerminalItem::new(view)                // a terminal as an editor-area PaneItem (item_key "terminal:<id>", no session)
 panel_for(workspace_id, cx); kill_all(cx)
 // Pure, tested modules: config (profile/cwd/spawn options), keys (translation + pass-through bindings),
@@ -1943,12 +2005,21 @@ panel_for(workspace_id, cx); kill_all(cx)
   palettes for the four built-in themes (contrast-tested, 7:1 in high contrast), derived from the editor colors for
   other themes; 256-color cube/greys and truecolor as is; inverse/dim/hidden applied; the palette is also given to
   the emulator for OSC 10/11/12/4 queries.
+- **Lazy session restore (v0.7).** `restore(Vec<SavedTab>)` creates the tabs as *pending* views (title and folder shown,
+  no PTY, no process) and spawns a shell only when its tab is first visible (the panel shown and the tab active; the
+  render path defers the start with `cx.defer_in`). Restoring therefore costs nothing on startup, and a collapsed panel runs
+  no shells. The panel-open state is not saved: the panel starts hidden. Tab titles are made unique with a counter
+  ("repo", "repo (2)"); a split is marked `[N]` in the tab strip and tooltip, whose folder is the sanitized
+  `cwd_label()`. Control characters in titles and folder names are stripped before display
+  (`lector_terminal::sanitize_title` / `cwd_display_name`).
 - **Key routing.** The terminal surface has key context `Terminal` (find bar: `TerminalFind`). A keymap extension
   (`lector_ui::keymap::add_keymap_extension`) adds, for every binding active in `Workspace`/globally, a
   `zed::NoAction` binding with the same keys in `Terminal` — so Ctrl+W/R/P/B/T, Tab, Alt+arrows... reach the shell —
   except `keys::RESERVED_ACTIONS` (command palette, F6 region cycling, Shift+F10, next/prev editor tab, zoom, UI zoom,
-  the app menu), every `terminal::*` action, keys using the platform key (cmd/super) and keys the user bound in
-  `Terminal` themselves. Unbound keys: plain text goes through the IME input handler (`EntityInputHandler`: dead keys,
+  the app menu), every `terminal::*` action, keys using the platform key (cmd/super) *unless* the chord's first keystroke is
+  a single-keystroke `Terminal` binding (macOS `cmd-k` clears the terminal; without a `NoAction` entry GPUI would treat
+  it as the prefix of the `cmd-k …` chords and wait for a second key) and keys the user bound in `Terminal` themselves.
+  Consequence: on Linux/Windows `ctrl-k` and `ctrl-k p` reach the shell from a terminal (the chords do not run). Unbound keys: plain text goes through the IME input handler (`EntityInputHandler`: dead keys,
   compose, preedit drawn at the cursor); the rest is translated by `keys::route_keystroke` (Ctrl/Alt combos → the
   core's encoder; Windows AltGr = Ctrl+Alt producing a character is typed; macOS Option types characters unless
   `terminal.option_as_meta`; Shift+PageUp/Down scroll locally off the alternate screen).
@@ -1962,15 +2033,16 @@ panel_for(workspace_id, cx); kill_all(cx)
   read-only). Multi-line pastes into a program without bracketed paste ask first (`terminal.confirm_multiline_paste`,
   "don't ask again" for the session). OSC 52 copies land only while that terminal is focused; reads are denied by
   the core. The shell program/args, profiles and env are user-only settings (project layers are stripped, like
-  LSP/agent commands). Agents get no terminal access.
+  LSP/agent commands), and so are `confirm_multiline_paste` (a safety prompt) and `scrollback` (memory). Agents get
+  no terminal access.
 - **Lifecycle.** On exit: "[Process exited with code N]" banner, the tab stays until a key or close
   (`terminal.close_on_exit`). Kill asks first only when shell integration reports a running command. App quit:
   sessions saved and every terminal killed (`kill_all`); dropping a view kills its process tree. Session restore
   (`terminal.restore`): panel tabs/splits and custom names per project root in `<data dir>/terminal/sessions.json`
-  (≤ 12 tabs × 4 splits), fresh shells in the saved folders; editor-area terminals are not restored.
+  (≤ 12 tabs × 4 splits), fresh shells in the saved folders, started lazily (see "Lazy session restore" above); editor-area terminals are not restored.
 - **Settings** (`[terminal]`, `lector_config::TerminalSettings`): `shell`, `profiles`, `default_profile`, `env` (user-only),
-  `font_family`, `font_size`, `line_height` (unset: code font, 1.2), `scrollback` (10000), `cursor_style`,
-  `cursor_blink`, `copy_on_select`, `ctrl_c_copies_selection`, `option_as_meta`, `confirm_multiline_paste`,
+  `font_family`, `font_size`, `line_height` (unset: code font, 1.2), `scrollback` (10000, user-only), `cursor_style`,
+  `cursor_blink`, `copy_on_select`, `ctrl_c_copies_selection`, `option_as_meta`, `confirm_multiline_paste` (user-only),
   `new_terminal_cwd` ("project" | "active_file"), `shell_integration` (true), `restore` (true), `close_on_exit`.
 
 ### v0.4 algorithms (Agent ALGO; core crates) — as implemented
@@ -2566,6 +2638,12 @@ impl Workspace {
     pub fn refresh_git_status(&mut self, cx);  pub fn record_location(&mut self, cx);   // push current location on GoBack history
     pub fn register_tab_restorer(&mut self, f: impl Fn(&TabKind, &mut Window, &mut Context<Workspace>) -> Option<Box<dyn PaneItem>>);
     pub fn show_toast(&mut self, msg, cx);  pub fn set_branch(..);   // (added by lector-ui-git)
+    // v0.7: show_toast_level(msg, ToastLevel::{Success, Info, Warning}, cx) and show_action_toast_level(.., level, ..) pick the
+    // icon (check / info / warning; `show_toast` stays Success, the lector-ui-git / agent helpers default to Info);
+    // reveal_panel(SidebarPanel, window, cx) shows a sidebar panel and never hides it (show_panel toggles; use reveal when an
+    // event, such as a pull that stopped on conflicts, should lead the user to the panel); is_panel_shown(SidebarPanel, cx);
+    // guard_close_window(Duration, cx): the next CloseWindow within the window is swallowed with a toast (the terminal sets it
+    // when the last terminal is killed so a repeated Ctrl+Shift+W never closes the window).
 }
 // PaneItem additions: fn file_view(&self) -> Option<Entity<FileView>> (None); fn tab_kind(&self, cx) -> Option<TabKind>
 // (session; default File{path} from path()); fn item_key(&self, cx) -> Option<SharedString> (dedup non-file tabs).
@@ -3009,7 +3087,10 @@ pub struct UpdateOptions { api_base, repo, public_key: Option<String>, platform:
   the answer: up to date, could not check (with the reason, e.g. offline or rate limited), or available. "Automatic Update
   Checks" (`workspace::ToggleAutoUpdateCheck`) flips the choice. Both are in the palette; neither has a default key.
 * *The dialog* (`update_model::dialog_model(&UpdateStatus, current) -> UpdateDialogModel`, UI-free): version, published date,
-  release-notes link, and by `UpdateAction`: `Download` opens the asset URL in the browser and shows the expected SHA-256
+  release-notes link, and by `UpdateAction`: `Download` opens the asset URL in the browser (v0.7: every URL the dialog
+  opens passes `update_model::safe_release_url`: it must be `https://github.com/meetdhruva/lector/…` (the
+  `lector_forge::releases` repository constant); anything else, such as a hostile API response, falls back to
+  `canonical_release_page()`. A manual check answers in the window that asked, even when another window has the focus) and shows the expected SHA-256
   (with a copy button), `PackageManager` shows a copyable command, `ReleasePage` opens the notes. The word "Verified" appears
   **only** when `verified` is true; otherwise the dialog says "Signature not available for this build." Lector never downloads,
   installs or runs anything.
@@ -3057,7 +3138,11 @@ without a network and send nothing anywhere.
   `health_summary()` / `health_summary_in(&HealthPaths)` (read-only) -> `HealthSummary { sessions, running, clean, abnormal,
   panics, crash_free_rate = clean / (clean + abnormal) | None, by_version, last_crashes: Vec<CrashFile>, crash_reports,
   crash_dir }`. The GUI installs the hook first thing in `main` and begins the session after the start request is built;
-  `end_clean` runs from `App::on_app_quit` (macOS exits inside `[NSApp terminate:]`) and again after `Application::run`;
+  `end_clean` runs from `App::on_app_quit` (macOS exits inside `[NSApp terminate:]`) and again after `Application::run`. **Quit
+  order (v0.7):** save sessions → kill terminals → remove the askpass server → `Supervisor::shutdown` → `end_clean`, the last
+  two through `lector_ui::startup::on_quit_last(cx, work)`: GPUI runs every quit hook's synchronous part in registration
+  order and awaits the returned futures afterwards, so `work` (run inside such a future) starts after every other hook
+  finished, whenever the hook was registered (windows register theirs later than `main`);
   `lector_cli::run_args` installs the hook for the CLI and `lector mcp`, which never count as sessions. Killing the app
   counts as abnormal (indistinguishable from a crash).
 * **Instruction-count gates (`crates/lector-perf`, `scripts/perf-gate.sh`, `perf/baseline.json`).** Not shipped. One gate
@@ -3122,8 +3207,8 @@ GPUI action names are `namespace::Name`. `lector-config` default keymaps and
   Find, FindNext / FindPrev / CloseFind (`enter` / `shift-enter` / `escape` in `TerminalFind`; menu-exempt), Copy,
   Paste, SelectAll, MoveToEditor, MoveToPanel. Key context `Terminal` (Linux/Windows: `ctrl-shift-c`/`ctrl-insert`
   copy, `ctrl-shift-v`/`shift-insert` paste, `ctrl-shift-a`, `ctrl-shift-f`, `ctrl-shift-k` clear, `ctrl-shift-w`
-  kill, `ctrl-shift-5` split, `ctrl-pageup/pagedown`, `ctrl-shift-up/down` commands, `alt-shift-left/right` splits;
-  macOS: `cmd-c/v/a/f/k/w`, `cmd-\`, `cmd-shift-[/]`, `cmd-up/down`, `cmd-alt-left/right`). Menu: View → Terminal,
+  kill, `ctrl-shift-5` split (also bound as `ctrl-%`: on X11 / xkb the shift modifier is dropped for symbols and digits, so the key arrives as `%`; `ctrl-~` likewise for `ctrl-shift-\``), `ctrl-pageup/pagedown`, `ctrl-shift-up/down` commands, `alt-shift-left/right` splits;
+  macOS: `cmd-c/v/a/f/k/w`, `cmd-\`, `cmd-shift-[/]`, `cmd-up/down`, `cmd-alt-left/right`). Context `TerminalPanel` (empty panel): `ctrl-shift-w` kill on Linux/Windows. Menu: View → Terminal,
   View → Terminal Commands; status-bar "Terminal" button.
 * v0.7 inline agent edit (`agent::`, `lector-ui-agent`; the namespace is now a palette namespace): EditWithAgent (`cmd/ctrl-i`,
   editor context menu, View → Agent), AcceptInlineHunk (`alt-y`), RejectInlineHunk (`alt-n`), AcceptAllInlineEdits

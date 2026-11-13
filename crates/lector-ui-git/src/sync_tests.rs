@@ -380,6 +380,7 @@ fn request(text: &str) -> PromptRequest {
     PromptRequest {
         text: text.into(),
         kind: classify_prompt(text),
+        op: None,
     }
 }
 

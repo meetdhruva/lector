@@ -988,9 +988,11 @@ pub struct PromptSpec {
     pub masked: bool,
     /// Dialog title.
     pub title: String,
-    /// The prompt exactly as git / ssh sent it.
+    /// The prompt as git / ssh sent it, neutralized for display (control characters and
+    /// bidi overrides replaced or removed, length capped; see
+    /// [`lector_process::askpass::sanitize_prompt_text`]).
     pub prompt: String,
-    /// Host (host-key prompts; also from URLs).
+    /// Host (host-key prompts; `user@host` of ssh password prompts; also from URLs).
     pub host: Option<String>,
     /// Key type (`ED25519`).
     pub key_type: Option<String>,
@@ -1000,13 +1002,9 @@ pub struct PromptSpec {
     pub key_path: Option<String>,
     /// URL the prompt is for, credentials removed.
     pub url: Option<String>,
-}
-
-/// The text between the first pair of single quotes.
-fn quoted(text: &str) -> Option<String> {
-    let start = text.find('\'')? + 1;
-    let len = text[start..].find('\'')?;
-    Some(text[start..start + len].to_string())
+    /// Shown prominently above the input: the prompt names another host than the
+    /// operation's remote, or Lector cannot tell which operation asked.
+    pub warning: Option<String>,
 }
 
 /// Whether a prompt git / ssh did not classify looks like it asks for a secret.
@@ -1026,57 +1024,58 @@ pub fn looks_secret(text: &str) -> bool {
     .any(|w| t.contains(w))
 }
 
-/// Classifies a prompt into a dialog (masking, fields to show).
+/// Classifies a prompt into a dialog (masking, fields to show). Structured dialogs and
+/// their fields come only from exact OpenSSH / git templates
+/// ([`lector_process::askpass::parse_prompt`]); `kind` may only downgrade that result (pass
+/// [`PromptKind::Other`] to force the generic dialog), never upgrade it. Anything else is
+/// the generic "The server asks:" dialog with the sanitized text and no trusted-looking
+/// fields.
 pub fn prompt_spec(text: &str, kind: PromptKind) -> PromptSpec {
+    let parsed = lector_process::askpass::parse_prompt(text);
+    let kind = if kind == parsed.kind {
+        kind
+    } else {
+        PromptKind::Other
+    };
     let mut spec = PromptSpec {
         kind: PromptDialogKind::Generic,
         masked: false,
-        title: "git is asking".into(),
-        prompt: text.to_string(),
+        title: "The server asks:".into(),
+        prompt: lector_process::askpass::sanitize_prompt_text(text),
         host: None,
         key_type: None,
         fingerprint: None,
         key_path: None,
         url: None,
+        warning: None,
     };
+    let redacted = |u: &Option<String>| u.as_deref().map(lector_git::sync::redact_credentials);
     match kind {
         PromptKind::HostKeyConfirm => {
             spec.kind = PromptDialogKind::HostKey;
             spec.title = "Unknown SSH host".into();
-            if let Some(i) = text.find("host '") {
-                spec.host = quoted(&text[i..]);
-            }
-            for line in text.lines() {
-                if let Some((before, after)) = line.split_once(" key fingerprint is ") {
-                    spec.key_type = before.split_whitespace().last().map(str::to_string);
-                    spec.fingerprint = Some(after.trim().trim_end_matches('.').to_string());
-                }
-            }
+            spec.host = parsed.host;
+            spec.key_type = parsed.key_type;
+            spec.fingerprint = parsed.fingerprint;
         }
         PromptKind::Passphrase => {
             spec.kind = PromptDialogKind::Passphrase;
             spec.masked = true;
             spec.title = "SSH key passphrase".into();
-            spec.key_path = quoted(text);
+            spec.key_path = parsed.key_path;
         }
         PromptKind::Username => {
             spec.kind = PromptDialogKind::Username;
             spec.title = "Username".into();
-            spec.url = quoted(text).map(|u| lector_git::sync::redact_credentials(&u));
+            spec.url = redacted(&parsed.url);
         }
         PromptKind::Password => {
             spec.kind = PromptDialogKind::Password;
             spec.masked = true;
             spec.title = "Password or token".into();
-            spec.url = quoted(text).map(|u| lector_git::sync::redact_credentials(&u));
-            if spec.url.is_none() {
-                // ssh: `user@host's password: `
-                spec.host = text
-                    .split("'s password")
-                    .next()
-                    .filter(|h| h.len() < text.len())
-                    .map(|h| h.trim().to_string());
-            }
+            spec.url = redacted(&parsed.url);
+            // ssh: `user@host's password: `
+            spec.host = parsed.host;
         }
         PromptKind::Other => {
             spec.masked = looks_secret(text);
@@ -1086,6 +1085,62 @@ pub fn prompt_spec(text: &str, kind: PromptKind) -> PromptSpec {
         spec.host = spec.url.as_deref().and_then(host_of_url);
     }
     spec
+}
+
+/// The context a prompt is shown in: which operation asked (if Lector can tell) and its
+/// remote, plus a file-system check for passphrase prompts.
+pub struct PromptContextInfo<'a> {
+    /// The operation's remote URL (credentials redacted), if known.
+    pub remote: Option<&'a str>,
+    /// `false` when several operations run and the prompt did not say which one it is from.
+    pub attributed: bool,
+    /// Whether the key file a passphrase prompt names exists (`~/` expanded by the callee).
+    pub key_exists: &'a dyn Fn(&str) -> bool,
+}
+
+/// [`prompt_spec`] for a prompt shown in `ctx`: a passphrase prompt naming a key file that
+/// does not exist gets the generic dialog, and a warning is set when the host the prompt
+/// names differs from the host of the operation's remote, or when the operation is unknown.
+pub fn prompt_spec_in(text: &str, kind: PromptKind, ctx: &PromptContextInfo<'_>) -> PromptSpec {
+    let mut spec = prompt_spec(text, kind);
+    if spec.kind == PromptDialogKind::Passphrase
+        && !spec
+            .key_path
+            .as_deref()
+            .is_some_and(|k| (ctx.key_exists)(k))
+    {
+        spec = prompt_spec(text, PromptKind::Other);
+    }
+    let prompt_host = spec.host.as_deref().map(bare_host);
+    let remote_host = ctx.remote.and_then(host_of_url);
+    let mut warnings = Vec::new();
+    if let (Some(asked), Some(remote)) = (prompt_host.as_deref(), remote_host.as_deref()) {
+        if !asked.eq_ignore_ascii_case(remote) {
+            warnings.push(format!(
+                "This prompt is for {asked}, but the operation's remote is {remote}. Unless \
+                 that is an ssh alias or a redirect you expect, cancel."
+            ));
+        }
+    }
+    if !ctx.attributed {
+        warnings.push(
+            "Several git operations are running and Lector cannot tell which one asks.".into(),
+        );
+    }
+    if !warnings.is_empty() {
+        spec.warning = Some(warnings.join(" "));
+    }
+    spec
+}
+
+/// `github.com` from `github.com`, `ann@github.com`, `github.com (1.2.3.4)`, `[h]:22`.
+fn bare_host(host: &str) -> String {
+    let h = host.split_whitespace().next().unwrap_or(host);
+    let h = h.rsplit_once('@').map_or(h, |(_, r)| r);
+    let h = h
+        .strip_prefix('[')
+        .map_or(h, |r| r.split(']').next().unwrap_or(r));
+    h.to_string()
 }
 
 fn host_of_url(url: &str) -> Option<String> {
@@ -1519,9 +1574,102 @@ mod tests {
         let spec = prompt_spec(otp, PromptKind::Other);
         assert_eq!(spec.kind, PromptDialogKind::Generic);
         assert!(spec.masked, "looks secret");
-        assert_eq!(spec.prompt, otp, "shown verbatim");
+        assert_eq!(
+            spec.prompt,
+            otp.trim_end(),
+            "shown verbatim (trailing space trimmed)"
+        );
         let plain = "Which remote? ";
         assert!(!prompt_spec(plain, PromptKind::Other).masked);
+    }
+
+    #[test]
+    fn spoofed_prompts_get_the_generic_dialog_without_trusted_fields() {
+        let cases = [
+            // An SSH server's keyboard-interactive prompt (OpenSSH's `(user@host) ` prefix).
+            "(git@evil.example) Enter passphrase for key '/home/u/.ssh/id_ed25519': ",
+            "(git@evil.example) The authenticity of host 'github.com (1.2.3.4)' can't be established.\nED25519 key fingerprint is SHA256:x.\nAre you sure you want to continue connecting (yes/no/[fingerprint])? ",
+            // The magic words anywhere else.
+            "Please confirm (yes/no) to continue connecting: ",
+            "Your passphrase: ",
+        ];
+        for text in cases {
+            let kind = lector_process::askpass::classify_prompt(text);
+            let spec = prompt_spec(text, kind);
+            assert_eq!(spec.kind, PromptDialogKind::Generic, "{text:?}");
+            assert_eq!(spec.title, "The server asks:");
+            assert_eq!(
+                (
+                    &spec.host,
+                    &spec.key_path,
+                    &spec.fingerprint,
+                    &spec.key_type,
+                    &spec.url
+                ),
+                (&None, &None, &None, &None, &None),
+                "{text:?}"
+            );
+        }
+        // A caller may downgrade a template (never upgrade a non-template).
+        let pass = "Enter passphrase for key '/k': ";
+        assert_eq!(
+            prompt_spec(pass, PromptKind::Other).kind,
+            PromptDialogKind::Generic
+        );
+        assert_eq!(
+            prompt_spec("Your passphrase: ", PromptKind::Passphrase).kind,
+            PromptDialogKind::Generic
+        );
+        // Control characters and bidi overrides never reach the dialog text.
+        let spec = prompt_spec("Code \u{1b}[2J\u{202e}?", PromptKind::Other);
+        assert!(!spec.prompt.contains('\u{1b}') && !spec.prompt.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn prompt_context_checks_key_files_and_hosts() {
+        let exists = |p: &str| p == "/home/ann/.ssh/id_ed25519";
+        let ctx = PromptContextInfo {
+            remote: Some("git@github.com:o/r.git"),
+            attributed: true,
+            key_exists: &exists,
+        };
+        let pass = "Enter passphrase for key '/home/ann/.ssh/id_ed25519': ";
+        let spec = prompt_spec_in(pass, PromptKind::Passphrase, &ctx);
+        assert_eq!(spec.kind, PromptDialogKind::Passphrase);
+        assert_eq!(spec.warning, None);
+        let missing = "Enter passphrase for key '/home/ann/.ssh/not_there': ";
+        let spec = prompt_spec_in(missing, PromptKind::Passphrase, &ctx);
+        assert_eq!(spec.kind, PromptDialogKind::Generic);
+        assert_eq!(spec.key_path, None);
+
+        let same = "Password for 'https://ann@GitHub.com': ";
+        let spec = prompt_spec_in(same, PromptKind::Password, &ctx);
+        assert_eq!(spec.warning, None);
+        let other = "Password for 'https://ann@evil.example': ";
+        let spec = prompt_spec_in(other, PromptKind::Password, &ctx);
+        assert_eq!(spec.url.as_deref(), Some("https://***@evil.example"));
+        let warning = spec.warning.unwrap_or_default();
+        assert!(warning.contains("evil.example") && warning.contains("github.com"));
+        let host_key = "The authenticity of host 'evil.example (10.0.0.1)' can't be established.\nED25519 key fingerprint is SHA256:x.\nAre you sure you want to continue connecting (yes/no/[fingerprint])? ";
+        let spec = prompt_spec_in(host_key, PromptKind::HostKeyConfirm, &ctx);
+        assert!(spec.warning.is_some());
+        let ssh_pw = "ann@github.com's password: ";
+        assert_eq!(
+            prompt_spec_in(ssh_pw, PromptKind::Password, &ctx).warning,
+            None
+        );
+
+        let unknown = PromptContextInfo {
+            remote: None,
+            attributed: false,
+            key_exists: &exists,
+        };
+        let spec = prompt_spec_in(
+            "Username for 'https://x.example': ",
+            PromptKind::Username,
+            &unknown,
+        );
+        assert!(spec.warning.unwrap_or_default().contains("cannot tell"));
     }
 
     #[test]

@@ -498,6 +498,19 @@ impl Render for PromptDialog {
             .child(self.field("Operation", self.operation.clone(), false, cx))
             .when_some(self.remote.clone(), |el, remote| {
                 el.child(self.field("Remote", remote, true, cx))
+            })
+            .when_some(self.spec.warning.clone(), |el, warning| {
+                el.child(
+                    div()
+                        .p(px(8.))
+                        .rounded(metrics::radius())
+                        .border_1()
+                        .border_color(ui.warning.hsla().opacity(0.6))
+                        .bg(ui.warning.hsla().opacity(0.08))
+                        .text_size(metrics::text_sm())
+                        .text_color(ui.text.hsla())
+                        .child(SharedString::from(warning)),
+                )
             });
         frame = match self.spec.kind {
             PromptDialogKind::HostKey => frame
@@ -559,9 +572,10 @@ impl Render for PromptDialog {
                     .when_some(self.spec.key_path.clone(), |el, key| {
                         el.child(self.field("Key", key.into(), true, cx))
                     })
+                    // What the prompt itself names, always (it may differ from the remote).
                     .when_some(
-                        self.spec.url.clone().filter(|_| self.remote.is_none()),
-                        |el, url| el.child(self.field("For", url.into(), true, cx)),
+                        self.spec.url.clone().or_else(|| self.spec.host.clone()),
+                        |el, target| el.child(self.field("Asks for", target.into(), true, cx)),
                     )
                     .child(
                         div()

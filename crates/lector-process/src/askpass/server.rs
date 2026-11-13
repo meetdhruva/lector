@@ -5,16 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroize as _;
 
 use super::protocol::{
-    read_frame, same_bytes, write_frame, Conn, Endpoint, MAGIC, TAG_ANSWER, TAG_CANCEL,
+    read_frame_until, same_bytes, write_frame, Conn, Endpoint, MAGIC, MAGIC_V1, MAX_FRAME,
+    TAG_ANSWER, TAG_CANCEL,
 };
 use super::{
-    askpass_helper_path, classify_prompt, PromptReply, PromptRequest, Secret, ENV_ENDPOINT,
-    ENV_TOKEN, HELPER_NAME,
+    askpass_helper_path, classify_prompt, parse_op, PromptReply, PromptRequest, Secret,
+    ENV_ENDPOINT, ENV_TOKEN, HELPER_NAME,
 };
 
 /// Errors starting an [`AskpassServer`].
@@ -30,10 +31,20 @@ pub enum AskpassError {
 
 type Handler = Arc<dyn Fn(PromptRequest) -> PromptReply + Send + Sync>;
 
-/// How long a client may take to send its request.
+/// How long a client may take to send the magic and the token, in total. The helper sends
+/// its whole request in one write, so this only ever bites connections that are not ours.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long an authenticated client may take to send the rest of its request, in total.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Prompts handled at the same time; further connections are closed at once.
+/// How long writing the reply may take.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Authenticated prompts handled at the same time; further ones are closed at once.
 const MAX_ACTIVE: usize = 8;
+/// Connections still in the handshake at the same time; further ones are closed at once.
+/// Counted separately so unauthenticated clients cannot take the prompt slots.
+const MAX_HANDSHAKES: usize = 16;
+/// Longest operation-id frame.
+const MAX_OP_FRAME: usize = 32;
 /// Accept-loop poll interval (the listener is non-blocking so the server can stop).
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
 
@@ -113,7 +124,15 @@ impl AskpassServer {
         {
             let mut server = Self::start_tcp(handler)?;
             // A private directory for the helper program (`helper_program`).
-            server.dir = Some(private_dir(runtime_dir)?);
+            let dir = private_dir(runtime_dir)?;
+            if let Err(err) = write_pid_file(&dir) {
+                tracing::debug!(
+                    "askpass: cannot record the owner of {}: {err}",
+                    dir.display()
+                );
+            }
+            sweep_stale_dirs(runtime_dir, &dir);
+            server.dir = Some(dir);
             Ok(server)
         }
     }
@@ -144,7 +163,7 @@ impl AskpassServer {
                 continue;
             }
             for _ in 0..4 {
-                let name = format!("lector-askpass-{}", hex(&random_bytes::<6>()?));
+                let name = format!("{DIR_PREFIX}{}", hex(&random_bytes::<6>()?));
                 let dir = base.join(name);
                 let socket = dir.join("s");
                 if socket.as_os_str().len() > MAX_SOCKET_PATH {
@@ -165,6 +184,13 @@ impl AskpassServer {
                 });
                 match bound {
                     Ok(listener) => {
+                        if let Err(err) = write_pid_file(&dir) {
+                            tracing::debug!(
+                                "askpass: cannot record the owner of {}: {err}",
+                                dir.display()
+                            );
+                        }
+                        sweep_stale_dirs(&base, &dir);
                         return Self::serve(
                             Listener::Unix(listener),
                             Endpoint::Unix(socket),
@@ -274,7 +300,7 @@ impl Drop for AskpassServer {
 }
 
 fn accept_loop(listener: Listener, token: Secret, handler: Handler, stop: Arc<AtomicBool>) {
-    let active = Arc::new(AtomicUsize::new(0));
+    let slots = Arc::new(Slots::default());
     while !stop.load(Ordering::SeqCst) {
         let conn = match listener.accept() {
             Ok(conn) => conn,
@@ -288,53 +314,107 @@ fn accept_loop(listener: Listener, token: Secret, handler: Handler, stop: Arc<At
                 continue;
             }
         };
-        if active.fetch_add(1, Ordering::SeqCst) >= MAX_ACTIVE {
-            active.fetch_sub(1, Ordering::SeqCst);
-            tracing::warn!("askpass: too many prompts at once; refusing one");
+        let Some(handshake) = Slot::take(&slots, |s| &s.handshakes, MAX_HANDSHAKES) else {
+            tracing::warn!("askpass: too many connections at once; refusing one");
             continue;
-        }
+        };
         let token = token.clone();
         let handler = handler.clone();
-        let active2 = active.clone();
+        let slots2 = slots.clone();
         let spawned = std::thread::Builder::new()
             .name("lector-askpass-conn".into())
             .spawn(move || {
-                if let Err(err) = handle(conn, &token, &handler) {
+                if let Err(err) = handle(conn, &token, &handler, &slots2, handshake) {
                     tracing::debug!("askpass connection: {err}");
                 }
-                active2.fetch_sub(1, Ordering::SeqCst);
             });
         if let Err(err) = spawned {
-            active.fetch_sub(1, Ordering::SeqCst);
             tracing::warn!("askpass: cannot start a connection thread: {err}");
         }
     }
 }
 
-fn handle(mut conn: Box<dyn Conn>, token: &Secret, handler: &Handler) -> io::Result<()> {
-    conn.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-    conn.set_write_timeout(Some(REQUEST_TIMEOUT))?;
-    let magic = read_frame(&mut conn)?;
-    if magic != MAGIC {
+/// Counters of connections in the handshake and of authenticated prompts.
+#[derive(Default)]
+struct Slots {
+    handshakes: AtomicUsize,
+    active: AtomicUsize,
+}
+
+/// One taken slot; released when dropped (also when a thread could not be started).
+struct Slot {
+    slots: Arc<Slots>,
+    which: fn(&Slots) -> &AtomicUsize,
+}
+
+impl Slot {
+    fn take(slots: &Arc<Slots>, which: fn(&Slots) -> &AtomicUsize, max: usize) -> Option<Slot> {
+        let counter = which(slots);
+        if counter.fetch_add(1, Ordering::SeqCst) >= max {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot {
+            slots: slots.clone(),
+            which,
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        (self.which)(&self.slots).fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn handle(
+    mut conn: Box<dyn Conn>,
+    token: &Secret,
+    handler: &Handler,
+    slots: &Arc<Slots>,
+    handshake: Slot,
+) -> io::Result<()> {
+    conn.set_write_timeout(Some(REPLY_TIMEOUT))?;
+    // Magic and token: a short overall deadline, before any prompt slot is used.
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let magic = read_frame_until(&mut *conn, MAGIC.len(), deadline)?;
+    let version = if magic == MAGIC {
+        2
+    } else if magic == MAGIC_V1 {
+        1
+    } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bad askpass magic",
         ));
-    }
-    let mut given = read_frame(&mut conn)?;
+    };
+    let mut given = read_frame_until(&mut *conn, 256, deadline)?;
     let ok = same_bytes(&given, token.expose().as_bytes());
     given.zeroize();
+    drop(handshake);
     if !ok {
         tracing::warn!("askpass: rejected a connection without the session token");
         return Ok(());
     }
-    let prompt = read_frame(&mut conn)?;
+    let Some(_active) = Slot::take(slots, |s| &s.active, MAX_ACTIVE) else {
+        tracing::warn!("askpass: too many prompts at once; refusing one");
+        return Ok(());
+    };
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let op = if version >= 2 {
+        let raw = read_frame_until(&mut *conn, MAX_OP_FRAME, deadline)?;
+        std::str::from_utf8(&raw).ok().and_then(parse_op)
+    } else {
+        None
+    };
+    let prompt = read_frame_until(&mut *conn, MAX_FRAME, deadline)?;
     let text = String::from_utf8_lossy(&prompt).into_owned();
     let request = PromptRequest {
         kind: classify_prompt(&text),
         text,
+        op,
     };
-    tracing::debug!(kind = ?request.kind, "askpass prompt");
+    tracing::debug!(kind = ?request.kind, op = ?request.op, "askpass prompt");
     let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(request)))
         .unwrap_or(PromptReply::Cancel);
     let mut payload = match &reply {
@@ -356,7 +436,7 @@ fn handle(mut conn: Box<dyn Conn>, token: &Secret, handler: &Handler) -> io::Res
 fn private_dir(base: &Path) -> Result<PathBuf, AskpassError> {
     std::fs::create_dir_all(base)?;
     for _ in 0..4 {
-        let dir = base.join(format!("lector-askpass-{}", hex(&random_bytes::<6>()?)));
+        let dir = base.join(format!("{DIR_PREFIX}{}", hex(&random_bytes::<6>()?)));
         match std::fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -366,6 +446,127 @@ fn private_dir(base: &Path) -> Result<PathBuf, AskpassError> {
     Err(AskpassError::Io(io::Error::other(
         "no fresh directory for the askpass helper",
     )))
+}
+
+/// Name prefix of the private directories (followed by 12 lowercase hex digits).
+const DIR_PREFIX: &str = "lector-askpass-";
+/// File in a private directory holding the owning process id, so directories left behind
+/// by a crash or `SIGTERM` (no `Drop`) can be removed by the next server.
+const PID_FILE: &str = "pid";
+
+/// Records this process as the owner of `dir`.
+fn write_pid_file(dir: &Path) -> io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(dir.join(PID_FILE))?;
+    file.write_all(std::process::id().to_string().as_bytes())
+}
+
+/// Whether `name` is one of our private directory names.
+fn is_private_dir_name(name: &str) -> bool {
+    name.strip_prefix(DIR_PREFIX).is_some_and(|rest| {
+        rest.len() == 12 && rest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Removes private directories under `base` (other than `ours`) whose owner process is
+/// gone. Only directories that look exactly like ours are touched: our name pattern, a
+/// real directory (not a symlink), on Unix owned by us with no access for others, and a
+/// readable pid file naming a process that no longer exists. When in doubt (no pid file,
+/// the check fails, the pid is alive, possibly reused) the directory stays.
+fn sweep_stale_dirs(base: &Path, ours: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    #[cfg(unix)]
+    let our_uid = {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::symlink_metadata(ours) {
+            Ok(m) => m.uid(),
+            Err(_) => return,
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == ours || !is_private_dir_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            if meta.uid() != our_uid || meta.permissions().mode() & 0o077 != 0 {
+                continue;
+            }
+        }
+        let Some(pid) = std::fs::read_to_string(path.join(PID_FILE))
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid_alive(pid) == Some(false) {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => tracing::debug!("askpass: removed stale {}", path.display()),
+                Err(err) => tracing::debug!("askpass: cannot remove {}: {err}", path.display()),
+            }
+        }
+    }
+}
+
+/// Whether process `pid` exists; `None` when that cannot be told.
+fn pid_alive(pid: u32) -> Option<bool> {
+    if pid == std::process::id() {
+        return Some(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(Path::new("/proc").join(pid.to_string()).exists())
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // `ps -p` exits non-zero when there is no such process.
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .map(|s| s.success())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        Some(text.contains(&format!("\",\"{pid}\",\"")))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 /// Single-quotes `s` for `sh` (`'` becomes `'\''`).
@@ -423,4 +624,81 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], AskpassError> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_dir(base: &Path, name: &str, pid: Option<u32>) -> PathBuf {
+        let dir = base.join(name);
+        std::fs::create_dir(&dir).unwrap_or_else(|e| panic!("{e}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        if let Some(pid) = pid {
+            std::fs::write(dir.join(PID_FILE), pid.to_string()).unwrap_or_else(|e| panic!("{e}"));
+        }
+        dir
+    }
+
+    /// A pid that belonged to a process that has exited and been reaped.
+    fn dead_pid() -> u32 {
+        let exe = std::env::current_exe().unwrap_or_else(|e| panic!("{e}"));
+        let mut child = std::process::Command::new(exe)
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    #[test]
+    fn private_dir_names_are_recognized() {
+        assert!(is_private_dir_name("lector-askpass-0123456789ab"));
+        assert!(!is_private_dir_name("lector-askpass-0123456789AB"));
+        assert!(!is_private_dir_name("lector-askpass-0123"));
+        assert!(!is_private_dir_name("other-0123456789ab"));
+    }
+
+    #[test]
+    fn stale_private_dirs_are_swept_at_start() {
+        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let dead = fake_dir(base.path(), "lector-askpass-00000000000d", Some(dead_pid()));
+        let live = fake_dir(
+            base.path(),
+            "lector-askpass-00000000000a",
+            Some(std::process::id()),
+        );
+        let unknown = fake_dir(base.path(), "lector-askpass-00000000000u", None);
+        let unknown2 = fake_dir(base.path(), "lector-askpass-000000000000", None);
+        let foreign = fake_dir(base.path(), "something-else", Some(dead_pid()));
+        let server = AskpassServer::start(base.path(), |_| PromptReply::Cancel)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let ours = server.private_dir().map(Path::to_path_buf);
+        assert!(!dead.exists(), "a dead owner's directory is removed");
+        assert!(live.exists() && foreign.exists() && unknown2.exists());
+        // Not our name pattern (`u` is not hex): never touched.
+        assert!(unknown.exists());
+        let ours = ours.unwrap_or_else(|| panic!("private dir"));
+        assert!(ours.starts_with(base.path()) || ours.starts_with(std::env::temp_dir()));
+        assert_eq!(
+            std::fs::read_to_string(ours.join(PID_FILE)).ok().as_deref(),
+            Some(std::process::id().to_string().as_str())
+        );
+        drop(server);
+        assert!(!ours.exists());
+    }
+
+    #[test]
+    fn this_process_is_alive_and_a_reaped_child_is_not() {
+        assert_eq!(pid_alive(std::process::id()), Some(true));
+        assert_ne!(pid_alive(dead_pid()), Some(true));
+    }
 }

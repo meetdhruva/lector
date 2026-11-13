@@ -56,6 +56,10 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.0" date="2026-11-13">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.7.0</url>
+      <description><p>Sync with the remote (fetch, pull, push, branches, stash), an integrated terminal, language-server code completion, inline agent edits and a signing-ready release pipeline.</p></description>
+    </release>
     <release version="0.6.0" date="2026-11-06">
       <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.6.0</url>
       <description><p>Review GitHub and GitLab pull requests locally, and comments that follow the code through edits and rebases.</p></description>

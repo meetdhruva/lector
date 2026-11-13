@@ -4,7 +4,7 @@ use std::time::Duration;
 use zeroize::Zeroize as _;
 
 use super::protocol::{read_frame, write_frame, Endpoint, MAGIC, TAG_ANSWER, TAG_CANCEL};
-use super::{ENV_ENDPOINT, ENV_TOKEN};
+use super::{ENV_ENDPOINT, ENV_OP, ENV_TOKEN};
 
 /// Why the askpass helper could not get an answer.
 #[derive(Debug, thiserror::Error)]
@@ -35,8 +35,9 @@ pub fn run_askpass_client(prompt: &str) -> i32 {
         .filter(|t| super::is_valid_token(t));
     let result = match (endpoint, token) {
         (Some(endpoint), Some(mut token)) => {
+            let op = std::env::var(ENV_OP).ok().and_then(|v| super::parse_op(&v));
             let mut out = io::stdout().lock();
-            let r = run_askpass_client_with(prompt, &endpoint, &token, &mut out);
+            let r = send_request(prompt, op, &endpoint, &token, &mut out);
             token.zeroize();
             r
         }
@@ -53,9 +54,30 @@ pub fn run_askpass_client(prompt: &str) -> i32 {
 }
 
 /// Asks the server at `endpoint` and writes the answer plus `\n` to `out`.
-/// `Ok(false)` = the user cancelled (nothing written).
+/// `Ok(false)` = the user cancelled (nothing written). Sends no operation id.
 pub fn run_askpass_client_with(
     prompt: &str,
+    endpoint: &Endpoint,
+    token: &str,
+    out: &mut dyn Write,
+) -> Result<bool, AskpassClientError> {
+    send_request(prompt, None, endpoint, token, out)
+}
+
+/// [`run_askpass_client_with`] tagged with operation id `op` (see [`super::ENV_OP`]).
+pub fn run_askpass_client_for_op(
+    prompt: &str,
+    op: Option<u64>,
+    endpoint: &Endpoint,
+    token: &str,
+    out: &mut dyn Write,
+) -> Result<bool, AskpassClientError> {
+    send_request(prompt, op, endpoint, token, out)
+}
+
+fn send_request(
+    prompt: &str,
+    op: Option<u64>,
     endpoint: &Endpoint,
     token: &str,
     out: &mut dyn Write,
@@ -64,9 +86,16 @@ pub fn run_askpass_client_with(
         .connect(Duration::from_secs(5))
         .map_err(AskpassClientError::Connect)?;
     conn.set_write_timeout(Some(Duration::from_secs(10)))?;
-    write_frame(&mut conn, MAGIC)?;
-    write_frame(&mut conn, token.as_bytes())?;
-    write_frame(&mut conn, prompt.as_bytes())?;
+    let op = op.map(|o| o.to_string()).unwrap_or_default();
+    // One write for the whole request: the server's handshake deadline is short.
+    let mut request = Vec::new();
+    write_frame(&mut request, MAGIC)?;
+    write_frame(&mut request, token.as_bytes())?;
+    write_frame(&mut request, op.as_bytes())?;
+    write_frame(&mut request, prompt.as_bytes())?;
+    let sent = conn.write_all(&request).and_then(|()| conn.flush());
+    request.zeroize();
+    sent?;
     // The user may take their time; Lector closing the connection ends the wait.
     conn.set_read_timeout(None)?;
     let mut reply = read_frame(&mut conn)?;

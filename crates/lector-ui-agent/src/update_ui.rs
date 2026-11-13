@@ -10,8 +10,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, KeyDownEvent, SharedString, WeakEntity, Window,
+    div, prelude::*, AnyWindowHandle, App, ClipboardItem, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, SharedString, WeakEntity,
+    Window,
 };
 use lector_forge::releases::{UpdateOptions, UpdateStatus};
 use lector_ui::actions::workspace as ws_actions;
@@ -55,12 +56,13 @@ fn notices_suppressed() -> bool {
 // ---------------------------------------------------------------------------------------------
 
 /// What the hub tells the windows.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum HubEvent {
     /// The known update status changed (the status bar item shows or hides).
     Changed,
-    /// A check the user asked for finished.
-    ManualResult(UpdateStatus),
+    /// A check the user asked for finished; the answer belongs to the window that asked, focused
+    /// or not (the dialog waits there until the user comes back).
+    ManualResult(Box<UpdateStatus>, AnyWindowHandle),
 }
 
 /// The update state shared by all windows.
@@ -68,6 +70,8 @@ pub struct UpdateHub {
     notices: Notices,
     status: Option<UpdateStatus>,
     checking: bool,
+    /// Windows that asked and wait for the answer (several can ask during one check).
+    askers: Vec<AnyWindowHandle>,
     startup_done: bool,
 }
 
@@ -84,6 +88,7 @@ impl UpdateHub {
             notices,
             status,
             checking: false,
+            askers: Vec::new(),
             startup_done: false,
         }
     }
@@ -101,8 +106,14 @@ impl UpdateHub {
             .filter(|s| is_newer_available(s, CURRENT_VERSION))
     }
 
-    /// Runs a check off the UI thread. `manual`: the user asked, so the answer is shown.
-    fn check(&mut self, manual: bool, cx: &mut Context<Self>) {
+    /// Runs a check off the UI thread. `asker`: the window of the user who asked, which gets the
+    /// answer (`None`: an automatic check, silent unless an update exists).
+    fn check(&mut self, asker: Option<AnyWindowHandle>, cx: &mut Context<Self>) {
+        if let Some(asker) = asker {
+            if !self.askers.contains(&asker) {
+                self.askers.push(asker);
+            }
+        }
         if self.checking {
             return;
         }
@@ -134,8 +145,8 @@ impl UpdateHub {
                 }
                 this.save();
                 cx.emit(HubEvent::Changed);
-                if manual {
-                    cx.emit(HubEvent::ManualResult(status));
+                for asker in std::mem::take(&mut this.askers) {
+                    cx.emit(HubEvent::ManualResult(Box::new(status.clone()), asker));
                 }
                 cx.notify();
             });
@@ -152,7 +163,7 @@ impl UpdateHub {
             &lector_config::update_state_file(),
             now_secs(),
         ) {
-            self.check(false, cx);
+            self.check(None, cx);
         }
     }
 
@@ -267,7 +278,9 @@ impl Render for UpdateDialog {
                                         ButtonStyle::Subtle
                                     })
                                     .on_click(move |_, _, cx| match &action {
-                                        UpdateButtonAction::OpenUrl(url) => cx.open_url(url),
+                                        UpdateButtonAction::OpenUrl(url) => {
+                                            cx.open_url(&crate::update_model::safe_release_url(url))
+                                        }
                                         UpdateButtonAction::Copy(text) => cx.write_to_clipboard(
                                             ClipboardItem::new_string(text.clone()),
                                         ),
@@ -306,7 +319,7 @@ impl FirstRunPrompt {
             }
             hub.save();
             if turn_on == Some(true) {
-                hub.check(false, cx);
+                hub.check(None, cx);
             }
         });
         cx.emit(DismissEvent);
@@ -582,6 +595,11 @@ impl Render for UpdateStatusItem {
 /// the Help menu works on the welcome screen).
 pub fn init(cx: &mut App) {
     let hub = cx.new(|_| UpdateHub::new());
+    install(cx, hub);
+}
+
+/// [`init`] with a given hub (tests).
+fn install(cx: &mut App, hub: Entity<UpdateHub>) {
     cx.observe_new(move |ws: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -604,9 +622,9 @@ pub fn init(cx: &mut App) {
             window,
             move |ws, hub, event: &HubEvent, window, cx| {
                 sync_on_event(ws, cx);
-                if let HubEvent::ManualResult(status) = event {
-                    // Only the focused window shows the answer.
-                    if window.is_window_active() {
+                if let HubEvent::ManualResult(status, asker) = event {
+                    // The window that asked shows the answer, even if another one has focus now.
+                    if *asker == window.window_handle() {
                         let status = status.clone();
                         ws.modal_layer().update(cx, |layer, cx| {
                             let dialog = cx.new(|cx| UpdateDialog::new(&status, cx));
@@ -638,16 +656,17 @@ pub fn init(cx: &mut App) {
 
 fn register_actions(ws: &mut Workspace, hub: &Entity<UpdateHub>) {
     let h = hub.clone();
-    ws.register_action(move |ws, _: &ws_actions::CheckForUpdates, _, cx| {
+    ws.register_action(move |ws, _: &ws_actions::CheckForUpdates, window, cx| {
         ws.show_toast("Checking for updates\u{2026}", cx);
-        h.update(cx, |h, cx| h.check(true, cx));
+        let asker = window.window_handle();
+        h.update(cx, |h, cx| h.check(Some(asker), cx));
     });
     let h = hub.clone();
     ws.register_action(move |ws, _: &ws_actions::ToggleAutoUpdateCheck, _, cx| {
         let on = h.update(cx, |h, cx| {
             let on = h.toggle_auto(cx);
             if on {
-                h.check(false, cx);
+                h.check(None, cx);
             }
             on
         });
@@ -706,5 +725,70 @@ fn startup_notices(
                 cx,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use lector_theme::{Appearance, ThemeRegistry};
+    use lector_ui::theme::{ThemeMode, ThemeState};
+
+    fn window_with_workspace<'a>(
+        cx: &'a mut TestAppContext,
+        dir: &std::path::Path,
+    ) -> (Entity<Workspace>, &'a mut gpui::VisualTestContext) {
+        let mut settings = lector_config::Settings::default();
+        settings.lsp.enabled = false;
+        settings.session.restore = false;
+        let project = lector_workspace::Project::open(dir, settings).expect("project");
+        cx.add_window_view(|window, cx| Workspace::new(project, window, cx))
+    }
+
+    /// The answer to "Check for Updates" appears in the window that asked, whichever window has
+    /// focus when the check finishes; other windows stay quiet.
+    #[gpui::test]
+    fn manual_result_goes_to_the_asking_window(cx: &mut TestAppContext) {
+        std::env::set_var("LECTOR_NO_NOTICES", "1");
+        cx.update(|cx: &mut App| {
+            ThemeState::init(cx, ThemeRegistry::new(), ThemeMode::Dark, Appearance::Dark);
+            cx.set_global(lector_ui::code_view::EditorSettings::default());
+            cx.set_global(AppSettings {
+                settings: std::sync::Arc::new(lector_config::Settings::default()),
+                warnings: Default::default(),
+            });
+        });
+        let hub = cx.new(|_| UpdateHub {
+            notices: Notices::default(),
+            status: None,
+            checking: false,
+            askers: Vec::new(),
+            startup_done: true,
+        });
+        cx.update(|cx| install(cx, hub.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let mut base_b = cx.clone();
+        let (ws_a, cx_a) = window_with_workspace(cx, dir.path());
+        let asker = cx_a.update(|window, _| window.window_handle());
+        let (ws_b, cx_b) = window_with_workspace(&mut base_b, dir.path());
+        // Window B is the newest (focused) one; A asked.
+        let shows = |ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext| {
+            ws.read_with(cx, |ws, cx| {
+                ws.modal_layer()
+                    .read(cx)
+                    .active_modal::<UpdateDialog>()
+                    .is_some()
+            })
+        };
+        hub.update(cx_b, |_, cx| {
+            cx.emit(HubEvent::ManualResult(
+                Box::new(UpdateStatus::UpToDate),
+                asker,
+            ))
+        });
+        cx_b.run_until_parked();
+        assert!(!shows(&ws_b, cx_b), "the focused window did not ask");
+        assert!(shows(&ws_a, cx_a), "the asking window shows the answer");
     }
 }

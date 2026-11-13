@@ -257,14 +257,14 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     app.run(move |cx| {
         // On macOS `quit` ends in `[NSApp terminate:]`, which exits the process without
         // returning from `run`, so the clean shutdown is also recorded here (idempotent).
-        cx.on_app_quit(move |_| {
-            quit_session.end_clean();
-            // Every child Lector started (git, language servers, agents, terminals): TERM to
-            // each process tree, KILL after the grace period (see lector-process).
+        // Order: the other quit hooks first (sessions saved, terminals killed, askpass server
+        // removed), then every child process tree is stopped (TERM, KILL after the grace
+        // period; returns as soon as they are gone, see lector-process), and the clean-exit
+        // marker last: a hang or crash before it still counts as an abnormal session.
+        lector_ui::startup::on_quit_last(cx, move || {
             lector_process::Supervisor::global().shutdown(std::time::Duration::from_millis(1500));
-            async {}
-        })
-        .detach();
+            quit_session.end_clean();
+        });
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(urls) = open_rx.next().await {

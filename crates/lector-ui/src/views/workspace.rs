@@ -42,7 +42,7 @@ pub use editing::quit_with_prompts;
 use integration::Integration;
 pub use integration::TabRestorer;
 pub use regions::Region;
-pub use undo_toast::{ToastAction, UNDO_TOAST_DURATION};
+pub use undo_toast::{ToastAction, ToastLevel, UNDO_TOAST_DURATION};
 
 /// Per-file facts shown in the status bar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -185,6 +185,7 @@ pub struct Workspace {
     window_title: String,
     lsp_status: SharedString,
     toast: Option<(SharedString, u64)>,
+    toast_level: ToastLevel,
     action_toast: Option<undo_toast::ActionToast>,
     lsp_banner: Option<lsp_banner::LspBanner>,
     has_folder: bool,
@@ -193,6 +194,9 @@ pub struct Workspace {
     /// Uncommitted-changes summary from lector-ui-git (welcome view and status-bar chip).
     review_hint: Option<ReviewHint>,
     title_drag_pending: bool,
+    /// Until then a keyboard close-window request is swallowed once (see
+    /// [`Workspace::guard_close_window`]).
+    close_window_guard: Option<std::time::Instant>,
     chrome_menu: crate::components::ContextMenuState,
     lsp_popover: crate::components::popover::Popover<super::lsp_status::LspStatusPopover>,
     /// A panel below the editor area (the Terminal panel), set by an extension crate.
@@ -291,6 +295,7 @@ impl Workspace {
             window_title: String::new(),
             lsp_status: "LSP: off".into(),
             toast: None,
+            toast_level: ToastLevel::Success,
             action_toast: None,
             lsp_banner: None,
             has_folder,
@@ -298,6 +303,7 @@ impl Workspace {
             welcome: None,
             review_hint: None,
             title_drag_pending: false,
+            close_window_guard: None,
             chrome_menu: Default::default(),
             lsp_popover: Default::default(),
             bottom_panel: None,
@@ -314,10 +320,38 @@ impl Workspace {
         this
     }
 
+    /// Swallows the next Close Window request that arrives within `duration` (with a hint).
+    /// Used when a shortcut just closed something (the last terminal) and key repeat or a
+    /// second press would otherwise close the whole window.
+    pub fn guard_close_window(&mut self, duration: std::time::Duration) {
+        self.close_window_guard = Some(std::time::Instant::now() + duration);
+    }
+
+    /// Whether a Close Window request right now is swallowed by [`Self::guard_close_window`]
+    /// (consumes the guard).
+    pub(crate) fn close_window_guarded(&mut self) -> bool {
+        match self.close_window_guard.take() {
+            Some(until) => std::time::Instant::now() < until,
+            None => false,
+        }
+    }
+
     /// Shows a short message ("Permalink copied") above the status bar for
     /// a few seconds.
     pub fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.show_toast_level(message, ToastLevel::Success, cx);
+    }
+
+    /// [`Self::show_toast`] with the icon of `level`: a check only for success, an info mark
+    /// for notes ("nothing to do"), a warning for partial results.
+    pub fn show_toast_level(
+        &mut self,
+        message: impl Into<SharedString>,
+        level: ToastLevel,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.toast.as_ref().map(|t| t.1 + 1).unwrap_or(0);
+        self.toast_level = level;
         self.toast = Some((message.into(), id));
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -336,6 +370,7 @@ impl Workspace {
 
     fn render_toast(&self, cx: &App) -> Option<impl IntoElement> {
         let (message, _) = self.toast.clone()?;
+        let level = self.toast_level;
         let ui = &cx.theme().ui;
         Some(
             div()
@@ -355,9 +390,9 @@ impl Workspace {
                     h_flex()
                         .gap(px(6.))
                         .child(
-                            Icon::new(IconName::CircleCheck)
+                            Icon::new(level.icon())
                                 .size(IconSize::Small)
-                                .color(ui.accent.hsla()),
+                                .color(level.color(ui)),
                         )
                         .child(message),
                 ),
@@ -812,17 +847,32 @@ impl Workspace {
 
     /// Shows (or, when already shown, hides) a sidebar panel.
     pub fn show_panel(&mut self, panel: SidebarPanel, window: &mut Window, cx: &mut Context<Self>) {
-        let already = self.sidebar_visible && self.sidebar.read(cx).active_panel() == panel;
-        if already && panel != SidebarPanel::Files {
+        if self.is_panel_shown(panel, cx) && panel != SidebarPanel::Files {
             self.sidebar_visible = false;
+            cx.notify();
         } else {
-            self.sidebar_visible = true;
-            self.sidebar
-                .update(cx, |s, cx| s.set_active_panel(panel, cx));
-            let focus = self.sidebar.focus_handle(cx);
-            window.focus(&focus);
+            self.reveal_panel(panel, window, cx);
         }
+    }
+
+    /// Shows a sidebar panel and focuses it; never hides it (unlike [`Self::show_panel`]).
+    pub fn reveal_panel(
+        &mut self,
+        panel: SidebarPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_visible = true;
+        self.sidebar
+            .update(cx, |s, cx| s.set_active_panel(panel, cx));
+        let focus = self.sidebar.focus_handle(cx);
+        window.focus(&focus);
         cx.notify();
+    }
+
+    /// Whether the sidebar is visible and showing `panel`.
+    pub fn is_panel_shown(&self, panel: SidebarPanel, cx: &App) -> bool {
+        self.sidebar_visible && self.sidebar.read(cx).active_panel() == panel
     }
 
     fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {

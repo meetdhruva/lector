@@ -27,4 +27,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+gpui = { version = "0.2.2", features = ["test-support"] }
+lector-theme.workspace = true
+lector-ui = { workspace = true, features = ["test-support"] }
 lector-config = { workspace = true, features = ["test-support"] }

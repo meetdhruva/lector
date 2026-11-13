@@ -20,7 +20,6 @@ use gpui::{
     Window,
 };
 use lector_ui::actions::git as git_actions;
-use lector_ui::actions::workspace as ws_actions;
 use lector_ui::code_view::{
     CodeSource, CodeView, CodeViewEvent, Pos, RowBackground, RowWidget, WidgetAnchor,
 };
@@ -555,13 +554,13 @@ impl MergeEditor {
                             cx,
                         )
                     });
-                    // `ShowChanges` toggles: only send it when the panel is hidden.
-                    let showing = ws.read(cx).is_sidebar_visible()
-                        && ws.read(cx).sidebar().read(cx).active_panel()
-                            == lector_ui::views::sidebar::SidebarPanel::Changes;
-                    if !showing {
-                        window.dispatch_action(Box::new(ws_actions::ShowChanges), cx);
-                    }
+                    ws.update(cx, |ws, cx| {
+                        ws.reveal_panel(
+                            lector_ui::views::sidebar::SidebarPanel::Changes,
+                            window,
+                            cx,
+                        )
+                    });
                 }
             }
             // Close this merge tab (it is clean after the save; if the Result was

@@ -72,8 +72,15 @@ pub(crate) fn parse_osc7(payload: &[u8], local_host: Option<&str>) -> Option<Pat
     // Drop a query or fragment, which file URIs should not carry.
     let raw = raw.split(|&b| b == b'?' || b == b'#').next().unwrap_or(raw);
     let decoded = percent_decode(raw)?;
-    if decoded.contains(&0) {
+    // Control characters (C0, DEL and, in UTF-8, C1) have no business in a directory
+    // name and would reach tab titles and status bars; refuse the whole report.
+    if decoded.iter().any(|&b| b < 0x20 || b == 0x7f) {
         return None;
+    }
+    if let Ok(text) = std::str::from_utf8(&decoded) {
+        if text.chars().any(|c| c.is_control() || is_bidi_control(c)) {
+            return None;
+        }
     }
     bytes_to_path(decoded)
 }
@@ -123,19 +130,43 @@ fn bytes_to_path(bytes: Vec<u8>) -> Option<PathBuf> {
     Some(PathBuf::from(s.replace('/', "\\")))
 }
 
+/// Longest working-directory name (in characters) returned by [`cwd_display_name`].
+pub const MAX_CWD_NAME_CHARS: usize = 64;
+
+/// Bidirectional embedding/override/isolate controls and marks.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}')
+}
+
 /// Sanitises a title set by a program: removes control characters and
 /// bidirectional overrides, trims, and caps it at [`MAX_TITLE_CHARS`].
 pub fn sanitize_title(title: &str) -> String {
     title
         .chars()
-        .filter(|&c| {
-            !c.is_control()
-                && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
-        })
+        .filter(|&c| !c.is_control() && !is_bidi_control(c))
         .take(MAX_TITLE_CHARS)
         .collect::<String>()
         .trim()
         .to_owned()
+}
+
+/// The folder name of a working directory for tab titles and labels: the last path
+/// component, sanitised like a title ([`sanitize_title`]) and capped at
+/// [`MAX_CWD_NAME_CHARS`] characters (an ellipsis marks a cut). The directory may come
+/// from a program's OSC 7 report, so it is never shown raw. `None` when the path has no
+/// usable final component (`/`, empty, or nothing left after sanitising).
+pub fn cwd_display_name(cwd: &std::path::Path) -> Option<String> {
+    let name = cwd.file_name()?.to_string_lossy();
+    let clean = sanitize_title(&name);
+    if clean.is_empty() {
+        return None;
+    }
+    if clean.chars().count() <= MAX_CWD_NAME_CHARS {
+        return Some(clean);
+    }
+    let mut cut: String = clean.chars().take(MAX_CWD_NAME_CHARS - 1).collect();
+    cut.push('\u{2026}');
+    Some(cut)
 }
 
 /// This machine's host name, used to accept OSC 7 reports.
@@ -201,6 +232,12 @@ mod tests {
         assert_eq!(parse_osc7(b"7;http://h/x", None), None);
         assert_eq!(parse_osc7(b"7;file:///x%zz", None), None);
         assert_eq!(parse_osc7(b"7;file:///x%00y", None), None);
+        // Control characters and bidi overrides are refused, raw or percent-encoded.
+        assert_eq!(parse_osc7(b"7;file:///x%1b%5b31my", None), None);
+        assert_eq!(parse_osc7(b"7;file:///x\x07y", None), None);
+        assert_eq!(parse_osc7(b"7;file:///x%7Fy", None), None);
+        assert_eq!(parse_osc7(b"7;file:///x%C2%9By", None), None);
+        assert_eq!(parse_osc7(b"7;file:///x%E2%80%AEy", None), None);
         assert_eq!(
             parse_osc7(b"7;file:///caf%C3%A9", None),
             Some(PathBuf::from("/caf\u{e9}"))
@@ -214,5 +251,25 @@ mod tests {
             "vim [31mmain.rs"
         );
         assert_eq!(sanitize_title(&"x".repeat(1000)).len(), MAX_TITLE_CHARS);
+    }
+
+    #[test]
+    fn cwd_names_are_sanitised_and_capped() {
+        use std::path::Path;
+        assert_eq!(
+            cwd_display_name(Path::new("/home/ann/src")).as_deref(),
+            Some("src")
+        );
+        assert_eq!(cwd_display_name(Path::new("/")), None);
+        assert_eq!(cwd_display_name(Path::new("")), None);
+        assert_eq!(
+            cwd_display_name(Path::new("/x/a\u{202e}b\u{1b}c")).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(cwd_display_name(Path::new("/x/\u{7}")), None);
+        let long = format!("/x/{}", "d".repeat(500));
+        let name = cwd_display_name(Path::new(&long)).unwrap_or_default();
+        assert_eq!(name.chars().count(), MAX_CWD_NAME_CHARS);
+        assert!(name.ends_with('\u{2026}'));
     }
 }

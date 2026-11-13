@@ -13,7 +13,7 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 
 ![Lector reading code](docs/screenshots/reader-dark.png)
 
-## Features (v0.6)
+## Features (v0.7)
 
 **Reading**
 - Native, GPU-rendered UI (GPUI) with embedded JetBrains Mono and Inter fonts
@@ -37,6 +37,10 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 - Permalinks for GitHub, GitLab, Bitbucket, Gitea/Codeberg, sourcehut
 - Stage, unstage and discard files, hunks or selected lines; commit composer with amend,
   sign-off and hook output
+- Sync with the remote: fetch, pull (fast-forward or rebase) and push with progress and Cancel,
+  publish branch, force-with-lease only behind a confirmation; credential and host-key prompts
+  appear in Lector. Create, switch, rename and delete branches (a dirty tree is never carried
+  over silently); stash, apply, pop and drop
 - Merge conflicts: inline accept actions, three-way merge editor, Continue/Abort for
   merges, rebases, cherry-picks and reverts
 
@@ -52,6 +56,12 @@ fix, rename a symbol, resolve a conflict. Lector only writes when you explicitly
 **Agents** — drive Gemini CLI, Claude Code, Codex or any Agent Client Protocol
 agent from the Agent panel. Each turn is checkpointed, reviewable as a diff and undoable;
 edits show up live in open tabs; review comments go back to the agent in one click.
+Select code and press `Ctrl/Cmd+I` to ask for an **inline edit**: the change appears as a diff in
+the file's own tab, accepted or rejected per hunk, and nothing is written until you save.
+
+**Integrated terminal** — a panel with tabs and splits, "Open in Terminal" from the file tree
+and tabs, clickable links, find, and command marks where the shell supports them. Sessions
+restore lazily. Agents have no access to it.
 
 **Pull requests** — review GitHub and GitLab pull requests locally: inline threads, drafts,
 reply and resolve, Approve / Request changes. Pull requests are fetched into Lector's own
@@ -93,8 +103,17 @@ Get the latest build from [GitHub Releases](https://github.com/meetdhruva/lector
 | macOS 11+ (universal) | `.dmg` | `.zip` |
 | Linux x86_64 / ARM64 | `.deb`, `.rpm` | `.AppImage`, `.tar.gz` |
 
-Builds are not code-signed yet. On macOS, right-click Lector.app → *Open* on first launch;
-on Windows, SmartScreen may ask you to confirm. Every release includes `SHA256SUMS.txt`.
+Builds are not code-signed yet: the release workflow can sign and notarize, but that needs
+certificates the maintainer has not added, and each release's notes state what was actually signed.
+On macOS, right-click Lector.app → *Open* on first launch; on Windows, SmartScreen may ask you to
+confirm. Every release includes `SHA256SUMS.txt`.
+
+Homebrew, winget and Flatpak: manifests are included in the repository (`packaging/`) and attached
+to each release, **but not yet published** to those package managers, so `brew install`,
+`winget install` and Flathub do not work yet.
+
+Lector can tell you when a new release exists (Help → Check for Updates; the automatic check is
+off until you turn it on). It never downloads or installs anything itself.
 
 **Portable mode:** if a `lector-data` folder exists next to the executable, Lector keeps all
 settings and state there (the Windows portable zip ships with it).
@@ -137,6 +156,14 @@ lector [PATH[:LINE[:COL]]] [--theme NAME]
 | Next / previous hunk (diff) | `alt-n` / `alt-p` | same |
 | Mark file viewed (review) | `v` | `v` |
 | Toggle blame | `cmd-alt-b` | `ctrl-alt-b` |
+| Trigger completion / signature help | `ctrl-space` / `ctrl-shift-space` | same |
+| Edit selection with the agent (inline) | `cmd-i` | `ctrl-i` |
+| Accept / reject inline hunk | `alt-y` / `alt-n` | same |
+| Sync / fetch / pull / push (chords) | `cmd-k y` / `t` / `l` / `p` | `ctrl-k y` / `t` / `l` / `p` |
+| New branch / switch branch / stash | `cmd-k n` / `b` / `z` | `ctrl-k n` / `b` / `z` |
+| Show / hide terminal | `` ctrl-` `` | same |
+| New terminal / split | `` ctrl-shift-` `` / `cmd-\` | `` ctrl-shift-` `` / `ctrl-shift-5` |
+| Terminal: find / clear / close tab | `cmd-f` / `cmd-k` / `cmd-w` | `ctrl-shift-f` / `ctrl-shift-k` / `ctrl-shift-w` |
 
 Settings live in `settings.toml` and `keymap.toml` in Lector's config directory
 (run *Open Settings* from the command palette). A project can override settings in
@@ -252,7 +279,9 @@ synchronous, and reusable on its own:
 | `lector-agent` | agent sessions over the Agent Client Protocol |
 | `lector-forge` | GitHub and GitLab pull requests |
 | `lector-cli`, `lector-mcp` | command line and MCP server over the same core |
-| `lector-ui`, `lector-ui-git`, `lector-ui-agent` | GPUI shell, widgets and views |
+| `lector-process` | process supervisor: whole process trees, streaming, cancel, askpass |
+| `lector-terminal` | PTY, VT emulation, scrollback, shell integration (no UI) |
+| `lector-ui`, `lector-ui-git`, `lector-ui-agent`, `lector-ui-terminal` | GPUI shell, widgets and views |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements, and
@@ -267,6 +296,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
 | ✅ 0.4 | Headless core and command API, undo/Activity log, review queue, moved code, accessibility |
 | ✅ 0.5 | Agents (ACP), per-turn checkpoints, CLI and MCP server |
 | ✅ 0.6 | Pull request review (GitHub, GitLab), comments that survive rebases |
+| ✅ 0.7 | Sync with the remote, branches and stash, integrated terminal, completion, inline agent edit, signing-ready releases |
 | next | Screen readers (needs a GPUI version with AccessKit), WASM plugins, stacked changes |
 
 ## License

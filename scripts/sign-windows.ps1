@@ -9,7 +9,8 @@
 #                         AZURE_CLIENT_SECRET (a service principal with the "Artifact Signing
 #                         Certificate Profile Signer" role), AZURE_SIGNING_ENDPOINT,
 #                         AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE.
-#                         ARTIFACT_SIGNING_CLIENT_VERSION overrides the pinned dlib NuGet version.
+#                         ARTIFACT_SIGNING_CLIENT_VERSION overrides the pinned dlib NuGet version;
+#                         ARTIFACT_SIGNING_CLIENT_SHA256 pins the downloaded package by hash.
 #   SIGN_PROVIDER=pfx     A certificate file: WINDOWS_CERTIFICATE_PFX_BASE64 + WINDOWS_CERTIFICATE_PASSWORD.
 #   Both use SHA-256 and an RFC 3161 timestamp (WINDOWS_TIMESTAMP_URL, default per provider).
 # -Verify runs `signtool verify /pa /v` on every file instead of signing.
@@ -80,6 +81,17 @@ switch ($provider) {
       $version = if ($env:ARTIFACT_SIGNING_CLIENT_VERSION) { $env:ARTIFACT_SIGNING_CLIENT_VERSION } else { $DefaultDlibVersion }
       $pkg = Join-Path $work "client.zip"
       Invoke-WebRequest -UseBasicParsing -Uri "https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client/$version" -OutFile $pkg
+      # The package runs inside signtool next to the signing credentials: pin it by hash when the
+      # maintainer recorded one (workflow variable ARTIFACT_SIGNING_CLIENT_SHA256, docs/RELEASING.md).
+      $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $pkg).Hash.ToLowerInvariant()
+      Write-Host "Microsoft.ArtifactSigning.Client $version sha256: $actual"
+      if ($env:ARTIFACT_SIGNING_CLIENT_SHA256) {
+        if ($actual -ne $env:ARTIFACT_SIGNING_CLIENT_SHA256.Trim().ToLowerInvariant()) {
+          throw "Microsoft.ArtifactSigning.Client $version does not match ARTIFACT_SIGNING_CLIENT_SHA256"
+        }
+      } else {
+        Write-Host "::warning::ARTIFACT_SIGNING_CLIENT_SHA256 is not set: the signing client package was not verified against a pinned hash."
+      }
       Expand-Archive -Path $pkg -DestinationPath (Join-Path $work "client") -Force
       $dlib = Get-ChildItem -Path (Join-Path $work "client") -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
         Where-Object { $_.FullName -match '[\\/]x64[\\/]' } | Select-Object -First 1
@@ -106,6 +118,9 @@ switch ($provider) {
     $pfx = Join-Path $work "certificate.pfx"
     [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
     $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+    # signtool takes the password on its command line (/p): mask it in the log first, in case the
+    # command line is echoed on failure. (GitHub already masks the secret itself.)
+    Write-Host "::add-mask::$($env:WINDOWS_CERTIFICATE_PASSWORD)"
     try {
       foreach ($f in $resolved) {
         Write-Host "signing $(Split-Path $f -Leaf) (certificate file)"

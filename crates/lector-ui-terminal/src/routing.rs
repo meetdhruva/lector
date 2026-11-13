@@ -64,16 +64,37 @@ pub fn route_file(
     }
 }
 
-/// Whether pasting `text` needs a confirmation first: it contains a line break (the shell
-/// would run each line), the program did not enable bracketed paste (which would let it see
-/// the paste as one block), the setting is on, and the user did not turn the question off.
+/// Whether pasting `text` needs a confirmation first: the core says so (no bracketed paste and
+/// a line break or a control character in the text), the setting is on, and the user did not
+/// turn the question off for this run.
 pub fn paste_needs_confirmation(
     text: &str,
     bracketed_paste: bool,
     setting: bool,
     suppressed: bool,
 ) -> bool {
-    setting && !suppressed && !bracketed_paste && text.contains(['\n', '\r'])
+    setting && !suppressed && lector_terminal::paste_needs_confirmation(text, bracketed_paste)
+}
+
+/// Title and detail of the paste confirmation for `text`.
+pub fn paste_prompt(text: &str) -> (String, &'static str) {
+    if text.contains(['\n', '\r']) {
+        (
+            format!(
+                "Paste {} lines into the terminal?",
+                text.lines().count().max(2)
+            ),
+            "The program did not enable bracketed paste, so the shell may run each line as \
+             a command. (Turn this question off with terminal.confirm_multiline_paste.)",
+        )
+    } else {
+        (
+            "Paste text with control characters into the terminal?".to_owned(),
+            "The clipboard holds control characters. Lector removes them before pasting, but \
+             check where this text came from. (Turn this question off with \
+             terminal.confirm_multiline_paste.)",
+        )
+    }
 }
 
 #[cfg(test)]
@@ -166,5 +187,12 @@ mod tests {
             !paste_needs_confirmation("a\nb", false, true, true),
             "suppressed"
         );
+        // Control characters ask even without a line break; tab alone does not.
+        assert!(paste_needs_confirmation("ls\u{3}", false, true, false));
+        assert!(paste_needs_confirmation("a\u{1b}[31mb", false, true, false));
+        assert!(!paste_needs_confirmation("a\tb", false, true, false));
+        assert!(!paste_needs_confirmation("a\u{3}b", true, true, false));
+        assert!(paste_prompt("a\nb").0.contains("lines"));
+        assert!(paste_prompt("a\u{3}").0.contains("control"));
     }
 }

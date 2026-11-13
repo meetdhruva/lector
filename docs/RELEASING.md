@@ -4,10 +4,13 @@ Releases are built entirely by GitHub Actions (`.github/workflows/release.yml`).
 
 ## Cutting a release
 
-1. Bump `version` in `[workspace.package]` of the root `Cargo.toml`, run `cargo check`
-   (updates `Cargo.lock`), and add a `## <version> — <date>` section to `CHANGELOG.md`.
-   Update the `<releases>` list in `packaging/linux/io.github.meetdhruva.Lector.metainfo.xml`
-   (each release has a `<url type="details">` to its GitHub release page).
+1. Bump `version` in `[workspace.package]` of the root `Cargo.toml`, run `cargo check -p lector-cli`
+   (updates `Cargo.lock`), and turn the `## <version> — unreleased` heading in `CHANGELOG.md` into
+   `## <version> — <date>`. Update the `<releases>` list in
+   `packaging/linux/io.github.meetdhruva.Lector.metainfo.xml` (each release has a `<url type="details">` to its
+   GitHub release page and the release date). The winget, cask and Flatpak templates take the version from the
+   release job and need no edit. Before the first signed release, set up the `release` environment
+   ([Trust boundaries](#trust-boundaries-jobs-the-release-environment-pinned-tools)).
 2. Commit, push to `main`, wait for CI to pass.
 3. Tag and push: `git tag -a v0.2.0 -m "Lector 0.2.0" && git push origin v0.2.0`.
    Alternatively run **Actions → Release → Run workflow** with the tag; it is created at the
@@ -42,7 +45,12 @@ Do this once after adding or changing any signing secret.
 | macOS universal | macos-latest (arm64 + x86_64 cross, `lipo`) | `.dmg`, `.zip` (`Lector.app`: Developer ID signed + notarized when configured, otherwise ad-hoc signed) |
 | Windows x64 | windows-latest | Inno Setup `setup.exe`, WiX `.msi`, portable `.zip` (Authenticode-signed when configured) |
 | Windows arm64 | windows-latest (cross-compiled) | same |
-| Checksums and publish | ubuntu-latest | `SHA256SUMS.txt` (+ `.minisig`), `lector.rb`, `Lector-<v>-winget-manifests.zip`, `io.github.meetdhruva.Lector.yml`, the GitHub release |
+| Checksums, sign checksums, publish | ubuntu-latest | `SHA256SUMS.txt` (+ `.minisig`), `lector.rb`, `Lector-<v>-winget-manifests.zip`, `io.github.meetdhruva.Lector.yml`, the GitHub release |
+
+Each platform is several jobs, split at the trust boundary (next section): `linux`/`macos`/`windows` build and package
+without secrets; `sign-linux`, `macos-package`, `sign-windows-binaries` and `sign-windows-installers` sign;
+`checksums` (no secrets), `sign-checksums` and `publish` finish. Intermediate artifacts are named `unsigned-*`,
+`macos-universal-binary`, `windows-bin-*`; the release files are the `dist-*` artifacts.
 
 Binaries use the `dist` profile (thin LTO, one codegen unit, stripped). Every artifact
 contains the licenses, `README.md`, `CHANGELOG.md` and `third-party/` notices, including
@@ -102,8 +110,40 @@ How the workflow decides: every job has a "Signing credentials" step that maps t
 and writes `enabled=true|false` (or `provider=azure|pfx|none`) as a step output; later steps test that output (GitHub
 does not expose secrets to `if:`). Signing is also off when the run is a dry run (see above). Third-party actions
 added for signing: none (plain scripts: `scripts/sign-macos.sh`, `sign-windows.ps1`, `sign-linux.sh`,
-`sign-checksums.sh`); the workflow's existing actions are pinned by major version tag, not by commit SHA (hardening
-to do, see [Known gaps](#known-gaps-and-things-not-tested)).
+`sign-checksums.sh`); every action in the workflow is pinned by full commit SHA (version in a trailing comment).
+
+### Trust boundaries: jobs, the `release` environment, pinned tools
+
+The workflow separates jobs that run downloaded code from jobs that hold secrets:
+
+* **Build and package jobs hold no secrets.** They run the Rust toolchain, `cargo-about`, `appimagetool`, `choco`,
+  WiX and the like. `appimagetool` is a tagged release (`APPIMAGETOOL_VERSION`) verified against a SHA-256 in the
+  workflow `env:` (to bump it, download the new assets, run `sha256sum`, update the three values).
+* **Signing and publishing jobs** (`sign-linux`, `macos-package`, `sign-windows-binaries`,
+  `sign-windows-installers`, `sign-checksums`, `publish`, `winget`) hold the secrets and run only this repository's
+  scripts, GitHub's own artifact actions, preinstalled tools and distribution packages (`minisign`, `rpm`). Two
+  exceptions run downloaded code next to credentials: the Azure signing client (a NuGet package signtool loads; pin
+  it by adding the repository **variable** `ARTIFACT_SIGNING_CLIENT_SHA256` with the hash that
+  `scripts/sign-windows.ps1` prints on a first run; without it the job warns) and `wingetcreate` (pinned release,
+  SHA-256 checked, in the `winget` job). `publish` also runs `softprops/action-gh-release`, pinned by SHA.
+* **Secrets go in an environment.** These jobs declare `environment: release` (`release-preview`, which never holds
+  secrets, when the run is a dry run that does not sign or publish, so previews never wait for an approval). One-time
+  setup for the maintainer:
+  1. Settings → Environments → **New environment** → `release`.
+  2. Enable **Required reviewers** (you, plus a second person when there is one), and restrict **Deployment branches
+     and tags** to `main` and `v*` tags.
+  3. Move every signing secret and token from Actions repository secrets into that environment's secrets (the
+     list is in the workflow header), and delete the repository-level copies. The `ARTIFACT_SIGNING_CLIENT_SHA256`
+     variable can live in the environment too.
+  4. A release then pauses at the first signing job until a reviewer approves; later signing jobs may ask again as
+     they are reached, and approving a "Waiting" list covers all jobs waiting at that moment.
+
+  The workflow still works with no environment, or one without protection rules: GitHub creates `release` on first
+  use and the jobs just run (secrets in repository settings are visible to them as before). The early update-key
+  check in `prepare` only sees a *repository* secret; with the secret in the environment it is skipped there and
+  `scripts/sign-checksums.sh` refuses the placeholder public key at the end of the run instead.
+* Passwords that end up on a command line (`security import -P`, `signtool /p`) are masked with `::add-mask::`
+  first.
 
 ### Accounts to open
 
@@ -122,8 +162,9 @@ Do not promise users that the warning disappears.
 
 ### Secrets to create
 
-GitHub → repository **Settings → Secrets and variables → Actions → New repository secret**. All optional;
-unset secrets simply leave that platform unsigned. (Hardening: protect the `v*` tag pattern and `release/**`
+GitHub → repository **Settings → Environments → `release` → Environment secrets** (preferred, see
+[Trust boundaries](#trust-boundaries-jobs-the-release-environment-pinned-tools)) or **Settings → Secrets and
+variables → Actions → New repository secret**. All optional; unset secrets simply leave that platform unsigned. (Hardening: protect the `v*` tag pattern and `release/**`
 branches with a ruleset so only maintainers can trigger runs that can read secrets.)
 
 **macOS** (needs all of the first two; the three `APPLE_API_*` enable notarization — without them the app is signed
@@ -321,7 +362,11 @@ signed run as an experiment: do the `dry_run` + `sign_dry_run` run first.
   and a signature made by that tool is a test fixture of the Rust verifier.
 * **Package managers**: the cask passes `ruby -c` only (no `brew audit`); the winget manifests validate against the
   1.6.0 schemas only; the Flatpak manifest was not built.
-* **Actions are pinned by version tag, not by commit SHA** (including the existing ones): resolve the SHAs and pin them
-  before handling real secrets. Downloaded tools (`appimagetool` continuous build, `wingetcreate` from aka.ms, the
-  Azure dlib from NuGet) are not checksum-pinned.
+* **Pinning**: actions are pinned by commit SHA (resolved with `git ls-remote` on the tags; the GitHub API was not
+  reachable, so check the trailing version comments on the next bump), `appimagetool` 1.9.1 and `wingetcreate` are
+  pinned by SHA-256 computed from the real release assets. The Azure signing client from NuGet could not be downloaded
+  where this was written, so its hash is not recorded: set `ARTIFACT_SIGNING_CLIENT_SHA256` (see above).
+* **Job split and environments** were checked by parsing the YAML and `shellcheck` on every bash step, not by running
+  them: the first real run (a `dry_run` + `sign_dry_run` run with the `release` environment configured) is the test of
+  the artifact hand-offs between the new jobs and of the approval flow.
 * Windows signing uses a client secret; federated (OIDC) credentials would avoid a long-lived secret.

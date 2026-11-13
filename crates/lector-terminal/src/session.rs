@@ -401,6 +401,14 @@ impl Terminal {
         self.write(bytes);
     }
 
+    /// Whether pasting `text` now should be confirmed first (see
+    /// [`crate::input::paste_needs_confirmation`]; uses the program's current bracketed-paste
+    /// mode). User settings are the caller's to apply on top.
+    pub fn paste_needs_confirmation(&self, text: &str) -> bool {
+        let bracketed = self.shared.emulator.lock().modes().bracketed_paste;
+        crate::input::paste_needs_confirmation(text, bracketed)
+    }
+
     /// Reports a mouse event to the program if its mouse mode wants it.
     /// Returns false when the UI should handle the event itself (selection, scrolling).
     pub fn send_mouse(&self, event: MouseEvent) -> bool {
@@ -449,6 +457,12 @@ impl Terminal {
             .cwd()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.initial_cwd.clone())
+    }
+
+    /// The cwd's folder name for tab titles, sanitised and capped (see
+    /// [`crate::cwd_display_name`]); never show the raw OSC 7 path name.
+    pub fn cwd_display_name(&self) -> Option<String> {
+        crate::osc::cwd_display_name(&self.cwd())
     }
 
     /// Resolves a link target against the session's cwd (see [`resolve_link`]).
