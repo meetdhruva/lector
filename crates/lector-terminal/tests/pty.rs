@@ -451,19 +451,8 @@ mod windows {
         let term = Terminal::spawn(o, None).unwrap_or_else(|e| panic!("spawn: {e}"));
         term.send_text("for /L %i in (1,1,20000) do @echo flood line %i\r");
         term.send_text("echo after-flood\r");
-        // A canonical-mode tty silently drops typed-ahead input once its small queue is
-        // full, so the first marker command may be lost by the kernel while the shell is
-        // busy. That is tty behaviour, not Lector's: keep asking until the shell answers.
-        let mut last_ask = Instant::now();
         wait_until_for(&term, "after-flood", FLOOD_DEADLINE, |e| {
-            if has_line(e, "after-flood") {
-                return true;
-            }
-            if last_ask.elapsed() > Duration::from_secs(2) {
-                last_ask = Instant::now();
-                term.send_text("\recho after-flood\r");
-            }
-            false
+            has_line(e, "after-flood")
         });
         assert!(term.lock().history_size() <= 2000);
     }
