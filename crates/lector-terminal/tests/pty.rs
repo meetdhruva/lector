@@ -7,8 +7,6 @@ use std::time::{Duration, Instant};
 use lector_terminal::{Emulator, ShellProfile, SpawnOptions, TermSize, Terminal, TerminalEvent};
 
 const DEADLINE: Duration = Duration::from_secs(30);
-/// How often the flood test re-sends its marker command (override to exercise the path).
-const RESEND_MS: u64 = 2000;
 /// The flood tests move megabytes through the PTY; slow CI runners need more time.
 const FLOOD_DEADLINE: Duration = Duration::from_secs(180);
 
@@ -264,7 +262,7 @@ mod unix {
                 let screen = term.lock().screen_text();
                 panic!("timed out waiting for after-flood; screen:\n{screen}");
             }
-            if last_ask.elapsed() > Duration::from_millis(RESEND_MS) {
+            if last_ask.elapsed() > Duration::from_secs(2) {
                 last_ask = Instant::now();
                 term.send_text("\recho after-flood\r");
             }
