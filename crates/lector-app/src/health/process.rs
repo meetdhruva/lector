@@ -179,11 +179,12 @@ mod platform {
         None
     }
 
-    /// `tasklist /FO CSV /NH` prints `"image.exe","1234","Console","1","12,345 K"`, or an
-    /// informational sentence when nothing matches.
+    /// `tasklist /FO CSV /NH` prints one `"image.exe","1234","Console","1","12,345 K"` line
+    /// per process.
     pub(super) fn liveness(pid: u32, _start_token: Option<&str>, exe: &str) -> Liveness {
-        let filter = format!("PID eq {pid}");
-        match run_helper("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"]) {
+        // The whole list, not a `/FI "PID eq n"` filter: tasklist rejects filter values it
+        // considers out of range with an error, which would read as "cannot tell".
+        match run_helper("tasklist", &["/FO", "CSV", "/NH"]) {
             None => Liveness::Unknown,
             Some(Err(())) => Liveness::Unknown,
             Some(Ok(text)) => {

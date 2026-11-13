@@ -12,7 +12,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--script", required=True)
 ap.add_argument("--log", required=True)
 args = ap.parse_args()
-script = json.load(open(args.script))
+script = json.load(open(args.script, encoding="utf-8"))
 inp, out = sys.stdin.buffer, sys.stdout.buffer
 lock = threading.Lock()
 pending = {}
@@ -20,7 +20,7 @@ pending = {}
 
 def log(entry):
     with lock:
-        with open(args.log, "a") as f:
+        with open(args.log, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
 
