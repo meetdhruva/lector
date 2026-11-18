@@ -8,10 +8,14 @@
 //! hook_output, alternatives, .. })`.
 //!
 //! Undo (journal): pull → `git.restore_ref` (the branch goes back to where it was, `reset
-//! --keep`); branch create / delete / rename / set upstream / switch → their inverse;
-//! stash drop → `git.stash_store`; stash push → `git.stash_pop`; stash apply / pop →
-//! the files and index entries they touched, backed up in the shadow repo first (plus the
-//! stash entry for pop). Fetch and push are journaled but not undoable.
+//! --keep` keeping staged changes; refused before writing when the move would touch files
+//! with local changes); branch create / delete / rename / set upstream / switch → their
+//! inverse; stash drop → `git.stash_store`; stash push → `git.stash_pop` with
+//! `restore_index` (staged changes come back staged, or the undo is refused and the stash
+//! kept); stash apply / pop → the files and index entries they can touch (the stash's paths
+//! plus rename destinations), backed up in the shadow repo first (plus the stash entry for
+//! pop). A stash apply that fails puts back what git changed before returning the error.
+//! Fetch and push are journaled but not undoable.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -21,13 +25,13 @@ use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, bail};
 use lector_git::{
-    CancelToken, FetchOptions, Oid, PullMode, PullStatus, PushOptions, Repo, StashPushOptions,
-    SyncEvent, SyncOptions,
+    CancelToken, FetchOptions, Oid, PullMode, PullStatus, PushOptions, Repo, StashApplyOptions,
+    StashPushOptions, StatusEntry, SyncEvent, SyncOptions, APPLY_WITHOUT_INDEX,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::{json, Value};
 
-use super::git_write::{backup_files, backup_index, files_undo, index_undo, needs_repo};
+use super::git_write::{backup_files, backup_index, files_undo, index_undo, needs_repo, Backup};
 use super::schema::{object, prop};
 use super::{
     CommandContext, CommandRegistry, CommandSpec, FnCommand, NoticeLevel, Outcome, UiRequest,
@@ -637,7 +641,7 @@ fn switch_branch() -> FnCommand {
             let op = host.begin(repo, "git.switch_branch");
             let stash = if flag(args, "stash_changes") {
                 repo.stash_push(&StashPushOptions {
-                    message: Some(format!("lector: before switching to {name}")),
+                    message: Some(format!("{SWITCH_STASH_PREFIX}{name}")),
                     include_untracked: true,
                 })?
             } else {
@@ -646,12 +650,28 @@ fn switch_branch() -> FnCommand {
             let sw = match repo.switch_branch(name, &op.options) {
                 Ok(sw) => sw,
                 Err(err) => {
-                    // Put the changes back where they were.
+                    // Put the changes back where they were, staged changes staged again.
+                    let mut err = err;
                     if let Some(st) = &stash {
-                        if let Ok(Some(ix)) = repo.stash_index_of(st.oid) {
-                            if let Err(e) = repo.stash_apply(ix, true) {
-                                tracing::warn!("could not restore the stash after a failed switch: {e}");
-                            }
+                        let restored = repo.stash_index_of(st.oid).and_then(|ix| match ix {
+                            Some(ix) => repo
+                                .stash_apply_with(
+                                    ix,
+                                    &StashApplyOptions {
+                                        pop: true,
+                                        expected: Some(st.oid),
+                                        restore_index: true,
+                                    },
+                                )
+                                .map(|a| a.dropped),
+                            None => Ok(false),
+                        });
+                        if !matches!(restored, Ok(true)) {
+                            tracing::warn!("could not restore the stash after a failed switch: {restored:?}");
+                            err = with_note(
+                                err,
+                                &format!(" (your changes are kept in the stash: {})", st.message),
+                            );
                         }
                     }
                     return Err(err.into());
@@ -659,7 +679,10 @@ fn switch_branch() -> FnCommand {
             };
             let mut records = Vec::new();
             if let Some(st) = &stash {
-                records.push(invoke("git.stash_pop", json!({ "oid": st.oid.to_string() })));
+                records.push(invoke(
+                    "git.stash_pop",
+                    json!({ "oid": st.oid.to_string(), "restore_index": true }),
+                ));
             }
             if let Some(from) = &sw.from {
                 records.push(invoke("git.switch_branch", json!({ "name": from })));
@@ -919,7 +942,7 @@ fn stash_push() -> FnCommand {
                 .with_data(json!({ "stash": data(&stash) }))
                 .with_undo(invoke(
                     "git.stash_pop",
-                    json!({ "oid": stash.oid.to_string() }),
+                    json!({ "oid": stash.oid.to_string(), "restore_index": true }),
                 ))
                 .with_paths(vec![repo.workdir().to_path_buf()])
                 .with_ui(UiRequest::Refresh))
@@ -928,20 +951,153 @@ fn stash_push() -> FnCommand {
     .with_available(needs_repo)
 }
 
+/// Message prefix of the stash Lector's "stash and switch" creates; applying or popping such a
+/// stash restores its index by default (`restore_index` absent).
+const SWITCH_STASH_PREFIX: &str = "lector: before switching to ";
+
+/// Appends `note` to the message of a typed git error (other errors are returned as is).
+fn with_note(mut err: lector_git::Error, note: &str) -> lector_git::Error {
+    if let lector_git::Error::Sync(s) = &mut err {
+        s.message.push_str(note);
+    }
+    err
+}
+
+fn is_index_refusal(err: &lector_git::Error) -> bool {
+    matches!(err, lector_git::Error::Sync(s) if s.alternatives.iter().any(|a| a == APPLY_WITHOUT_INDEX))
+}
+
+/// Puts back the files and index entries of `rels` that changed since `before` (a failed
+/// apply); returns the paths put back, or why that failed.
+fn roll_back(
+    files: Option<&Backup>,
+    index: Option<&Backup>,
+    rels: &[String],
+    before: &(BTreeMap<String, String>, BTreeMap<String, String>),
+) -> Result<Vec<String>, String> {
+    let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+    let mut restored: Vec<String> = Vec::new();
+    if let Some(b) = files {
+        let now = b.shadow().fingerprints(&refs).map_err(|e| e.to_string())?;
+        let changed: Vec<&str> = refs
+            .iter()
+            .copied()
+            .filter(|p| now.get(*p) != before.0.get(*p))
+            .collect();
+        if !changed.is_empty() {
+            b.shadow()
+                .restore_paths(b.snapshot(), &changed)
+                .map_err(|e| e.to_string())?;
+            restored.extend(changed.iter().map(|p| p.to_string()));
+        }
+    }
+    if let Some(b) = index {
+        let now = b
+            .shadow()
+            .index_fingerprints(&refs)
+            .map_err(|e| e.to_string())?;
+        let changed: Vec<&str> = refs
+            .iter()
+            .copied()
+            .filter(|p| now.get(*p) != before.1.get(*p))
+            .collect();
+        if !changed.is_empty() {
+            b.shadow()
+                .restore_index(b.snapshot(), &changed)
+                .map_err(|e| e.to_string())?;
+            restored.extend(changed.iter().map(|p| p.to_string()));
+        }
+    }
+    restored.sort();
+    restored.dedup();
+    Ok(restored)
+}
+
+fn status_map(entries: Vec<StatusEntry>) -> BTreeMap<String, StatusEntry> {
+    entries.into_iter().map(|e| (e.path.clone(), e)).collect()
+}
+
 fn stash_apply_impl(cx: &CommandContext, args: &Value, pop: bool) -> anyhow::Result<Outcome> {
     let repo = cx.require_repo()?;
     let index = stash_index(repo, args)?;
     let stash = repo.stash_at(index)?;
-    let paths = repo.stash_paths(index)?;
+    // git's default is to flatten the stash's index into unstaged changes; Lector's own
+    // stash-and-switch stash and undo (explicit `restore_index: true`) restore it.
+    let explicit = args.get("restore_index").and_then(Value::as_bool);
+    let restore_index = explicit.unwrap_or_else(|| stash.message.contains(SWITCH_STASH_PREFIX));
+    // Every path the apply can write now, rename destinations included.
+    let paths = repo.stash_apply_paths(index)?;
     let note = format!(
         "before stash {} of {}",
         if pop { "pop" } else { "apply" },
         stash.oid.short()
     );
+    let status_before = status_map(repo.status()?);
     // Applying merges into the working tree and index: back both up so Undo restores them.
     let files = backup_files(cx, repo, &paths, &note, flag(args, "allow_without_backup"))?;
     let index_backup = backup_index(cx, repo, &paths, &note);
-    let applied = repo.stash_apply(index, pop)?;
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let before = (
+        files
+            .as_ref()
+            .and_then(|b| b.shadow().fingerprints(&refs).ok())
+            .unwrap_or_default(),
+        index_backup
+            .as_ref()
+            .and_then(|b| b.shadow().index_fingerprints(&refs).ok())
+            .unwrap_or_default(),
+    );
+    let fail = |err: lector_git::Error| -> anyhow::Error {
+        // Whatever git changed before failing goes back: a failed apply changes nothing.
+        let note = match roll_back(files.as_ref(), index_backup.as_ref(), &paths, &before) {
+            Ok(restored) if restored.is_empty() => String::new(),
+            Ok(restored) => format!(
+                " (Lector put back the {} git had changed)",
+                plural(restored.len(), "file", "files")
+            ),
+            Err(e) => format!(
+                " (git changed some files and they could not be put back: {e}; \
+                 Lector's backup \"{note}\" has their previous versions)"
+            ),
+        };
+        let note = if files.is_none() && note.is_empty() {
+            " (no backup was taken: check the files the stash touches)".to_owned()
+        } else {
+            note
+        };
+        with_note(err, &note).into()
+    };
+    let opts = StashApplyOptions {
+        pop,
+        expected: Some(stash.oid),
+        restore_index,
+    };
+    let mut flattened = false;
+    let applied = match repo.stash_apply_with(index, &opts) {
+        Ok(a) => a,
+        // Lector's stash-and-switch stash on an index that moved on: apply it the way git
+        // does by default and say so (an explicit `restore_index: true` never falls back).
+        Err(err) if explicit.is_none() && restore_index && is_index_refusal(&err) => {
+            flattened = true;
+            let opts = StashApplyOptions {
+                restore_index: false,
+                ..opts
+            };
+            repo.stash_apply_with(index, &opts).map_err(fail)?
+        }
+        Err(err) => return Err(fail(err)),
+    };
+    // Paths git changed that were not backed up (rename detection the merge did differently):
+    // Undo cannot restore those, so say so instead of reporting a complete undo.
+    let status_after = status_map(repo.status()?);
+    let mut not_backed_up: Vec<String> = status_before
+        .keys()
+        .chain(status_after.keys())
+        .filter(|p| status_before.get(*p) != status_after.get(*p) && !paths.contains(*p))
+        .cloned()
+        .collect();
+    not_backed_up.sort();
+    not_backed_up.dedup();
     let mut records: Vec<UndoRecord> = Vec::new();
     records.extend(index_undo(index_backup, &paths));
     records.extend(files_undo(files, &paths));
@@ -966,16 +1122,36 @@ fn stash_apply_impl(cx: &CommandContext, args: &Value, pop: bool) -> anyhow::Res
             if pop { " (the stash was kept)" } else { "" }
         );
     }
-    let level = if applied.conflicts.is_empty() {
+    let index_lost = flattened || (restore_index && !applied.index_restored);
+    if index_lost {
+        summary.push_str(
+            "; its staged changes could not be restored and are unstaged now (Undo puts \
+             everything back)",
+        );
+    }
+    if !not_backed_up.is_empty() {
+        summary.push_str(&format!(
+            "; Undo will not restore {}",
+            not_backed_up.join(", ")
+        ));
+    }
+    let level = if applied.conflicts.is_empty() && !index_lost && not_backed_up.is_empty() {
         NoticeLevel::Success
     } else {
         NoticeLevel::Warning
     };
+    let mut out_data = data(&applied);
+    if let Value::Object(map) = &mut out_data {
+        map.insert("restore_index".into(), json!(restore_index && !flattened));
+        map.insert("not_backed_up".into(), json!(not_backed_up));
+    }
+    let mut touched = paths.clone();
+    touched.extend(not_backed_up.iter().cloned());
     let outcome = Outcome::new(summary)
         .with_level(level)
-        .with_data(data(&applied))
+        .with_data(out_data)
         .with_paths(
-            paths
+            touched
                 .iter()
                 .map(|p| repo.workdir().join(p))
                 .collect::<Vec<PathBuf>>(),
@@ -988,6 +1164,10 @@ fn allow_prop() -> Value {
     bool_prop("Proceed even if the backup that makes this undoable cannot be taken (only after the user confirmed)")
 }
 
+fn restore_index_prop() -> Value {
+    bool_prop("Also restore the stash's staged changes into the index (git stash --index). true: refuse (nothing changed, stash kept) when git cannot; false: git's default, staged changes come back unstaged. Default: true only for the stash Lector's \"stash and switch\" created (falling back to git's default, with a warning, when the index cannot be restored)")
+}
+
 fn stash_apply() -> FnCommand {
     let [ix, oid] = stash_ref_props();
     FnCommand::new(
@@ -995,7 +1175,15 @@ fn stash_apply() -> FnCommand {
             "git.stash_apply",
             "Apply Stash",
             "Git",
-            object(&[ix, oid, ("allow_without_backup", allow_prop())], &[]),
+            object(
+                &[
+                    ix,
+                    oid,
+                    ("allow_without_backup", allow_prop()),
+                    ("restore_index", restore_index_prop()),
+                ],
+                &[],
+            ),
         )
         .undoable()
         .with_ui_flow("git::ApplyStash"),
@@ -1011,7 +1199,15 @@ fn stash_pop() -> FnCommand {
             "git.stash_pop",
             "Pop Stash",
             "Git",
-            object(&[ix, oid, ("allow_without_backup", allow_prop())], &[]),
+            object(
+                &[
+                    ix,
+                    oid,
+                    ("allow_without_backup", allow_prop()),
+                    ("restore_index", restore_index_prop()),
+                ],
+                &[],
+            ),
         )
         .undoable()
         .with_ui_flow("git::PopStash"),

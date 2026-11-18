@@ -232,6 +232,18 @@ pub(super) struct Backup {
     snap: ShadowSnapshot,
 }
 
+impl Backup {
+    /// The shadow repository holding it.
+    pub(super) fn shadow(&self) -> &ShadowRepo {
+        &self.shadow
+    }
+
+    /// The snapshot.
+    pub(super) fn snapshot(&self) -> &ShadowSnapshot {
+        &self.snap
+    }
+}
+
 /// Backs up the working-tree contents of `rels` before a destructive write. Without a
 /// backup: `Err(BackupUnavailable)`, or `Ok(None)` when `allow_without` says the user
 /// accepted it.

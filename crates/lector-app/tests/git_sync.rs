@@ -26,7 +26,7 @@ fn hermetic() {
             ("GIT_AUTHOR_EMAIL", "ann@example.com"),
             ("GIT_COMMITTER_NAME", "Ann"),
             ("GIT_COMMITTER_EMAIL", "ann@example.com"),
-            ("GIT_CONFIG_COUNT", "4"),
+            ("GIT_CONFIG_COUNT", "5"),
             ("GIT_CONFIG_KEY_0", "gc.auto"),
             ("GIT_CONFIG_VALUE_0", "0"),
             ("GIT_CONFIG_KEY_1", "maintenance.auto"),
@@ -35,6 +35,8 @@ fn hermetic() {
             ("GIT_CONFIG_VALUE_2", "false"),
             ("GIT_CONFIG_KEY_3", "gc.autoDetach"),
             ("GIT_CONFIG_VALUE_3", "false"),
+            ("GIT_CONFIG_KEY_4", "core.autocrlf"),
+            ("GIT_CONFIG_VALUE_4", "false"),
         ] {
             std::env::set_var(k, v);
         }
@@ -404,4 +406,233 @@ fn credential_env_from_the_host_reaches_git() {
     );
     assert!(host.running().is_empty());
     assert!(!host.cancel(12345));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Undo never loses staged work; backups match what git touched; failed applies change nothing
+// ---------------------------------------------------------------------------------------------
+
+fn write(dir: &Path, rel: &str, content: &str) {
+    std::fs::write(dir.join(rel), content).unwrap();
+}
+
+/// Index entries, status and file bytes: what an undo must give back exactly.
+#[derive(Debug, PartialEq, Eq)]
+struct State {
+    index: String,
+    status: String,
+    files: Vec<(String, Option<Vec<u8>>)>,
+}
+
+fn state(dir: &Path, files: &[&str]) -> State {
+    State {
+        index: git_in(dir, &["ls-files", "--stage"]),
+        status: git_in(dir, &["status", "--porcelain=v1", "--untracked-files=all"]),
+        files: files
+            .iter()
+            .map(|f| (f.to_string(), std::fs::read(dir.join(f)).ok()))
+            .collect(),
+    }
+}
+
+fn stash_count(fx: &Fx) -> usize {
+    fx.ok("git.stash_list", json!({})).data["stashes"]
+        .as_array()
+        .map_or(0, Vec::len)
+}
+
+/// `f.txt` partially staged (MM) plus a fully staged new file.
+fn partially_staged(fx: &Fx) -> State {
+    write(&fx.a, "f.txt", "one staged\n");
+    git_in(&fx.a, &["add", "f.txt"]);
+    write(&fx.a, "f.txt", "one staged\nunstaged too\n");
+    write(&fx.a, "n.txt", "new and staged\n");
+    git_in(&fx.a, &["add", "n.txt"]);
+    let st = state(&fx.a, &["f.txt", "n.txt"]);
+    assert_eq!(st.status, "MM f.txt\nA  n.txt");
+    st
+}
+
+#[test]
+fn undo_of_a_stash_keeps_what_was_staged() {
+    let fx = Fx::new();
+    let wanted = partially_staged(&fx);
+    let pushed = fx.ok("git.stash_push", json!({}));
+    assert_eq!(git_in(&fx.a, &["status", "--porcelain=v1"]), "");
+    fx.undo(&pushed);
+    assert_eq!(state(&fx.a, &["f.txt", "n.txt"]), wanted);
+    assert_eq!(stash_count(&fx), 0, "the stash was popped");
+}
+
+#[test]
+fn undo_of_a_stash_whose_index_cannot_come_back_is_refused_and_keeps_the_stash() {
+    let fx = Fx::new();
+    partially_staged(&fx);
+    let pushed = fx.ok("git.stash_push", json!({}));
+    // The index moved on in a way the stashed index cannot be re-applied to.
+    write(&fx.a, "f.txt", "one other\n");
+    git_in(&fx.a, &["add", "f.txt"]);
+    let wanted = state(&fx.a, &["f.txt", "n.txt"]);
+    let err = fx
+        .journal
+        .undo(pushed.journal_id.unwrap(), &fx.cx, UndoMode::Check)
+        .unwrap_err();
+    assert!(err.to_string().contains("stash is kept"), "{err}");
+    assert_eq!(state(&fx.a, &["f.txt", "n.txt"]), wanted, "nothing changed");
+    assert_eq!(stash_count(&fx), 1);
+    // The user-facing pop keeps git's default (flatten) unless asked.
+    let explicit = fx
+        .run("git.stash_pop", json!({"index": 0, "restore_index": true}))
+        .unwrap_err();
+    assert!(explicit.to_string().contains("stash is kept"), "{explicit}");
+    assert_eq!(stash_count(&fx), 1);
+}
+
+#[test]
+fn stash_and_switch_restores_the_index_on_undo_and_on_failure() {
+    let fx = Fx::new();
+    fx.ok("git.create_branch", json!({"name": "topic"}));
+    let wanted = partially_staged(&fx);
+    // A failed switch puts the changes back, staged ones staged.
+    fx.run(
+        "git.switch_branch",
+        json!({"name": "no-such-branch", "stash_changes": true}),
+    )
+    .unwrap_err();
+    assert_eq!(state(&fx.a, &["f.txt", "n.txt"]), wanted);
+    assert_eq!(stash_count(&fx), 0);
+
+    let switched = fx.ok(
+        "git.switch_branch",
+        json!({"name": "topic", "stash_changes": true}),
+    );
+    assert_eq!(git_in(&fx.a, &["branch", "--show-current"]), "topic");
+    fx.undo(&switched);
+    assert_eq!(git_in(&fx.a, &["branch", "--show-current"]), "main");
+    assert_eq!(state(&fx.a, &["f.txt", "n.txt"]), wanted);
+
+    // Popping Lector's own stash-and-switch stash restores its index by default.
+    fx.ok(
+        "git.switch_branch",
+        json!({"name": "topic", "stash_changes": true}),
+    );
+    fx.ok("git.switch_branch", json!({"name": "main"}));
+    let popped = fx.ok("git.stash_pop", json!({"index": 0}));
+    assert_eq!(popped.data["index_restored"], true);
+    assert_eq!(state(&fx.a, &["f.txt", "n.txt"]), wanted);
+}
+
+const MATRIX: &[&str] = &[
+    "s.txt", "m.txt", "n.txt", "d.txt", "r.txt", "r2.txt", "w.txt", "f.txt",
+];
+
+#[test]
+fn undo_of_a_pull_keeps_staged_changes_and_refuses_overlaps() {
+    let fx = Fx::new();
+    for f in ["s.txt", "m.txt", "d.txt", "r.txt", "w.txt"] {
+        write(&fx.a, f, &format!("{f} base\nline two\nline three\n"));
+    }
+    git_in(&fx.a, &["add", "-A"]);
+    git_in(&fx.a, &["commit", "-q", "-m", "base"]);
+    git_in(&fx.a, &["push", "-q"]);
+    git_in(&fx.b, &["pull", "-q"]);
+    let before = fx.head();
+    fx.commit(&fx.b, "f.txt", "pulled\n");
+    git_in(&fx.b, &["push", "-q"]);
+    let pulled = fx.ok("git.pull", json!({}));
+    assert_eq!(pulled.data["status"], "fast_forwarded");
+    let after = fx.head();
+
+    write(&fx.a, "s.txt", "s staged\n");
+    git_in(&fx.a, &["add", "s.txt"]);
+    write(&fx.a, "m.txt", "m staged\n");
+    git_in(&fx.a, &["add", "m.txt"]);
+    write(&fx.a, "m.txt", "m staged\nand unstaged\n");
+    write(&fx.a, "n.txt", "brand new\n");
+    git_in(&fx.a, &["add", "n.txt"]);
+    git_in(&fx.a, &["rm", "-q", "d.txt"]);
+    git_in(&fx.a, &["mv", "r.txt", "r2.txt"]);
+    write(&fx.a, "w.txt", "dirty, not staged\n");
+
+    // Overlap with the pulled file: refused before anything is written.
+    write(&fx.a, "f.txt", "staged edit of the pulled file\n");
+    git_in(&fx.a, &["add", "f.txt"]);
+    let wanted = state(&fx.a, MATRIX);
+    let err = fx
+        .journal
+        .undo(pulled.journal_id.unwrap(), &fx.cx, UndoMode::Check)
+        .unwrap_err();
+    assert!(err.to_string().contains("f.txt"), "{err}");
+    assert_eq!(fx.head(), after);
+    assert_eq!(state(&fx.a, MATRIX), wanted);
+    git_in(&fx.a, &["restore", "--staged", "f.txt"]);
+    git_in(&fx.a, &["checkout", "-q", "--", "f.txt"]);
+
+    // No overlap: the branch goes back and every staged change survives, then redo.
+    let wanted = state(&fx.a, MATRIX);
+    let undo = fx
+        .journal
+        .undo(pulled.journal_id.unwrap(), &fx.cx, UndoMode::Check)
+        .unwrap();
+    assert_eq!(fx.head(), before);
+    let now = state(&fx.a, MATRIX);
+    assert_eq!(now.status, wanted.status);
+    let others = |s: &State| -> Vec<(String, Option<Vec<u8>>)> {
+        s.files
+            .iter()
+            .filter(|(f, _)| f != "f.txt")
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(&now), others(&wanted));
+    let strip = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !l.ends_with("\tf.txt"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(strip(&now.index), strip(&wanted.index));
+    fx.journal.undo(undo.id, &fx.cx, UndoMode::Check).unwrap();
+    assert_eq!(fx.head(), after);
+    assert_eq!(state(&fx.a, MATRIX), wanted);
+}
+
+#[test]
+fn undo_of_a_stash_apply_restores_rename_destinations() {
+    let fx = Fx::new();
+    write(&fx.a, "old.txt", "a\nb\nc\nd\ne\n");
+    git_in(&fx.a, &["add", "-A"]);
+    git_in(&fx.a, &["commit", "-q", "-m", "old"]);
+    write(&fx.a, "old.txt", "a\nb\nc\nd\ne edited in the stash\n");
+    fx.ok("git.stash_push", json!({}));
+    git_in(&fx.a, &["mv", "old.txt", "new.txt"]);
+    git_in(&fx.a, &["commit", "-q", "-m", "rename"]);
+    let wanted = state(&fx.a, &["old.txt", "new.txt"]);
+    let applied = fx.ok("git.stash_apply", json!({"index": 0}));
+    assert_eq!(
+        std::fs::read(fx.a.join("new.txt")).unwrap(),
+        b"a\nb\nc\nd\ne edited in the stash\n"
+    );
+    assert_eq!(applied.data["not_backed_up"], json!([]));
+    fx.undo(&applied);
+    assert_eq!(state(&fx.a, &["old.txt", "new.txt"]), wanted);
+}
+
+#[test]
+fn a_stash_apply_that_cannot_finish_changes_nothing() {
+    let fx = Fx::new();
+    write(&fx.a, "f.txt", "stashed edit\n");
+    write(&fx.a, "u1.txt", "u1 stashed\n");
+    write(&fx.a, "u2.txt", "u2 stashed\n");
+    fx.ok("git.stash_push", json!({"include_untracked": true}));
+    write(&fx.a, "u2.txt", "u2 created since\n");
+    let files = ["f.txt", "u1.txt", "u2.txt"];
+    let wanted = state(&fx.a, &files);
+    for id in ["git.stash_apply", "git.stash_pop"] {
+        let err = fx.run(id, json!({"index": 0})).unwrap_err();
+        assert_eq!(sync_kind(&err), Some(SyncErrorKind::LocalChanges), "{err}");
+        assert!(err.to_string().contains("u2.txt"), "{err}");
+        assert_eq!(state(&fx.a, &files), wanted, "{id}: nothing changed");
+        assert_eq!(stash_count(&fx), 1, "{id}: stash kept");
+    }
 }

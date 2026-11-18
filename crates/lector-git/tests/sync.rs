@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use lector_git::CancelToken;
 use lector_git::{
-    Error, FetchOptions, PullMode, PullStatus, PushOptions, PushRefStatus, Repo, StashPushOptions,
-    SyncError, SyncErrorKind, SyncEvent, SyncOptions,
+    Error, FetchOptions, Oid, PullMode, PullStatus, PushOptions, PushRefStatus, Repo,
+    StashApplyOptions, StashPushOptions, SyncError, SyncErrorKind, SyncEvent, SyncOptions,
+    APPLY_WITHOUT_INDEX,
 };
 
 fn hermetic() {
@@ -24,7 +25,7 @@ fn hermetic() {
             ("GIT_AUTHOR_EMAIL", "ann@example.com"),
             ("GIT_COMMITTER_NAME", "Ann"),
             ("GIT_COMMITTER_EMAIL", "ann@example.com"),
-            ("GIT_CONFIG_COUNT", "4"),
+            ("GIT_CONFIG_COUNT", "5"),
             ("GIT_CONFIG_KEY_0", "gc.auto"),
             ("GIT_CONFIG_VALUE_0", "0"),
             ("GIT_CONFIG_KEY_1", "commit.gpgsign"),
@@ -33,6 +34,8 @@ fn hermetic() {
             ("GIT_CONFIG_VALUE_2", "false"),
             ("GIT_CONFIG_KEY_3", "advice.detachedHead"),
             ("GIT_CONFIG_VALUE_3", "false"),
+            ("GIT_CONFIG_KEY_4", "core.autocrlf"),
+            ("GIT_CONFIG_VALUE_4", "false"),
         ] {
             std::env::set_var(k, v);
         }
@@ -767,4 +770,261 @@ fn stash_round_trip_and_conflicts() {
     assert_eq!(popped.conflicts, vec!["f.txt".to_owned()]);
     assert!(!popped.dropped);
     assert_eq!(repo.stash_index_of(dropped.oid).unwrap(), Some(0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Undo safety: the index survives restore_ref and stash undo; failed applies change nothing
+// ---------------------------------------------------------------------------------------------
+
+fn write(dir: &Path, rel: &str, content: &str) {
+    std::fs::write(dir.join(rel), content).unwrap();
+}
+
+/// Everything an undo must not lose: index entries, status and the bytes of every file.
+#[derive(Debug, PartialEq, Eq)]
+struct State {
+    index: String,
+    status: String,
+    files: Vec<(String, Option<Vec<u8>>)>,
+}
+
+fn state(dir: &Path, files: &[&str]) -> State {
+    State {
+        index: git_in(dir, &["ls-files", "--stage"]),
+        status: git_in(dir, &["status", "--porcelain=v1", "--untracked-files=all"]),
+        files: files
+            .iter()
+            .map(|f| (f.to_string(), std::fs::read(dir.join(f)).ok()))
+            .collect(),
+    }
+}
+
+const STAGED_FILES: &[&str] = &[
+    "s.txt", "m.txt", "n.txt", "d.txt", "r.txt", "r2.txt", "w.txt", "q.txt",
+];
+
+/// Commits base files, then a "pulled" commit changing `q.txt`; returns (before, after).
+/// Leaves: `s.txt` fully staged, `m.txt` partially staged (MM), `n.txt` staged new (A),
+/// `d.txt` staged deletion (D), `r.txt` -> `r2.txt` staged rename, `w.txt` dirty unstaged.
+fn staged_matrix(fx: &Fx) -> (Oid, Oid) {
+    let a = &fx.a;
+    for f in ["s.txt", "m.txt", "d.txt", "r.txt", "w.txt", "q.txt"] {
+        write(a, f, &format!("{f} base\nline two\nline three\n"));
+    }
+    git_in(a, &["add", "-A"]);
+    git_in(a, &["commit", "-q", "-m", "base"]);
+    let before: Oid = git_in(a, &["rev-parse", "HEAD"]).parse().unwrap();
+    let after: Oid = fx
+        .commit(a, "q.txt", "q pulled\n", "pulled")
+        .parse()
+        .unwrap();
+    write(a, "s.txt", "s staged\n");
+    git_in(a, &["add", "s.txt"]);
+    write(a, "m.txt", "m staged\n");
+    git_in(a, &["add", "m.txt"]);
+    write(a, "m.txt", "m staged\nand unstaged\n");
+    write(a, "n.txt", "brand new\n");
+    git_in(a, &["add", "n.txt"]);
+    git_in(a, &["rm", "-q", "d.txt"]);
+    git_in(a, &["mv", "r.txt", "r2.txt"]);
+    write(a, "w.txt", "dirty, not staged\n");
+    (before, after)
+}
+
+#[test]
+fn restore_ref_keeps_staged_changes_of_files_the_move_does_not_touch() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    let (before, after) = staged_matrix(&fx);
+    let status = git_in(&fx.a, &["status", "--porcelain=v1"]);
+    for line in [
+        "M  s.txt",
+        "MM m.txt",
+        "A  n.txt",
+        "D  d.txt",
+        "R  r.txt -> r2.txt",
+        " M w.txt",
+    ] {
+        assert!(status.lines().any(|l| l == line), "{line} in {status}");
+    }
+    let wanted = state(&fx.a, STAGED_FILES);
+
+    // Undo of the "pull": the branch goes back, q.txt with it, everything else stays.
+    repo.restore_ref("refs/heads/main", Some(after), Some(before))
+        .unwrap();
+    assert_eq!(git_in(&fx.a, &["rev-parse", "HEAD"]), before.to_string());
+    assert_eq!(
+        std::fs::read(fx.a.join("q.txt")).unwrap(),
+        b"q.txt base\nline two\nline three\n"
+    );
+    let now = state(&fx.a, STAGED_FILES);
+    assert_eq!(now.status, wanted.status, "status unchanged");
+    let strip_q = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !l.ends_with("\tq.txt"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        strip_q(&now.index),
+        strip_q(&wanted.index),
+        "index entries unchanged"
+    );
+    let files = |st: &State| -> Vec<(String, Option<Vec<u8>>)> {
+        st.files
+            .iter()
+            .filter(|(f, _)| f != "q.txt")
+            .cloned()
+            .collect()
+    };
+    assert_eq!(files(&now), files(&wanted), "working tree unchanged");
+
+    // Redo (the inverse of the undo) is just as safe.
+    repo.restore_ref("refs/heads/main", Some(before), Some(after))
+        .unwrap();
+    assert_eq!(state(&fx.a, STAGED_FILES), wanted);
+}
+
+#[test]
+fn restore_ref_refuses_before_writing_when_the_move_touches_local_changes() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    let (before, after) = staged_matrix(&fx);
+    for (case, setup) in [("staged", true), ("unstaged", false)] {
+        write(&fx.a, "q.txt", &format!("{case} local edit\n"));
+        if setup {
+            git_in(&fx.a, &["add", "q.txt"]);
+        }
+        let wanted = state(&fx.a, STAGED_FILES);
+        let err = sync_err(
+            repo.restore_ref("refs/heads/main", Some(after), Some(before))
+                .unwrap_err(),
+        );
+        assert_eq!(err.kind, SyncErrorKind::LocalChanges, "{case}: {err}");
+        assert_eq!(err.paths, vec!["q.txt".to_owned()], "{case}");
+        assert!(err.message.contains("nothing was changed"), "{err}");
+        assert_eq!(git_in(&fx.a, &["rev-parse", "HEAD"]), after.to_string());
+        assert_eq!(
+            state(&fx.a, STAGED_FILES),
+            wanted,
+            "{case}: nothing written"
+        );
+        git_in(&fx.a, &["restore", "--staged", "q.txt"]);
+        git_in(&fx.a, &["checkout", "-q", "--", "q.txt"]);
+    }
+}
+
+#[test]
+fn stash_restore_index_brings_back_a_partially_staged_file() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    write(&fx.a, "f.txt", "staged\n");
+    git_in(&fx.a, &["add", "f.txt"]);
+    write(&fx.a, "f.txt", "staged\nunstaged\n");
+    let wanted = state(&fx.a, &["f.txt"]);
+    assert_eq!(wanted.status, "MM f.txt");
+
+    // git's default (no --index) flattens: staged content gone from the index.
+    let st = repo
+        .stash_push(&StashPushOptions::default())
+        .unwrap()
+        .unwrap();
+    let plain = repo.stash_apply(0, false).unwrap();
+    assert!(!plain.index_restored);
+    assert_eq!(git_in(&fx.a, &["status", "--porcelain=v1"]), "M f.txt");
+    git_in(&fx.a, &["checkout", "-q", "--", "f.txt"]);
+
+    let popped = repo
+        .stash_apply_with(
+            0,
+            &StashApplyOptions {
+                pop: true,
+                expected: Some(st.oid),
+                restore_index: true,
+            },
+        )
+        .unwrap();
+    assert!(popped.dropped && popped.index_restored && popped.conflicts.is_empty());
+    assert_eq!(state(&fx.a, &["f.txt"]), wanted);
+}
+
+#[test]
+fn stash_restore_index_that_git_cannot_recreate_changes_nothing() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    write(&fx.a, "f.txt", "one staged\ntwo\nthree\n");
+    git_in(&fx.a, &["add", "f.txt"]);
+    write(&fx.a, "f.txt", "one staged\ntwo\nthree work\n");
+    let st = repo
+        .stash_push(&StashPushOptions::default())
+        .unwrap()
+        .unwrap();
+    fx.commit(&fx.a, "f.txt", "one other\ntwo\nthree\n", "moved on");
+    let wanted = state(&fx.a, &["f.txt"]);
+    let err = sync_err(
+        repo.stash_apply_with(
+            0,
+            &StashApplyOptions {
+                pop: true,
+                expected: Some(st.oid),
+                restore_index: true,
+            },
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(err.kind, SyncErrorKind::Other, "{err}");
+    assert_eq!(err.alternatives, vec![APPLY_WITHOUT_INDEX.to_owned()]);
+    assert_eq!(state(&fx.a, &["f.txt"]), wanted, "nothing changed");
+    assert_eq!(repo.stash_index_of(st.oid).unwrap(), Some(0), "stash kept");
+}
+
+#[test]
+fn stash_apply_whose_untracked_files_exist_changes_nothing() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    write(&fx.a, "f.txt", "stashed edit\n");
+    write(&fx.a, "u1.txt", "u1 stashed\n");
+    write(&fx.a, "u2.txt", "u2 stashed\n");
+    let st = repo
+        .stash_push(&StashPushOptions {
+            message: None,
+            include_untracked: true,
+        })
+        .unwrap()
+        .unwrap();
+    write(&fx.a, "u2.txt", "u2 created since\n");
+    let files = ["f.txt", "u1.txt", "u2.txt"];
+    let wanted = state(&fx.a, &files);
+    for pop in [false, true] {
+        let err = sync_err(repo.stash_apply(0, pop).unwrap_err());
+        assert_eq!(err.kind, SyncErrorKind::LocalChanges, "{err}");
+        assert_eq!(err.paths, vec!["u2.txt".to_owned()]);
+        assert_eq!(state(&fx.a, &files), wanted, "pop={pop}: nothing changed");
+        assert_eq!(repo.stash_index_of(st.oid).unwrap(), Some(0), "stash kept");
+    }
+}
+
+#[test]
+fn stash_apply_paths_include_rename_destinations() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    std::fs::create_dir_all(fx.a.join("dir")).unwrap();
+    write(&fx.a, "old.txt", "a\nb\nc\nd\ne\n");
+    write(&fx.a, "dir/x.txt", "x\ny\nz\n");
+    git_in(&fx.a, &["add", "-A"]);
+    git_in(&fx.a, &["commit", "-q", "-m", "files"]);
+    write(&fx.a, "old.txt", "a\nb\nc\nd\ne edited\n");
+    write(&fx.a, "dir/x.txt", "x\ny\nz edited\n");
+    repo.stash_push(&StashPushOptions::default())
+        .unwrap()
+        .unwrap();
+    git_in(&fx.a, &["mv", "old.txt", "new.txt"]);
+    git_in(&fx.a, &["mv", "dir", "moved"]);
+    git_in(&fx.a, &["commit", "-q", "-m", "renames"]);
+    let mut own = repo.stash_paths(0).unwrap();
+    own.sort();
+    assert_eq!(own, vec!["dir/x.txt", "old.txt"]);
+    let mut all = repo.stash_apply_paths(0).unwrap();
+    all.sort();
+    assert_eq!(all, vec!["dir/x.txt", "moved/x.txt", "new.txt", "old.txt"]);
 }
