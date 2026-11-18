@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.1 — unreleased
+## 0.7.1 — 2026-11-19
 
 Fixes for problems found in review of 0.7.0.
 
