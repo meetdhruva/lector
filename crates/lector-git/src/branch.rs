@@ -500,7 +500,8 @@ impl Repo {
             .map(|s| s.index))
     }
 
-    /// Paths a stash entry touches (tracked changes and its untracked files), by the names
+    /// Paths a stash entry touches (tracked working-tree changes, staged changes saved in its
+    /// index commit — including index-only ones — and its untracked files), by the names
     /// they have in the stash. See [`stash_apply_paths`](Self::stash_apply_paths) for the
     /// paths an apply can write now.
     pub fn stash_paths(&self, index: usize) -> Result<Vec<String>> {
@@ -520,7 +521,26 @@ impl Repo {
             ],
             "listing stash paths",
         )?);
-        for p in self.stash_untracked_paths(stash.oid)? {
+        // Index-only changes (staged, working tree back to the base) live only in the
+        // stash's index commit; an `--index` apply writes them.
+        let index_paths = nul_names(&proc::read(
+            self.workdir(),
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                &format!("{oid}^1"),
+                &format!("{oid}^2"),
+                "--",
+            ],
+            "listing stash paths",
+        )?);
+        for p in index_paths
+            .into_iter()
+            .chain(self.stash_untracked_paths(stash.oid)?)
+        {
             if !paths.contains(&p) {
                 paths.push(p);
             }

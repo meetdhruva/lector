@@ -1832,7 +1832,8 @@ impl Repo {
     pub fn stash_apply_with(&self, index, &StashApplyOptions { pop, expected, restore_index /* --index */ }) -> Result<StashApplied>;
                                        // stash untracked file exists -> LocalChanges (nothing written); --index git refuses ->
                                        // Other + alternative APPLY_WITHOUT_INDEX (nothing written, stash kept); failures keep the stash
-    pub fn stash_apply_paths(&self, index) -> Result<Vec<String>>;   // stash_paths + rename destinations (diff --cached -M <base>)
+    pub fn stash_apply_paths(&self, index) -> Result<Vec<String>>;   // stash_paths (^1..stash, ^1..^2 index-only, ^3 untracked)
+                                                                     // + rename destinations (diff --cached -M <base>)
     pub fn stash_drop(&self, index) -> Result<Stash>;  stash_store(oid, message);  stash_at(index);  stash_index_of(oid);  stash_paths(index);
     pub fn stash_apply_expecting(&self, index, expected: Option<Oid>, pop) -> Result<StashApplied>;   // RefChanged when the
     pub fn stash_drop_expecting(&self, index, expected: Option<Oid>) -> Result<Stash>;                 // entry is not `expected`

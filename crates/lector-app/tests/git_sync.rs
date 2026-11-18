@@ -636,3 +636,31 @@ fn a_stash_apply_that_cannot_finish_changes_nothing() {
         assert_eq!(stash_count(&fx), 1, "{id}: stash kept");
     }
 }
+
+#[test]
+fn undo_of_an_index_restoring_apply_or_pop_reverts_index_only_changes() {
+    let fx = Fx::new();
+    for id in ["git.stash_apply", "git.stash_pop"] {
+        // Staged modification, working tree back to HEAD: only the stash's index has it.
+        write(&fx.a, "f.txt", "staged only\n");
+        git_in(&fx.a, &["add", "f.txt"]);
+        write(&fx.a, "f.txt", "one\n");
+        fx.ok("git.stash_push", json!({}));
+        let wanted = state(&fx.a, &["f.txt"]);
+        let applied = fx.ok(id, json!({"index": 0, "restore_index": true}));
+        assert_eq!(applied.data["index_restored"], true, "{id}");
+        assert!(
+            git_in(&fx.a, &["ls-files", "--stage", "f.txt"]) != wanted.index,
+            "{id}: the staged change came back"
+        );
+        assert_eq!(applied.data["not_backed_up"], json!([]), "{id}");
+        fx.undo(&applied);
+        assert_eq!(
+            state(&fx.a, &["f.txt"]),
+            wanted,
+            "{id}: undo reverted the index"
+        );
+        // Clean up for the next round.
+        git_in(&fx.a, &["stash", "clear"]);
+    }
+}

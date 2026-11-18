@@ -1028,3 +1028,19 @@ fn stash_apply_paths_include_rename_destinations() {
     all.sort();
     assert_eq!(all, vec!["dir/x.txt", "moved/x.txt", "new.txt", "old.txt"]);
 }
+
+#[test]
+fn stash_paths_include_index_only_changes() {
+    let fx = Fx::new();
+    let repo = fx.repo(&fx.a);
+    // Staged modification whose working-tree file is back to HEAD: only stash^2 has it.
+    write(&fx.a, "f.txt", "staged only\n");
+    git_in(&fx.a, &["add", "f.txt"]);
+    write(&fx.a, "f.txt", "one\ntwo\nthree\n");
+    assert_eq!(git_in(&fx.a, &["status", "--porcelain=v1"]), "MM f.txt");
+    repo.stash_push(&StashPushOptions::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(repo.stash_paths(0).unwrap(), vec!["f.txt"]);
+    assert_eq!(repo.stash_apply_paths(0).unwrap(), vec!["f.txt"]);
+}
