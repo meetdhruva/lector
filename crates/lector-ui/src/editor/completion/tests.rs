@@ -918,6 +918,172 @@ fn a_commit_character_accepts_then_types(cx: &mut TestAppContext) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Accepting while `completionItem/resolve` is slow.
+
+/// The scripted server: one item whose resolve answers after `delay` seconds (real time; the
+/// test clock decides when the acceptance gives up waiting) with an extra import edit.
+fn slow_resolve_script(delay: f64, commit_characters: Value) -> Value {
+    json!({
+        "textDocument/completion": [{"result": {"isIncomplete": false, "items": [
+            {"label": "foo_bar", "commitCharacters": commit_characters}
+        ]}}],
+        "completionItem/resolve": [{"result": {"label": "foo_bar",
+            "additionalTextEdits": [{"range": range16(0, 0, 0), "newText": "use std::fmt;\n"}]},
+            "delay": delay}]
+    })
+}
+
+/// Like [`wait_text`] but never moves the test clock: only the server's answer (or
+/// nothing) can complete an acceptance, never its own time bound.
+fn wait_text_real_time(s: &Session, cx: &mut VisualTestContext, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..1000 {
+        cx.run_until_parked();
+        last = s.text(cx);
+        if last == expected {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(last, expected, "timed out waiting for the text");
+}
+
+/// Types "fo" in an empty second line and waits for the list.
+fn open_foo<'a>(cx: &'a mut TestAppContext, env: &Env) -> (Session, &'a mut VisualTestContext) {
+    let (s, cx) = start(cx, env, Pos::new(1, 0), true);
+    cx.simulate_input("fo");
+    s.wait_visible(cx);
+    (s, cx)
+}
+
+#[gpui::test]
+fn typing_while_the_acceptance_waits_lands_after_the_commit(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = open_foo(cx, &env);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // Pending: nothing is committed yet, the list stays, the key is not lost.
+    assert!(s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    assert!(s.visible(cx));
+    assert_eq!(s.text(cx), "\nfo");
+    cx.simulate_input("x");
+    cx.simulate_input("y");
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfo", "held back until the commit");
+    assert!(
+        s.ctl.read_with(cx, |c, _| c.is_accepting()),
+        "still waiting"
+    );
+    // The server answers: the resolved commit (with its import) lands, then the typed text.
+    wait_text_real_time(&s, cx, "use std::fmt;\n\nfoo_barxy");
+    assert!(!s.visible(cx));
+    assert!(!s
+        .ctl
+        .read_with(cx, |c, _| c.is_accepting() || c.has_session()));
+    // The caret is after the typed text.
+    assert_eq!(
+        s.selections(cx).iter().map(|x| x.head).collect::<Vec<_>>(),
+        vec![Pos::new(2, 9)]
+    );
+    // Undo: the held-back typing is its own step, the commit (with its import) one step.
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "use std::fmt;\n\nfoo_bar");
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfo");
+    assert!(!env.calls("completionItem/resolve").is_empty());
+}
+
+#[gpui::test]
+fn a_commit_character_waits_with_the_acceptance_and_is_typed_after_it(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!(["."])));
+    let (s, cx) = open_foo(cx, &env);
+    // "." is a commit character of the item: accepts, then is typed - after the commit, not
+    // lost and not before it.
+    cx.simulate_input(".");
+    cx.run_until_parked();
+    assert!(s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    assert_eq!(s.text(cx), "\nfo");
+    cx.simulate_input("z");
+    wait_text_real_time(&s, cx, "use std::fmt;\n\nfoo_bar.z");
+}
+
+#[gpui::test]
+fn escape_cancels_a_pending_acceptance_cleanly(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = open_foo(cx, &env);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    // Nothing is committed, the popup is gone, the state is reset.
+    assert!(!s.visible(cx));
+    assert!(!s.popup_registered(cx));
+    assert!(!s
+        .ctl
+        .read_with(cx, |c, _| c.is_accepting() || c.has_session()));
+    assert_eq!(s.text(cx), "\nfo");
+    // The (late) answer and the time bound change nothing.
+    std::thread::sleep(Duration::from_millis(50));
+    cx.executor()
+        .advance_clock(Duration::from_millis(ACCEPT_RESOLVE_WAIT_MS * 2));
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfo");
+    // Completion works again: Ctrl+Space opens a fresh list, which accepts normally.
+    cx.dispatch_action(TriggerSuggest);
+    s.wait_visible(cx);
+    assert!(!s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    cx.simulate_keystrokes("tab");
+    wait_text_real_time(&s, cx, "use std::fmt;\n\nfoo_bar");
+    assert!(!s.visible(cx));
+}
+
+#[gpui::test]
+fn text_typed_during_a_cancelled_acceptance_is_not_lost(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = open_foo(cx, &env);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        s.text(cx),
+        "\nfox",
+        "the held-back key is typed, the commit is not applied"
+    );
+    assert!(!s
+        .ctl
+        .read_with(cx, |c, _| c.is_accepting() || c.has_session()));
+}
+
+#[gpui::test]
+fn an_acceptance_that_gets_no_answer_commits_the_unresolved_item(cx: &mut TestAppContext) {
+    // The server answers after 5 s: far beyond the 300 ms bound.
+    let env = Env::new("\n", slow_resolve_script(5.0, json!([])));
+    let (s, cx) = open_foo(cx, &env);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    cx.simulate_input("x");
+    // Just short of the bound: still waiting.
+    cx.executor()
+        .advance_clock(Duration::from_millis(ACCEPT_RESOLVE_WAIT_MS - 100));
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfo");
+    // The bound passes: the item as listed (no import) is committed, then the typed text.
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_barx");
+    assert!(!s.visible(cx));
+    assert!(!s
+        .ctl
+        .read_with(cx, |c, _| c.is_accepting() || c.has_session()));
+}
+
 #[gpui::test]
 fn the_popup_closes_when_the_caret_leaves_the_word(cx: &mut TestAppContext) {
     let env = Env::new("\nnext\n", items_script(json!([{"label": "foo_bar"}])));

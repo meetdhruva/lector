@@ -404,6 +404,108 @@ fn new_terminal_in_active_file_folder_when_configured(cx: &mut TestAppContext) {
     assert_eq!(terminal_cwds(&panel, cx).last(), Some(&f.root.join("src")));
 }
 
+// ---------------------------------------------------------------- file links
+
+fn buffer_text(view: &Entity<lector_ui::editor::FileView>, cx: &mut VisualTestContext) -> String {
+    view.read_with(cx, |v, cx| {
+        v.model()
+            .read(cx)
+            .buffer()
+            .map(|b| b.read(cx).text().to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// Opens `target` through the file-link path of the active terminal (what Ctrl/Cmd+click does
+/// after the link resolved) and returns the new tab's view.
+fn open_through_link(
+    ws: &Entity<Workspace>,
+    panel: &Entity<TerminalPanel>,
+    root: &Path,
+    target: &Path,
+    cx: &mut VisualTestContext,
+) -> Entity<lector_ui::editor::FileView> {
+    let terminal = panel
+        .read_with(cx, |p, _| p.active_terminal())
+        .expect("terminal");
+    let action =
+        crate::routing::route_file(Some((target.to_path_buf(), Some(0), Some(0))), Some(root));
+    terminal.update_in(cx, |v, window, cx| v.apply_file_link(action, window, cx));
+    ws.read_with(cx, |ws, cx| ws.active_file_view(cx))
+        .expect("the link opened a tab")
+}
+
+/// A file outside the project opened from a terminal link must stay read-only once its
+/// document has loaded (finishing the load used to recompute the flag and make it editable),
+/// and typing must not edit it. A file inside the project stays editable.
+#[gpui::test]
+fn a_linked_file_outside_the_project_is_read_only_after_it_loads(cx: &mut TestAppContext) {
+    init(cx, settings_with(|_| {}));
+    let project = fixture();
+    let outside = fixture();
+    let (ws, panel, cx) = open_workspace(cx, &project.root);
+    cx.dispatch_action(actions::NewTerminal);
+    cx.run_until_parked();
+
+    let target = outside.root.join("src/main.rs");
+    let view = open_through_link(&ws, &panel, &project.root, &target, cx);
+    assert!(view.read_with(cx, |v, _| v.is_loading()), "still loading");
+    assert!(
+        view.read_with(cx, |v, cx| v.is_read_only(cx)),
+        "locked from the start"
+    );
+    // The document loads: the tab is still read-only and shows the read-only indicator.
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.is_loading()));
+    assert_eq!(buffer_text(&view, cx), "fn main() {}\n");
+    assert!(
+        view.read_with(cx, |v, cx| v.is_read_only(cx)),
+        "the load made the linked file editable"
+    );
+    let indicated = ws.read_with(cx, |ws, cx| {
+        ws.active_pane()
+            .read(cx)
+            .items()
+            .any(|i| i.path(cx).as_deref() == Some(target.as_path()) && i.is_read_only(cx))
+    });
+    assert!(indicated, "the tab shows the read-only indicator");
+    // Typing does not edit; the toggle explains instead of unlocking.
+    cx.update(|window, cx| {
+        let focus = view.focus_handle(cx);
+        window.focus(&focus);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    assert_eq!(buffer_text(&view, cx), "fn main() {}\n");
+    cx.dispatch_action(lector_ui::actions::editor::ToggleReadOnly);
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, cx| v.is_read_only(cx)));
+    let toast = ws.read_with(cx, |ws, _| ws.toast_message().map(|m| m.to_string()));
+    assert!(
+        toast
+            .as_deref()
+            .is_some_and(|t| t.contains("outside the project")),
+        "{toast:?}"
+    );
+
+    // Inside the project: an ordinary, editable tab.
+    let inside = open_through_link(
+        &ws,
+        &panel,
+        &project.root,
+        &project.root.join("src/main.rs"),
+        cx,
+    );
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let focus = inside.focus_handle(cx);
+        window.focus(&focus);
+    });
+    cx.simulate_input("y");
+    assert!(!inside.read_with(cx, |v, cx| v.is_read_only(cx)));
+    assert!(buffer_text(&inside, cx).contains('y'));
+}
+
 // ---------------------------------------------------------------- key routing
 
 gpui::actions!(test_terminal, [WorkspaceThing, Palette]);

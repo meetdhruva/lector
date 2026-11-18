@@ -899,7 +899,16 @@ impl TerminalView {
         }
     }
 
-    fn apply_file_link(&mut self, action: LinkAction, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens what a file link resolved to. A file outside the project is opened locked
+    /// read-only by the open itself (`Workspace::open_linked_path_read_only`): the tab is
+    /// created locked before its document loads, so finishing the load cannot make it
+    /// editable.
+    pub(crate) fn apply_file_link(
+        &mut self,
+        action: LinkAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             LinkAction::OpenFile {
                 path,
@@ -910,14 +919,12 @@ impl TerminalView {
                 let Some(ws) = self.workspace.upgrade() else {
                     return;
                 };
+                let (line, col) = (line.map(|l| l + 1), col.map(|c| c + 1));
                 ws.update(cx, |ws, cx| {
-                    let view =
-                        ws.open_path_at(path, line.map(|l| l + 1), col.map(|c| c + 1), window, cx);
                     if read_only {
-                        if let Some(view) = view {
-                            let code = view.read(cx).code_view().clone();
-                            code.update(cx, |c, cx| c.set_read_only(true, cx));
-                        }
+                        ws.open_linked_path_read_only(path, line, col, window, cx);
+                    } else {
+                        ws.open_path_at(path, line, col, window, cx);
                     }
                 });
             }

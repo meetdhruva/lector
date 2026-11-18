@@ -13,7 +13,7 @@ use gpui::{
 };
 use lector_agent::{
     AgentConfig, AgentError, AgentManager, AgentSession, PermissionChoice, PermissionRequestId,
-    PromptContext, SessionStatus, Turn, TurnId,
+    PromptContext, SessionId, SessionStatus, Turn, TurnId,
 };
 use lector_app::commands::Source;
 use lector_app::AppCore;
@@ -37,6 +37,8 @@ pub(crate) type RowBounds =
 /// What the panel shows for an undo that found files edited since the turn.
 #[derive(Clone, Debug)]
 pub struct UndoConflict {
+    /// The session the turn belongs to (turn ids restart at 1 in every session).
+    pub session: AgentSession,
     /// The turn.
     pub turn: TurnId,
     /// Files changed since.
@@ -80,7 +82,8 @@ pub struct AgentPanel {
     pub(crate) row_bounds: RowBounds,
     pub(crate) markdown: HashMap<(TurnId, usize), ParsedMessage>,
     /// Summary cards of finished turns that changed files (computed in the background, once).
-    pub(crate) summaries: HashMap<TurnId, SummaryState>,
+    /// Keyed by session as well: turn ids restart at 1 in every session.
+    pub(crate) summaries: HashMap<(SessionId, TurnId), SummaryState>,
     pub(crate) focus_handle: FocusHandle,
     /// Focus the prompt box at the next render (after a session started).
     pub(crate) focus_composer: bool,
@@ -190,6 +193,15 @@ impl AgentPanel {
         {
             self.selected_config = ix;
         }
+        // Turn ids restart at 1 in a new session: everything the panel remembers per turn of
+        // the old session would otherwise land on the new session's turns.
+        if self.session.as_ref() != Some(&session) {
+            self.expanded_thoughts.clear();
+            self.collapsed_tools.clear();
+            self.row_bounds.borrow_mut().clear();
+            self.undo_conflict = None;
+            self.busy_turn_action = None;
+        }
         self.session = Some(session);
         self.markdown.clear();
         self.follow_bottom = true;
@@ -233,9 +245,15 @@ impl AgentPanel {
         self.follow_bottom = max - offset < gpui::px(48.);
     }
 
-    /// The newest turn's id.
+    /// The newest turn's id (in the panel's current session).
     pub fn last_turn_id(&self) -> Option<TurnId> {
         self.turns.last().map(|t| t.id)
+    }
+
+    /// The newest turn together with the session it belongs to: what "Review last turn" and
+    /// "Undo last turn" act on, so a session started meanwhile cannot take over the id.
+    pub fn last_turn(&self) -> Option<(AgentSession, TurnId)> {
+        Some((self.session.clone()?, self.turns.last()?.id))
     }
 
     /// The current session.
@@ -351,6 +369,9 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let this = cx.entity().downgrade();
+        // The menu stays open for a while: "Review Turn" is bound to the session it was
+        // opened on.
+        let session = self.session.clone();
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
             let mut menu = menu;
             if let Some(abs) = abs.clone() {
@@ -361,8 +382,14 @@ impl AgentPanel {
                 });
             }
             let review = this.clone();
+            let session = session.clone();
             menu = menu.entry("Review Turn", move |window, cx| {
-                let _ = review.update(cx, |this, cx| this.review_turn(turn, window, cx));
+                let Some(session) = session.clone() else {
+                    return;
+                };
+                let _ = review.update(cx, |this, cx| {
+                    this.review_turn_in(session, turn, None, window, cx)
+                });
             });
             let path = path.clone();
             menu.entry("Copy Path", move |_, cx| {
@@ -451,7 +478,8 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// Opens the turn's changes in a review tab (in risk order, under the turn's summary card).
+    /// Opens the turn's changes of the current session in a review tab (in risk order, under
+    /// the turn's summary card).
     pub fn review_turn(&mut self, id: TurnId, window: &mut Window, cx: &mut Context<Self>) {
         self.review_turn_at(id, None, window, cx);
     }
@@ -464,7 +492,26 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(turn) = self.turns.iter().find(|t| t.id == id) else {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.review_turn_in(session, id, target, window, cx);
+    }
+
+    /// Opens turn `id` of `session` in a review tab, then the diff of `target`. `session` is the
+    /// one the turn id came from, not necessarily the panel's current one: turn ids restart at
+    /// 1 in every session, so a review (and the "Undo turn" button in its header) is bound to
+    /// the session it was opened for.
+    pub fn review_turn_in(
+        &mut self,
+        session: AgentSession,
+        id: TurnId,
+        target: Option<lector_agent::summary::NavTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(turn) = session.turn(id) else {
+            self.toast("That turn is no longer available.", cx);
             return;
         };
         let Some(cs) = turn.changeset() else {
@@ -486,10 +533,18 @@ impl AgentPanel {
         else {
             return;
         };
-        if let Some(SummaryState::Ready(summary)) = self.summaries.get(&id).cloned() {
+        if let Some(SummaryState::Ready(summary)) = self.summaries.get(&(session.id(), id)).cloned()
+        {
             let panel = cx.entity().downgrade();
-            let header =
-                cx.new(|_| crate::summary_ui::SummaryHeader::new(summary, id, panel, &review));
+            let header = cx.new(|_| {
+                crate::summary_ui::SummaryHeader::new(
+                    summary,
+                    session.clone(),
+                    id,
+                    panel,
+                    review.downgrade(),
+                )
+            });
             review.update(cx, |r, cx| r.set_header_view(Some(header.into()), cx));
         }
         if let Some(target) = target {
@@ -515,15 +570,19 @@ impl AgentPanel {
 
     /// Starts the summary of every finished turn that changed files and has none yet.
     fn ensure_summaries(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session.as_ref().map(|s| s.id()) else {
+            return;
+        };
         let wanted: Vec<(TurnId, lector_git::Changeset)> = self
             .turns
             .iter()
             .filter(|t| t.state.is_finished() && !t.changed_files.is_empty())
-            .filter(|t| !self.summaries.contains_key(&t.id))
+            .filter(|t| !self.summaries.contains_key(&(session_id, t.id)))
             .filter_map(|t| t.changeset().map(|cs| (t.id, cs)))
             .collect();
         for (id, cs) in wanted {
-            self.summaries.insert(id, SummaryState::Computing);
+            let key = (session_id, id);
+            self.summaries.insert(key, SummaryState::Computing);
             let project = self.project.clone();
             let work = cx.background_spawn(async move {
                 let repo = project.repo()?;
@@ -539,7 +598,7 @@ impl AgentPanel {
                 let result = work.await;
                 let _ = this.update(cx, |this, cx| {
                     this.summaries.insert(
-                        id,
+                        key,
                         match result {
                             Some(s) => SummaryState::Ready(std::rc::Rc::new(s)),
                             None => SummaryState::Unavailable,
@@ -552,28 +611,71 @@ impl AgentPanel {
         }
     }
 
-    /// Undoes a turn (with `force` after the user confirmed overwriting newer edits).
+    /// Undoes a turn of the current session (with `force` after the user confirmed
+    /// overwriting newer edits).
     pub fn undo_turn(&mut self, id: TurnId, force: bool, cx: &mut Context<Self>) {
-        let Some(s) = self.session.clone() else {
+        let Some(session) = self.session.clone() else {
             return;
         };
-        self.busy_turn_action = Some(id);
-        self.undo_conflict = None;
+        self.undo_turn_in(session, id, force, cx);
+    }
+
+    /// Undoes turn `id` of `session` - the session the turn id came from, which is not
+    /// necessarily the panel's current one (turn ids restart at 1 in every session, so an id
+    /// alone must never be resolved against whatever session is current).
+    pub fn undo_turn_in(
+        &mut self,
+        session: AgentSession,
+        id: TurnId,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.session.as_ref() == Some(&session);
+        if current {
+            self.busy_turn_action = Some(id);
+            self.undo_conflict = None;
+        }
         cx.notify();
-        let work = cx.background_spawn(async move { s.undo_turn(id, force, Source::Ui) });
+        let worker = session.clone();
+        let work = cx.background_spawn(async move { worker.undo_turn(id, force, Source::Ui) });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
-                this.busy_turn_action = None;
+                // The panel may have moved on to another session while this ran.
+                let current = this.session.as_ref() == Some(&session);
+                if current {
+                    this.busy_turn_action = None;
+                }
+                let which = if current {
+                    format!("turn {id}")
+                } else {
+                    format!("turn {id} of an earlier agent session")
+                };
                 match result {
                     Ok(_) => this.toast_level(
-                        format!("Undid turn {id}. Undo it again from the Activity Log."),
+                        format!("Undid {which}. Undo it again from the Activity Log."),
                         ToastLevel::Success,
                         cx,
                     ),
-                    Err(AgentError::UndoConflict { paths }) => {
-                        this.undo_conflict = Some(UndoConflict { turn: id, paths });
+                    Err(AgentError::UndoConflict { paths }) if current => {
+                        this.undo_conflict = Some(UndoConflict {
+                            session: session.clone(),
+                            turn: id,
+                            paths,
+                        });
                     }
+                    Err(AgentError::UndoConflict { paths }) => this.toast_level(
+                        format!(
+                            "Nothing restored: {} edited since {which}.",
+                            if paths.len() == 1 {
+                                "1 file was".to_string()
+                            } else {
+                                format!("{} files were", paths.len())
+                            }
+                        ),
+                        ToastLevel::Warning,
+                        cx,
+                    ),
                     Err(e) => this.toast_level(e.to_string(), ToastLevel::Warning, cx),
                 }
                 this.refresh(cx);

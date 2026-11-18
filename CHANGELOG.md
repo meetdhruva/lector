@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.7.1 — unreleased
+
+Fixes for problems found in review of 0.7.0.
+
+Fixes:
+
+- **Undo turn acts on the right agent session.** Turn numbers start at 1 in every agent session, so
+  "Undo turn" in the review tab of an older session could restore the files of the newest session's
+  first turn. Review tabs, the turn buttons in the Agent panel, the file menu and inline edits now stay
+  bound to the session their turn came from; the button is disabled, with the reason, when that turn
+  cannot be undone any more.
+- **Refining an inline edit after starting a new agent session no longer sticks on "Working".** The
+  refinement runs on the session of the pending edit while it is alive, otherwise on the current one,
+  and its result (or its failure) is shown.
+- **Files opened from a terminal link outside the project stay read-only.** They became editable as
+  soon as they finished loading. They are now locked read-only from the start (also after a reload,
+  a change on disk and a restart); "Toggle Read-Only" explains why instead of unlocking. Files you
+  open yourself (File > Open and the like) stay editable.
+- **Typing right after accepting a completion keeps the completion.** When the language server was
+  slow to resolve the item, a key pressed in the meantime could drop the acceptance and leave the list
+  stuck. The key (or the commit character) is now typed right after the completion, Escape cancels
+  the acceptance cleanly, and no typed text is lost.
+- **Saved terminal tabs of two windows can no longer overwrite each other.** Each project's terminal
+  session is stored in a file of its own, written atomically. Sessions saved by 0.7.0 are still read.
+- **Undoing a stash restores what was staged** (not just the working tree).
+- **Undoing a pull keeps staged changes in other files** that were not part of the pull.
+- **Undo after applying a stash also covers files renamed since the stash was made.**
+- **A stash apply that partly fails no longer leaves changes without an Undo.**
+- **Windows installer debug files (`.wixpdb`) are no longer published** with releases or included in
+  `SHA256SUMS.txt`.
+
 ## 0.7.0 — 2026-11-13
 
 Sync, terminal, completion, inline agent edits, and installs you can check.

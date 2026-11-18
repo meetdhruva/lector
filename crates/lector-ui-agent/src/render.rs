@@ -250,6 +250,9 @@ impl AgentPanel {
         let theme = cx.theme().clone();
         let ui = &theme.ui;
         let id = turn.id;
+        // Every button below acts on this session's turn: the click must not resolve the id
+        // against a session started after this frame was drawn.
+        let session = self.session.clone();
         let mut col = v_flex().gap(px(8.)).w_full();
 
         // Header: "Turn 3 · completed" + "3 files changed · Review · Undo turn".
@@ -375,17 +378,25 @@ impl AgentPanel {
         // Footer: what changed, review, undo.
         if finished && turn.before.is_some() {
             // The summary card: counts, the riskiest file and the files in review order.
-            let summary = match self.summaries.get(&id) {
+            let summary = match session
+                .as_ref()
+                .and_then(|s| self.summaries.get(&(s.id(), id)))
+            {
                 Some(crate::panel::SummaryState::Ready(s)) if n > 0 => Some(s.clone()),
                 _ => None,
             };
             if let Some(summary) = &summary {
                 let panel = cx.entity().downgrade();
+                let card_session = session.clone();
                 let open: crate::summary_ui::OpenFile = Rc::new(move |target, window, cx| {
                     let panel = panel.clone();
+                    let Some(session) = card_session.clone() else {
+                        return;
+                    };
                     window.defer(cx, move |window, cx| {
-                        let _ = panel
-                            .update(cx, |p, cx| p.review_turn_at(id, Some(target), window, cx));
+                        let _ = panel.update(cx, |p, cx| {
+                            p.review_turn_in(session, id, Some(target), window, cx)
+                        });
                     });
                 });
                 col = col.child(crate::summary_ui::summary_card(
@@ -417,15 +428,18 @@ impl AgentPanel {
                 })
                 .child(div().flex_1())
                 .when(n > 0, |el| {
-                    el.child(
+                    el.child({
+                        let session = session.clone();
                         Button::new(("agent-review", id.0 as usize), "Review changes")
                             .icon(IconName::GitPullRequest)
                             .compact()
                             .tooltip(Tooltip::text("Open this turn's changes in a review tab"))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.review_turn(id, window, cx)
-                            })),
-                    )
+                                if let Some(session) = session.clone() {
+                                    this.review_turn_in(session, id, None, window, cx)
+                                }
+                            }))
+                    })
                     .child(if turn.undone {
                         div()
                             .px(px(6.))
@@ -440,7 +454,14 @@ impl AgentPanel {
                             .tooltip(Tooltip::text(
                                 "Undo turn: restore the files this turn changed (undoable from the Activity Log)",
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| this.undo_turn(id, false, cx)))
+                            .on_click({
+                                let session = session.clone();
+                                cx.listener(move |this, _, _, cx| {
+                                    if let Some(session) = session.clone() {
+                                        this.undo_turn_in(session, id, false, cx)
+                                    }
+                                })
+                            })
                             .into_any_element()
                     })
                 });
@@ -557,6 +578,7 @@ impl AgentPanel {
         let theme = cx.theme().clone();
         let ui = &theme.ui;
         let id = conflict.turn;
+        let session = conflict.session.clone();
         v_flex()
             .gap(px(6.))
             .p(px(8.))
@@ -590,7 +612,9 @@ impl AgentPanel {
                         Button::new(("agent-undo-force", id.0 as usize), "Restore anyway")
                             .style(ButtonStyle::Outlined)
                             .compact()
-                            .on_click(cx.listener(move |this, _, _, cx| this.undo_turn(id, true, cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.undo_turn_in(session.clone(), id, true, cx)
+                            })),
                     )
                     .child(
                         Button::new(("agent-undo-keep", id.0 as usize), "Keep my edits")

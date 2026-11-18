@@ -695,6 +695,34 @@ impl Workspace {
         self.open_path_with(path, preview, None, true, window, cx);
     }
 
+    /// Opens `path` as the target of a link that points outside the project (a file path in
+    /// a terminal) and moves the cursor to 1-based `line`/`col`.
+    ///
+    /// The tab is created locked read-only ([`FileView::set_read_only_lock`]) before its
+    /// document starts loading, so the load, reloads, changes on disk and a restored session
+    /// all keep it read-only. A tab of this file that is already open keeps whatever it was:
+    /// a link never takes editing away from a tab the user opened on purpose. Explicit opens
+    /// (File > Open, the file tree, recent files, "Go to Definition"...) are
+    /// [`Workspace::open_path_at`] and stay editable.
+    pub fn open_linked_path_read_only(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        col: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<FileView>> {
+        let reveal = line.map(|line| {
+            let col = col.map(|c| c.saturating_sub(1) as usize).unwrap_or(0);
+            Reveal {
+                row: line.saturating_sub(1),
+                cols: col..col,
+                center: true,
+            }
+        });
+        self.open_path_locked(path, reveal, window, cx)
+    }
+
     /// Opens `path` and moves the cursor to 1-based `line`/`col`.
     pub fn open_path_at(
         &mut self,

@@ -97,6 +97,9 @@ pub enum FileViewEvent {
     /// Save As replaces the file at this path: the tabs of other views
     /// showing it must close first.
     CloseTabsOf(PathBuf),
+    /// Someone asked to allow editing in a tab that is locked read-only: the message says why
+    /// it stays read-only (the workspace shows it).
+    ReadOnlyLocked(SharedString),
 }
 
 struct HoverPopover {
@@ -125,6 +128,9 @@ pub struct DocumentMeta {
     pub read_only: bool,
     /// The file type can be edited at all (read-only can be toggled).
     pub editable: bool,
+    /// Why editing cannot be allowed in this tab (a locked tab, see
+    /// [`FileView::set_read_only_lock`]).
+    pub read_only_reason: Option<SharedString>,
 }
 
 /// A file tab: code view (with breadcrumbs) or image / binary preview.
@@ -148,6 +154,10 @@ pub struct FileView {
     setup_done: bool,
     /// The shared document is locked (`document.set_read_only`).
     doc_locked: bool,
+    /// Why this tab can never be made editable (a file opened from a link that points
+    /// outside the project, see [`FileView::set_read_only_lock`]). Survives reloads and
+    /// changes on disk; the tab's code view carries the same lock.
+    read_only_lock: Option<SharedString>,
     /// The in-place diff of an inline agent edit, when one is showing (`inline_diff`).
     inline_edit: Option<inline_diff::InlineEditState>,
     _subscriptions: Vec<Subscription>,
@@ -229,6 +239,11 @@ impl FileView {
                         cx.emit(FileViewEvent::StateChanged);
                         cx.notify();
                     }
+                    CodeViewEvent::ReadOnlyLocked => {
+                        if let Some(reason) = this.read_only_lock.clone() {
+                            cx.emit(FileViewEvent::ReadOnlyLocked(reason));
+                        }
+                    }
                 },
             );
         let model_sub = cx.subscribe(&model, |this, _, event: &DocumentEvent, cx| {
@@ -254,6 +269,7 @@ impl FileView {
             focus_pending: false,
             setup_done: false,
             doc_locked: false,
+            read_only_lock: None,
             inline_edit: None,
             _subscriptions: vec![code_view_sub, model_sub],
         };
@@ -330,7 +346,8 @@ impl FileView {
         let buffer = model.buffer().cloned();
         let editable = model.is_editable();
         let locked = model.is_locked();
-        let read_only = AppSettings::get(cx).editor.read_only || !editable || locked;
+        let lock = self.read_only_lock.is_some();
+        let read_only = AppSettings::get(cx).editor.read_only || !editable || locked || lock;
         let first_setup = !self.setup_done || locked != self.doc_locked;
         self.doc_locked = locked;
         self.code_view.update(cx, |v, cx| {
@@ -341,6 +358,9 @@ impl FileView {
             if first_setup || !editable {
                 v.set_read_only(read_only, cx);
             }
+            // The restriction of this tab is never decided by the document: loading,
+            // reloading and external changes do not lift it.
+            v.set_read_only_locked(lock, cx);
         });
         self.crumbs = None;
         self.hover = None;
@@ -458,6 +478,28 @@ impl FileView {
         self.code_view.read(cx).is_read_only()
     }
 
+    /// Locks this tab read-only for good (`Some(reason)`), or lifts the lock. A locked tab
+    /// stays read-only through the load that may still be running, reloads, external
+    /// changes, settings changes and session restore; "toggle read-only" only explains
+    /// `reason`. Used for files opened from a link that points outside the project.
+    pub fn set_read_only_lock(&mut self, reason: Option<SharedString>, cx: &mut Context<Self>) {
+        let locked = reason.is_some();
+        self.read_only_lock = reason;
+        self.code_view
+            .update(cx, |v, cx| v.set_read_only_locked(locked, cx));
+        cx.notify();
+    }
+
+    /// Why this tab is locked read-only, if it is.
+    pub fn read_only_lock(&self) -> Option<&SharedString> {
+        self.read_only_lock.as_ref()
+    }
+
+    /// Flips read-only; a locked tab stays read-only and tells why (`ReadOnlyLocked`).
+    pub fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
+        self.code_view.update(cx, |v, cx| v.toggle_read_only(cx));
+    }
+
     /// Status-bar facts.
     pub fn meta(&self, cx: &App) -> Option<DocumentMeta> {
         let model = self.model.read(cx);
@@ -494,6 +536,7 @@ impl FileView {
             dirty: model.is_dirty(cx),
             read_only: self.code_view.read(cx).is_read_only(),
             editable: model.is_editable(),
+            read_only_reason: self.read_only_lock.clone(),
         })
     }
 
@@ -1633,8 +1676,10 @@ impl PaneItem for FileItem {
         let project = self.view.read(cx).project().clone();
         let path = self.view.read(cx).path().to_path_buf();
         let selection = self.code_view.read(cx).selection();
+        let lock = self.view.read(cx).read_only_lock().cloned();
         let view = cx.new(|cx| {
             let mut v = FileView::new(path, project, cx);
+            v.set_read_only_lock(lock, cx);
             v.reveal(
                 Reveal {
                     row: selection.head.row,

@@ -86,9 +86,14 @@ if ($iscc) {
 # --- MSI (WiX v5) -----------------------------------------------------------------------
 if (Get-Command wix -ErrorAction SilentlyContinue) {
   $msi = Join-Path $OutDir "Lector-$Version-windows-$Arch.msi"
+  # -pdbtype none: no Lector-<version>-windows-<arch>.wixpdb next to the .msi. That file is a
+  # WiX debug database for building patches, not something users install; 0.7.0 shipped two of
+  # them as release assets by accident.
   wix build (Join-Path $Root "packaging\windows\lector.wxs") -arch $Arch -ext WixToolset.UI.wixext `
-    -d "Version=$Version" -d "SourceDir=$Stage" -o $msi
+    -d "Version=$Version" -d "SourceDir=$Stage" -pdbtype none -o $msi
   if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+  # Whatever an older or newer WiX writes anyway never reaches dist/ (and so never a release).
+  Get-ChildItem $OutDir -Filter "*.wixpdb" -ErrorAction SilentlyContinue | Remove-Item -Force
   Write-Host "built $msi"
 } else {
   Write-Warning "WiX (wix) not found; skipping .msi"

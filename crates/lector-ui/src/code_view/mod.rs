@@ -221,6 +221,9 @@ pub enum CodeViewEvent {
     Edited,
     /// The view's read-only flag changed.
     ReadOnlyChanged,
+    /// Someone tried to make a view allow editing whose read-only state is locked
+    /// ([`CodeView::set_read_only_locked`]): the owner explains why it stays read-only.
+    ReadOnlyLocked,
 }
 
 /// Where to scroll on the next layout.
@@ -301,6 +304,9 @@ pub struct CodeView {
     buffer: Option<Entity<EditBuffer>>,
     manage_source: bool,
     read_only: bool,
+    /// A restriction that `set_read_only(false)` and the toggle cannot lift
+    /// ([`CodeView::set_read_only_locked`]); the view stays read-only whatever `read_only` says.
+    read_only_locked: bool,
     marked: Option<Range<usize>>,
     ime_transaction: bool,
     pub(crate) cursor_visible: bool,
@@ -413,6 +419,7 @@ impl CodeView {
             buffer: None,
             manage_source: false,
             read_only: false,
+            read_only_locked: false,
             marked: None,
             ime_transaction: false,
             cursor_visible: true,
@@ -508,7 +515,41 @@ impl CodeView {
 
     /// Whether editing is blocked (or there is no buffer).
     pub fn is_read_only(&self) -> bool {
-        self.read_only || self.buffer.is_none()
+        self.read_only || self.read_only_locked || self.buffer.is_none()
+    }
+
+    /// Whether the read-only state is locked (the toggle only explains).
+    pub fn is_read_only_locked(&self) -> bool {
+        self.read_only_locked
+    }
+
+    /// Locks (or unlocks) the view read-only. While locked, [`CodeView::is_read_only`] is true
+    /// whatever [`CodeView::set_read_only`] was given, so no reload, setting change or
+    /// document event can make the view editable; the owner is the only one to lift it.
+    pub fn set_read_only_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        if self.read_only_locked != locked {
+            let before = self.is_read_only();
+            self.read_only_locked = locked;
+            self.marked = None;
+            if before != self.is_read_only() {
+                cx.emit(CodeViewEvent::ReadOnlyChanged);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Flips read-only (the toggle command, the status bar). A locked view stays read-only
+    /// and emits [`CodeViewEvent::ReadOnlyLocked`] instead. Does nothing without a buffer.
+    pub fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.is_none() {
+            return;
+        }
+        if self.read_only_locked {
+            cx.emit(CodeViewEvent::ReadOnlyLocked);
+            return;
+        }
+        let ro = !self.read_only;
+        self.set_read_only(ro, cx);
     }
 
     /// Whether the text can be edited here (a buffer and not read-only).
@@ -1417,7 +1458,7 @@ impl CodeView {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Buffer) -> (R, Transaction),
     ) -> Option<R> {
-        if self.read_only {
+        if self.is_read_only() {
             return None;
         }
         let buffer = self.buffer.clone()?;
@@ -1902,13 +1943,17 @@ impl CodeView {
         self.deploy_context_menu(anchor, window, cx);
     }
 
-    fn toggle_read_only(&mut self, _: &ToggleReadOnly, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_read_only_action(
+        &mut self,
+        _: &ToggleReadOnly,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.buffer.is_none() {
             cx.propagate();
             return;
         }
-        let ro = !self.read_only;
-        self.set_read_only(ro, cx);
+        self.toggle_read_only(cx);
     }
 
     // Caret blink.
@@ -2129,7 +2174,8 @@ impl CodeView {
         let path = self.path.clone();
         let has_buffer = self.buffer.is_some();
         let editable = self.is_editable();
-        let read_only = self.read_only;
+        let read_only = self.is_read_only();
+        let locked = self.read_only_locked;
         let (can_undo, can_redo) = self
             .buffer
             .as_ref()
@@ -2234,7 +2280,9 @@ impl CodeView {
             }
             if has_buffer {
                 menu = menu.separator().icon_action(
-                    if read_only {
+                    if locked {
+                        "Why Is This Read-Only?"
+                    } else if read_only {
                         "Allow Editing"
                     } else {
                         "Make Read-Only"
@@ -2552,7 +2600,7 @@ impl Render for CodeView {
                     .on_action(cx.listener(Self::duplicate_line))
                     .on_action(cx.listener(Self::move_line_up))
                     .on_action(cx.listener(Self::move_line_down))
-                    .on_action(cx.listener(Self::toggle_read_only))
+                    .on_action(cx.listener(Self::toggle_read_only_action))
             })
             .child(CodeElement::new(cx.entity()))
             .children(self.context_menu.render())

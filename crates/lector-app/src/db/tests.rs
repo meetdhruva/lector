@@ -10,6 +10,7 @@ fn session(row: u32) -> lector_config::Session {
                 },
                 scroll_row: row,
                 active: true,
+                read_only_locked: false,
             }],
         }],
         ..Default::default()

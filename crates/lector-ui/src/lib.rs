@@ -40,6 +40,8 @@ mod editing_tests;
 #[cfg(test)]
 mod polish_tests;
 #[cfg(test)]
+mod read_only_lock_tests;
+#[cfg(test)]
 mod review_ux_tests;
 #[cfg(test)]
 mod tests;

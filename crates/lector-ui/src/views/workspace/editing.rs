@@ -173,13 +173,21 @@ impl Workspace {
         }
         if meta.editable {
             let code_view = view.read(cx).code_view().clone();
+            // A locked tab (a link outside the project) only explains why it stays read-only.
             let toggle = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-                code_view.update(cx, |v, cx| {
-                    let ro = v.is_read_only();
-                    v.set_read_only(!ro, cx);
-                });
+                code_view.update(cx, |v, cx| v.toggle_read_only(cx));
             };
-            if meta.read_only {
+            if let (true, Some(reason)) = (meta.read_only, meta.read_only_reason.clone()) {
+                out.push(
+                    Button::new("status-read-only", "Read-Only")
+                        .compact()
+                        .color(fg)
+                        .icon(IconName::Lock)
+                        .tooltip(Tooltip::text(reason))
+                        .on_click(toggle)
+                        .into_any_element(),
+                );
+            } else if meta.read_only {
                 out.push(
                     Button::new("status-read-only", "Read-Only")
                         .compact()

@@ -33,6 +33,9 @@ use crate::views::pane::{new_pane, PaneItem, PaneNode};
 use crate::views::references::{ReferencesEvent, ReferencesItem, ReferencesView};
 use crate::views::search_panel::{SearchPanel, SearchPanelEvent};
 use crate::views::sidebar::SidebarPanel;
+
+/// Why a file opened from a link outside the project is read-only (toast and tooltip).
+pub const LINKED_FILE_READ_ONLY: &str = "This file is outside the project and was opened from a link, so it is read-only. To edit it, close this tab and open the file with File > Open.";
 use crate::views::symbol_picker::{SymbolEntry, SymbolPickerDelegate};
 
 /// Restores a non-file tab from the session (seam for extension crates).
@@ -557,6 +560,28 @@ impl Workspace {
         Some(view)
     }
 
+    /// [`Workspace::open_linked_path_read_only`]: a new tab is locked read-only from its
+    /// creation (before the document loads); a tab that is already open is left as it is.
+    pub(super) fn open_path_locked(
+        &mut self,
+        path: PathBuf,
+        reveal: Option<Reveal>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<Entity<FileView>> {
+        if path.is_dir() {
+            self.reveal_path(&path, cx);
+            return None;
+        }
+        self.record_location(cx);
+        let view =
+            self.open_file_view_locked(path, false, Some(LINKED_FILE_READ_ONLY.into()), window, cx);
+        if let Some(reveal) = reveal {
+            view.update(cx, |v, cx| v.reveal(reveal, cx));
+        }
+        Some(view)
+    }
+
     /// The file view of `path` in any pane, or a new tab for it added to the
     /// active pane without activating it (LSP edits to files that were not
     /// open: they show up as dirty tabs for review).
@@ -591,6 +616,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Entity<FileView> {
+        self.open_file_view_locked(path, preview, None, window, cx)
+    }
+
+    /// [`Self::open_file_view`] with `lock`: why a tab created now can never be made
+    /// editable (an existing tab keeps its own state).
+    fn open_file_view_locked(
+        &mut self,
+        path: PathBuf,
+        preview: bool,
+        lock: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Entity<FileView> {
         let pane = self.active_pane.clone();
         if let Some(ix) = pane.read(cx).index_for_path(&path, cx) {
             pane.update(cx, |pane, cx| {
@@ -609,7 +647,14 @@ impl Workspace {
             }
         }
         let project = self.project.clone();
-        let view = cx.new(|cx| FileView::new(path, project, cx));
+        let view = cx.new(|cx| {
+            let mut view = FileView::new(path, project, cx);
+            // Before the document loads: the load can never win against the lock.
+            if lock.is_some() {
+                view.set_read_only_lock(lock, cx);
+            }
+            view
+        });
         self.subscribe_file_view(&view, window, cx);
         let item = Box::new(FileItem::new(view.clone(), cx));
         pane.update(cx, |pane, cx| pane.add_item(item, preview, window, cx));
@@ -642,6 +687,9 @@ impl Workspace {
                                 pane.update(cx, |p, cx| p.close(ix, win, cx));
                             }
                         }
+                    }
+                    FileViewEvent::ReadOnlyLocked(reason) => {
+                        this.show_toast(reason.clone(), cx);
                     }
                     FileViewEvent::CloseRequested => {
                         // Close the tab(s) of this view (asks about unsaved changes).
@@ -1493,7 +1541,7 @@ impl Workspace {
         }));
     }
 
-    fn session(&self, cx: &App) -> Session {
+    pub(crate) fn session(&self, cx: &App) -> Session {
         let panes = self.center.panes();
         let active_pane = panes
             .iter()
@@ -1520,10 +1568,14 @@ impl Workspace {
                                 .code_view()
                                 .map(|v| v.read(cx).top_visible_row())
                                 .unwrap_or(0);
+                            let read_only_locked = item
+                                .file_view()
+                                .is_some_and(|v| v.read(cx).read_only_lock().is_some());
                             Some(TabState {
                                 kind,
                                 scroll_row,
                                 active: ix == active,
+                                read_only_locked,
                             })
                         })
                         .collect(),
@@ -1565,6 +1617,16 @@ impl Workspace {
             self.integ.session_ready = true;
             return false;
         };
+        self.restore_session_from(session, window, cx)
+    }
+
+    /// Restores `session` (tabs, splits, sidebar). Returns whether any tab came back.
+    pub(crate) fn restore_session_from(
+        &mut self,
+        session: Session,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
         self.sidebar_visible = session.sidebar_visible;
         if session.sidebar_width >= 120. {
             self.sidebar_width = gpui::px(session.sidebar_width.min(900.));
@@ -1605,7 +1667,11 @@ impl Workspace {
                         if !path.is_file() {
                             continue;
                         }
-                        let view = self.open_file_view(path.clone(), false, window, cx);
+                        // A tab that was locked read-only (a link outside the project)
+                        // comes back locked.
+                        let lock = tab.read_only_locked.then(|| LINKED_FILE_READ_ONLY.into());
+                        let view =
+                            self.open_file_view_locked(path.clone(), false, lock, window, cx);
                         view.update(cx, |v, cx| {
                             v.reveal(
                                 Reveal {

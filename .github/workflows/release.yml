@@ -619,7 +619,10 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unsigned-windows-${{ matrix.arch }}
-          path: dist/*
+          # Never the WiX debug database (package-windows.ps1 does not write one either).
+          path: |
+            dist/*
+            !dist/*.wixpdb
           if-no-files-found: error
 
   sign-windows-installers:
@@ -692,7 +695,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-windows-${{ matrix.arch }}
-          path: dist/*
+          path: |
+            dist/*
+            !dist/*.wixpdb
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -730,7 +735,9 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: |
-          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
+          # Debug databases are not release files, whatever an earlier job let through.
+          rm -f ./*.wixpdb
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' ! -name '*.wixpdb' -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -818,7 +825,10 @@ jobs:
           path: signing
           merge-multiple: true
       - name: Release files
-        run: ls -la dist
+        run: |
+          # The release is dist/* as downloaded: no installer debug databases (0.7.0 shipped two).
+          rm -f dist/*.wixpdb
+          ls -la dist
       - name: Release notes
         env:
           VERSION: ${{ needs.prepare.outputs.version }}

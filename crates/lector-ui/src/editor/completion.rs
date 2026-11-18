@@ -36,6 +36,12 @@
 //!   (additional edits such as auto-imports included, every caret placed), and
 //!   opens signature help when the item asks for it. If the text moved so that
 //!   the commit no longer fits, the popup closes quietly.
+//!   While an acceptance waits for the server it is a [`PendingAccept`] of its
+//!   own (the documentation resolve and every selection change leave it alone):
+//!   typed text is held back and typed right after the commit, in order, the
+//!   commit character first; the list does not move; Escape cancels the
+//!   acceptance (nothing is committed, the held-back text is typed); a failed,
+//!   stale or missing answer commits the item as the server listed it.
 //! * **Snippets** (`editor.completion.snippets`): there is no tab-stop session
 //!   in the editor. The caret is placed at the first stop, the rest are ignored.
 
@@ -383,12 +389,23 @@ struct Open {
     token: CancelToken,
     request: Option<Task<()>>,
     stale_retries: u8,
+    /// The documentation resolve of the selected item (replaced on every selection change).
     resolve: Option<Task<()>>,
     resolve_token: CancelToken,
     docs: Docs,
     /// When the server's answer reached the UI thread, until the first render logged it.
     reply_at: Option<Instant>,
-    accepting: bool,
+    /// An acceptance waiting for the resolve answer (never touched by selection changes).
+    accept: Option<PendingAccept>,
+}
+
+/// An acceptance that waits (at most `ACCEPT_RESOLVE_WAIT_MS`) for `completionItem/resolve`.
+struct PendingAccept {
+    /// Applies the commit when the answer arrived or the wait ran out. Dropping it cancels.
+    _task: Task<()>,
+    token: CancelToken,
+    /// Text typed meanwhile (the commit character first): typed after the commit, in order.
+    queued: Vec<String>,
 }
 
 /// What Enter does with the popup open.
@@ -431,10 +448,15 @@ impl CompletionController {
         let weak = this.clone();
         code_view.update(cx, |v, _| {
             v.set_input_interceptor(Some(Rc::new(move |text, window, cx| {
-                let Some(c) = single_char(text) else {
+                let Some(controller) = weak.upgrade() else {
                     return false;
                 };
-                let Some(controller) = weak.upgrade() else {
+                // An acceptance is waiting for the server: hold the text back, it is typed
+                // right after the commit.
+                if controller.update(cx, |this, _| this.hold_back(text)) {
+                    return true;
+                }
+                let Some(c) = single_char(text) else {
                     return false;
                 };
                 if !controller.read(cx).is_commit_character(c) {
@@ -537,7 +559,39 @@ impl CompletionController {
             && self
                 .open
                 .as_ref()
-                .is_some_and(|o| !o.accepting && o.session.is_commit_character(c))
+                .is_some_and(|o| o.accept.is_none() && o.session.is_commit_character(c))
+    }
+
+    /// An acceptance is waiting for the server's answer.
+    pub fn is_accepting(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.accept.is_some())
+    }
+
+    /// While an acceptance is pending: keeps `text` to type after the commit. `false` when
+    /// none is pending (the text is typed as usual).
+    fn hold_back(&mut self, text: &str) -> bool {
+        match self.open.as_mut().and_then(|o| o.accept.as_mut()) {
+            Some(pending) => {
+                pending.queued.push(text.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Types `chunks` at the carets as keystrokes would (held-back text after a commit or a
+    /// cancelled acceptance).
+    fn type_held_back(&self, chunks: Vec<String>, cx: &mut Context<Self>) {
+        if chunks.is_empty() {
+            return;
+        }
+        if let Some(code_view) = self.code_view.upgrade() {
+            code_view.update(cx, |v, cx| {
+                for chunk in &chunks {
+                    v.insert_typed(chunk, cx);
+                }
+            });
+        }
     }
 
     // ---- opening ---------------------------------------------------------------------------
@@ -624,6 +678,10 @@ impl CompletionController {
     }
 
     fn begin(&mut self, reason: OpenReason, cx: &mut Context<Self>) -> Result<(), OpenError> {
+        // A commit is on its way: the list it belongs to stays until it landed (or Escape).
+        if self.is_accepting() {
+            return Ok(());
+        }
         self.check_editable(cx)?;
         let (lsp, path, language, _caps) = self.server(cx)?;
         let Some(model) = self.model.upgrade() else {
@@ -649,7 +707,7 @@ impl CompletionController {
             resolve_token: CancelToken::new(),
             docs: Docs::default(),
             reply_at: None,
-            accepting: false,
+            accept: None,
         };
         self.open = Some(open);
         self.list_top = 0;
@@ -753,6 +811,11 @@ impl CompletionController {
             .code_view
             .upgrade()
             .and_then(|v| v.update(cx, |v, _| v.take_typed()));
+        // An acceptance is pending: the list must not follow edits or the caret until the
+        // commit landed (it would drop the acceptance). The commit checks the text itself.
+        if self.is_accepting() {
+            return;
+        }
         let Some((rope, caret, _)) = caret_state(&self.code_view, cx) else {
             return;
         };
@@ -923,6 +986,7 @@ impl CompletionController {
         let Some(open) = self.open.as_mut() else {
             return;
         };
+        // Documentation only: a pending acceptance has its own task (`open.accept`).
         open.resolve = None;
         open.resolve_token.cancel();
         let Some((ix, _)) = open.session.selected_item() else {
@@ -1051,9 +1115,15 @@ impl CompletionController {
 
     /// Ends the session and hides the popup.
     pub fn close(&mut self, reason: CloseReason, cx: &mut Context<Self>) {
+        let mut held_back = Vec::new();
         if let Some(mut open) = self.open.take() {
             open.token.cancel();
             open.resolve_token.cancel();
+            // Closing under a pending acceptance cancels it; what was typed meanwhile is not lost.
+            if let Some(pending) = open.accept.take() {
+                pending.token.cancel();
+                held_back = pending.queued;
+            }
             open.session.close(reason);
             self.suppress = matches!(
                 reason,
@@ -1077,6 +1147,7 @@ impl CompletionController {
                 });
             }
         }
+        self.type_held_back(held_back, cx);
         cx.notify();
     }
 
@@ -1105,6 +1176,10 @@ impl CompletionController {
     fn select(&mut self, f: impl FnOnce(&mut CompletionSession), cx: &mut Context<Self>) -> bool {
         if !self.popup_visible() {
             return false;
+        }
+        // The item being committed stays selected.
+        if self.is_accepting() {
+            return true;
         }
         if let Some(open) = self.open.as_mut() {
             f(&mut open.session);
@@ -1139,6 +1214,10 @@ impl CompletionController {
 
     /// Accepts the selected item; `then_type` is inserted afterwards (a commit
     /// character). `false` when no popup shows.
+    ///
+    /// An item that may still add edits is resolved first, for at most
+    /// `ACCEPT_RESOLVE_WAIT_MS`. Meanwhile the acceptance is `Open::accept`: text typed
+    /// (and `then_type`) is held back and typed after the commit; Escape cancels it.
     pub fn accept(&mut self, then_type: Option<String>, cx: &mut Context<Self>) -> bool {
         if !self.popup_visible() {
             return false;
@@ -1146,7 +1225,12 @@ impl CompletionController {
         let Some(open) = self.open.as_mut() else {
             return false;
         };
-        if open.accepting {
+        if open.accept.is_some() {
+            // Already committing: a second Enter / Tab changes nothing, a commit character
+            // typed meanwhile is held back like any other text.
+            if let (Some(text), Some(pending)) = (then_type, open.accept.as_mut()) {
+                pending.queued.push(text);
+            }
             return true;
         }
         let Some((item_ix, item)) = open.session.selected_item() else {
@@ -1154,17 +1238,16 @@ impl CompletionController {
         };
         let id = open.id;
         if !open.session.needs_resolve(item_ix) {
-            self.finish_accept(id, item_ix, then_type, cx);
+            self.finish_accept(id, item_ix, then_type.into_iter().collect(), cx);
             return true;
         }
         // The item may still add edits (auto-imports): ask, but never wait long.
         let item = item.clone();
         let generation = open.session.generation();
-        open.accepting = true;
         open.resolve = None;
         open.resolve_token.cancel();
         let Ok((lsp, path, ..)) = self.server(cx) else {
-            self.finish_accept(id, item_ix, then_type, cx);
+            self.finish_accept(id, item_ix, then_type.into_iter().collect(), cx);
             return true;
         };
         if let Some(model) = self.model.upgrade() {
@@ -1172,46 +1255,65 @@ impl CompletionController {
         }
         let token = CancelToken::new();
         let future = lsp.resolve_completion(&path, &item, Some(&token));
+        let wait_token = token.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let timeout = cx
+                .background_executor()
+                .timer(Duration::from_millis(ACCEPT_RESOLVE_WAIT_MS));
+            let resolved = match futures::future::select(Box::pin(future), Box::pin(timeout)).await
+            {
+                Either::Left((Ok(RequestOutcome::Done(r)), _)) => Some(r),
+                // A failed, cancelled or missing answer: the item as listed.
+                _ => None,
+            };
+            wait_token.cancel();
+            let _ = this.update(cx, |this, cx| {
+                if let (Some(r), Some(open)) = (resolved, this.open.as_mut().filter(|o| o.id == id))
+                {
+                    open.session.apply_resolved(generation, item_ix, r);
+                }
+                this.finish_accept(id, item_ix, Vec::new(), cx);
+            });
+        });
         if let Some(open) = self.open.as_mut() {
-            open.resolve_token = token.clone();
-            open.resolve = Some(cx.spawn(async move |this, cx| {
-                let timeout = cx
-                    .background_executor()
-                    .timer(Duration::from_millis(ACCEPT_RESOLVE_WAIT_MS));
-                let resolved =
-                    match futures::future::select(Box::pin(future), Box::pin(timeout)).await {
-                        Either::Left((Ok(RequestOutcome::Done(r)), _)) => Some(r),
-                        _ => None,
-                    };
-                token.cancel();
-                let _ = this.update(cx, |this, cx| {
-                    if let (Some(r), Some(open)) =
-                        (resolved, this.open.as_mut().filter(|o| o.id == id))
-                    {
-                        open.session.apply_resolved(generation, item_ix, r);
-                    }
-                    this.finish_accept(id, item_ix, then_type, cx);
-                });
-            }));
+            open.accept = Some(PendingAccept {
+                _task: task,
+                token,
+                queued: then_type.into_iter().collect(),
+            });
         }
         true
     }
 
+    /// Applies the commit of `item`, closes the list, and types `then_type` followed by
+    /// whatever was held back during a pending acceptance.
     fn finish_accept(
         &mut self,
         id: u64,
         item: usize,
-        then_type: Option<String>,
+        then_type: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(code_view) = self.code_view.upgrade() else {
             return;
         };
+        let mut then_type = then_type;
+        if let Some(pending) = self
+            .open
+            .as_mut()
+            .filter(|o| o.id == id)
+            .and_then(|o| o.accept.take())
+        {
+            then_type.extend(pending.queued);
+        }
         let commit = {
             let Some(open) = self.open.as_ref().filter(|o| o.id == id) else {
+                // Closed meanwhile (`close` typed what was held back).
                 return;
             };
             let Some((rope, ..)) = caret_state(&self.code_view, cx) else {
+                self.close(CloseReason::Dismissed, cx);
+                self.type_held_back(then_type, cx);
                 return;
             };
             let v = code_view.read(cx);
@@ -1228,12 +1330,14 @@ impl CompletionController {
                 // The text moved on: nothing sensible to insert any more.
                 tracing::debug!(target: "lector_ui::lsp", "completion not applied: {err}");
                 self.close(CloseReason::Dismissed, cx);
+                self.type_held_back(then_type, cx);
                 return;
             }
         };
         let applied = apply_commit(&code_view, &commit, cx);
         self.close(CloseReason::Committed, cx);
         if !applied {
+            self.type_held_back(then_type, cx);
             return;
         }
         // The edit's own change event must not read as a caret move.
@@ -1244,9 +1348,7 @@ impl CompletionController {
             self.signature
                 .update(cx, |s, cx| s.trigger_after_accept(cx));
         }
-        if let Some(text) = then_type {
-            code_view.update(cx, |v, cx| v.insert_typed(&text, cx));
-        }
+        self.type_held_back(then_type, cx);
     }
 
     fn scroll_by(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -1268,6 +1370,9 @@ impl CompletionController {
     }
 
     fn click_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        if self.is_accepting() {
+            return;
+        }
         if let Some(open) = self.open.as_mut() {
             open.session.select(row);
         }

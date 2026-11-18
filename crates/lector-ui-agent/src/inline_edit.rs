@@ -242,6 +242,52 @@ impl InlineEdits {
         self.active.contains_key(path)
     }
 
+    /// The phase of the inline edit of `path` (tests).
+    #[cfg(test)]
+    pub(crate) fn phase_of(&self, path: &Path) -> Option<InlinePhase> {
+        self.active.get(path).map(|a| a.edit.phase().clone())
+    }
+
+    /// The notes the inline edit of `path` shows (tests).
+    #[cfg(test)]
+    pub(crate) fn notes_of(&self, path: &Path) -> Vec<String> {
+        self.active
+            .get(path)
+            .map(|a| a.edit.notes().iter().map(|n| n.message()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The session the inline edit of `path` runs on (tests).
+    #[cfg(test)]
+    pub(crate) fn session_of(&self, path: &Path) -> Option<AgentSession> {
+        self.active.get(path).and_then(|a| a.session.clone())
+    }
+
+    /// Starts the edit of `view` without the availability checks (tests).
+    #[cfg(test)]
+    pub(crate) fn begin_for_test(
+        &mut self,
+        ws: &Workspace,
+        view: Entity<FileView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin(ws, view, window, cx);
+    }
+
+    /// Sends an instruction (tests; the prompt box is bypassed).
+    #[cfg(test)]
+    pub(crate) fn submit_for_test(
+        &mut self,
+        path: &Path,
+        text: &str,
+        follow_up: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.submit(path, text.to_string(), follow_up, window, cx);
+    }
+
     fn toast(&self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.toast_level(message, ToastLevel::Success, cx);
     }
@@ -284,7 +330,6 @@ impl InlineEdits {
                 return self.open_prompt(&path, false, None, window, cx);
             }
         }
-        let model = view.read(cx).model().clone();
         let cv = view.read(cx).code_view().clone();
         let busy = self
             .panel
@@ -301,6 +346,21 @@ impl InlineEdits {
         if let Err(why) = availability(&input) {
             return self.unavailable(why, window, cx);
         }
+        self.begin(ws, view, window, cx);
+    }
+
+    /// Starts an inline edit of `view` over its selection (or the current line) and shows the
+    /// prompt box. Everything `start` checks has passed.
+    fn begin(
+        &mut self,
+        ws: &Workspace,
+        view: Entity<FileView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = view.read(cx).path().to_path_buf();
+        let model = view.read(cx).model().clone();
+        let cv = view.read(cx).code_view().clone();
         let Some(buffer) = model.read(cx).buffer().cloned() else {
             return;
         };
@@ -464,6 +524,9 @@ impl InlineEdits {
         };
         a.submitted = true;
         a.status = "Starting the agent\u{2026}".into();
+        // A follow-up on pending changes stays on the session that made them while that
+        // session lives; only when it is gone does it go to the panel's current session.
+        let original = if follow_up { a.session.clone() } else { None };
         self.push_ui(path, cx);
         // A session may have to start first: wait for it, then send.
         if let Some(panel) = self.panel.upgrade() {
@@ -479,14 +542,11 @@ impl InlineEdits {
                     .update(cx, |this, cx| {
                         let panel = this.panel.upgrade()?;
                         let p = panel.read(cx);
-                        match p.session().map(|s| (s.clone(), s.status())) {
-                            Some((s, SessionStatus::Ready)) => Some(Ok(s)),
-                            Some((_, SessionStatus::Busy(_))) => {
-                                Some(Err("The agent is busy with another request.".to_string()))
-                            }
-                            Some((_, SessionStatus::Crashed(why))) => Some(Err(why)),
-                            _ => p.error.as_ref().map(|e| Err(e.to_string())),
-                        }
+                        resolve_session(
+                            original.as_ref(),
+                            p.session(),
+                            p.error.as_ref().map(|e| e.to_string()),
+                        )
                     })
                     .ok()
                     .flatten();
@@ -545,8 +605,13 @@ impl InlineEdits {
                 a.status = "Working\u{2026}".into();
                 a.finishing = false;
                 a.shown_permission = false;
+                // Events of the turn that just started must reach `on_session_event`: follow
+                // the session the turn runs on (a follow-up may run on another session than
+                // the previous turn did). The old subscription and its task are dropped.
+                let follows_it =
+                    a.session.as_ref() == Some(&session) && a._session_events.is_some();
                 a.session = Some(session.clone());
-                if a._session_events.is_none() {
+                if !follows_it {
                     let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
                     a._session_events = Some(session.subscribe(move |_| {
                         let _ = tx.unbounded_send(());
@@ -684,11 +749,17 @@ impl InlineEdits {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let turn = self.active.get(path).and_then(|a| a.edit.turn());
+        // The turn belongs to the session it ran on, which may no longer be the panel's.
+        let turn = self
+            .active
+            .get(path)
+            .and_then(|a| Some((a.session.clone()?, a.edit.turn()?)));
         self.clear(path, cx);
         self.warn(reason.message(), cx);
-        if let (Some(turn), Some(panel)) = (turn, self.panel.upgrade()) {
-            panel.update(cx, |p, cx| p.review_turn(turn, window, cx));
+        if let (Some((session, turn)), Some(panel)) = (turn, self.panel.upgrade()) {
+            panel.update(cx, |p, cx| {
+                p.review_turn_in(session, turn, None, window, cx)
+            });
         }
     }
 
@@ -883,9 +954,14 @@ impl InlineEdits {
                 }
             }
             InlineEditAction::OpenReview => {
-                let turn = self.active.get(path).and_then(|a| a.edit.turn());
-                if let (Some(turn), Some(panel)) = (turn, self.panel.upgrade()) {
-                    panel.update(cx, |p, cx| p.review_turn(turn, window, cx));
+                let turn = self
+                    .active
+                    .get(path)
+                    .and_then(|a| Some((a.session.clone()?, a.edit.turn()?)));
+                if let (Some((session, turn)), Some(panel)) = (turn, self.panel.upgrade()) {
+                    panel.update(cx, |p, cx| {
+                        p.review_turn_in(session, turn, None, window, cx)
+                    });
                 }
             }
         }
@@ -987,6 +1063,43 @@ pub enum Decision {
 
 fn cx_weak(this: &InlineEdits) -> WeakEntity<InlineEdits> {
     this.me.clone()
+}
+
+/// The session an inline edit's prompt goes to, once one is ready: `Some` when there is an answer
+/// (the session, or why there is none), `None` while the agent is still starting.
+///
+/// A follow-up (`original` is the session of the pending edit) stays on its original session
+/// while that session is alive: its turns and checkpoints live there. Only when the original is
+/// stopped or crashed (starting a new session stops the old one) does it go to the panel's
+/// `current` session, and then the caller subscribes to that session instead.
+fn resolve_session(
+    original: Option<&AgentSession>,
+    current: Option<&AgentSession>,
+    start_error: Option<String>,
+) -> Option<Result<AgentSession, String>> {
+    let gone = |s: &AgentSession| {
+        matches!(
+            s.status(),
+            SessionStatus::Stopped | SessionStatus::Crashed(_)
+        )
+    };
+    let target = match (original, current) {
+        (Some(o), _) if !gone(o) => Some(o),
+        (Some(o), Some(c)) if c != o => Some(c),
+        (Some(o), _) => Some(o),
+        (None, c) => c,
+    };
+    match target.map(|s| (s, s.status())) {
+        Some((s, SessionStatus::Ready)) => Some(Ok(s.clone())),
+        Some((_, SessionStatus::Busy(_))) => {
+            Some(Err("The agent is busy with another request.".to_string()))
+        }
+        Some((_, SessionStatus::Crashed(why))) => Some(Err(why)),
+        Some((_, SessionStatus::Stopped)) => Some(Err(
+            "The agent was stopped. Start a new session in the Agent panel.".to_string(),
+        )),
+        Some((_, SessionStatus::Starting)) | None => start_error.map(Err),
+    }
 }
 
 /// The old lines of a hunk: the old text split at line ends (no phantom last line).

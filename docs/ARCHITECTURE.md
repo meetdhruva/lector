@@ -690,6 +690,13 @@ The popups are built on the session models above; the editor integration is thre
   `CompletionSession::commit(rope, carets, primary, item)` and **one** `Buffer::apply_edits` for the main edit and the additional edits
   (auto-imports), then `set_selections(commit.carets)`, so undo restores text, imports and carets together. Multi-caret follows the
   session rules (`skipped_carets`). If the document version changed so that the commit no longer fits (`CommitError`), the popup closes quietly.
+  **A pending acceptance** (waiting for the resolve) is `Open::accept: Option<PendingAccept>`, a task of its own: the documentation
+  resolve (`Open::resolve`) and selection changes never replace it. While it is pending the list is frozen (the edit and caret events
+  are ignored, up/down/click do nothing, a second Enter or Tab changes nothing), and all text typed meanwhile is **held back** by the
+  input interceptor (`hold_back`) and typed after the commit in the order it came, the commit character first
+  (`insert_typed` per chunk, so auto-close and type-over still apply). The commit is one undo step, the held-back typing its own.
+  Escape closes the session, which cancels the acceptance: nothing is committed and the held-back text is typed anyway (typed text is
+  never lost). A failed, cancelled, stale or missing answer (300 ms) commits the item as listed. Ctrl+Space is ignored while pending.
   The session is closed with `Committed` and does not reopen for the same word; with `commit.triggers_signature_help()` signature help opens
   right after. **Snippets** (`editor.completion.snippets = true`; applied through `LspManager::set_completion_snippets` when the project
   opens): there is no tab-stop session in the editor, so the caret is placed at the first stop and the remaining stops are ignored.
@@ -1817,9 +1824,15 @@ impl Repo {
     pub fn delete_branch(&self, name, force: bool) -> Result<DeletedBranch { name, oid, upstream }>;
     pub fn set_upstream(&self, branch, upstream: Option<&str>) -> Result<Option<String> /* previous */>;
     pub fn branch_tip(&self, name) -> Result<Option<Oid>>;  pub fn branch_upstream(&self, name) -> Result<Option<String>>;
-    pub fn restore_ref(&self, refname, expected: Option<Oid>, target: Option<Oid>) -> Result<()>;   // undo; checked-out branch: reset --keep
+    pub fn restore_ref(&self, refname, expected: Option<Oid>, target: Option<Oid>) -> Result<()>;   // undo; checked-out branch:
+    pub fn reset_keep_preserving_index(&self, head: Oid, target: Oid) -> Result<()>;   // reset --keep + staged entries written back
+                                       // (LocalChanges, nothing written, when the move touches a file with local changes)
     pub fn stash_push(&self, &StashPushOptions { message, include_untracked }) -> Result<Option<Stash>>;   // None = nothing to stash
-    pub fn stash_apply(&self, index, pop: bool) -> Result<StashApplied { stash, conflicts, dropped }>;
+    pub fn stash_apply(&self, index, pop: bool) -> Result<StashApplied { stash, conflicts, dropped, index_restored }>;
+    pub fn stash_apply_with(&self, index, &StashApplyOptions { pop, expected, restore_index /* --index */ }) -> Result<StashApplied>;
+                                       // stash untracked file exists -> LocalChanges (nothing written); --index git refuses ->
+                                       // Other + alternative APPLY_WITHOUT_INDEX (nothing written, stash kept); failures keep the stash
+    pub fn stash_apply_paths(&self, index) -> Result<Vec<String>>;   // stash_paths + rename destinations (diff --cached -M <base>)
     pub fn stash_drop(&self, index) -> Result<Stash>;  stash_store(oid, message);  stash_at(index);  stash_index_of(oid);  stash_paths(index);
     pub fn stash_apply_expecting(&self, index, expected: Option<Oid>, pop) -> Result<StashApplied>;   // RefChanged when the
     pub fn stash_drop_expecting(&self, index, expected: Option<Oid>) -> Result<Stash>;                 // entry is not `expected`
@@ -1850,13 +1863,21 @@ pub enum SyncErrorKind { NoUpstream, NoRemote, DetachedHead, Rejected /* hint "P
   and (pop) keeps the stash.
 * **Commands** (`lector_app::commands::git_sync`, JSON schemas; reads: `git.upstream_status {}`, `git.list_remotes {}`
   (URLs redacted), `git.stash_list {}`; writes, journaled): `git.fetch {remote?, prune?}` (not undoable), `git.pull {mode?:
-  ff_only|rebase}` (undo → `git.restore_ref` = branch back, `reset --keep`), `git.push {remote?, branch?, set_upstream?,
+  ff_only|rebase}` (undo → `git.restore_ref` = branch back, `reset --keep` keeping staged entries of untouched files;
+  refused before writing when the move touches a file with local changes), `git.push {remote?, branch?, set_upstream?,
   force_with_lease?}` (not undoable), `git.create_branch {name, start_point?, switch?}`, `git.switch_branch {name,
-  stash_changes?}` (the explicit "stash and switch"; on failure the stash is popped back), `git.rename_branch {name?,
+  stash_changes?}` (the explicit "stash and switch"; on failure the stash is popped back with `--index`; if that fails
+  the error says the changes are kept in the stash; undo pops with `restore_index: true`), `git.rename_branch {name?,
   new_name}`, `git.delete_branch {name, force?}` (destructive, undo restores tip + upstream), `git.set_upstream {branch?,
-  upstream: string|null}`, `git.stash_push {message?, include_untracked?}` (undo = pop), `git.stash_apply` /
-  `git.stash_pop {index?|oid?, allow_without_backup?}` (files + index entries of the stash's paths backed up in the
-  shadow repo first; undo = `Multi[RestoreIndex, RestoreFiles(, git.stash_store)]`), `git.stash_drop {index?|oid?}`
+  upstream: string|null}`, `git.stash_push {message?, include_untracked?}` (undo = pop with `restore_index: true`:
+  staged changes come back staged, or the undo is refused with the stash kept — never flattened), `git.stash_apply` /
+  `git.stash_pop {index?|oid?, allow_without_backup?, restore_index?}` (`restore_index` true = `--index`, refuse if
+  impossible; false = git's default, staged changes come back unstaged; absent = true only for a stash Lector's
+  stash-and-switch created ("lector: before switching to …"), falling back to git's default with a Warning summary.
+  Files + index entries of `stash_apply_paths` (rename destinations included) backed up in the shadow repo first;
+  `git status` before/after lists any other changed path in `data.not_backed_up` and the summary ("Undo will not
+  restore …"); a failed apply puts back what git changed from that backup before returning the error; undo =
+  `Multi[RestoreIndex, RestoreFiles(, git.stash_store)]`; data adds `index_restored`, `restore_index`, `not_backed_up`), `git.stash_drop {index?|oid?}`
   (destructive, undo = `git.stash_store`), `git.stash_store {oid, message?}`, `git.restore_ref {ref, expected, target,
   upstream?}` (refuses unless the ref is at `expected`; itself undoable). All are `writes` (MCP lists them only with
   `--allow-writes`). Errors keep their type: downcast `CommandError::Failed(anyhow)` to `lector_git::Error::Sync`.
@@ -2030,7 +2051,7 @@ panel_for(workspace_id, cx); kill_all(cx)
   Clear sends Ctrl+L to the shell only as the user's explicit command. Links: only `http`, `https`, `mailto` open
   (`routing::route_url`), anything else is ignored with a toast; file links are resolved by the core against the
   terminal's cwd on the background executor (cancellable) and open in Lector at the line (outside the project:
-  read-only). Multi-line pastes into a program without bracketed paste ask first (`terminal.confirm_multiline_paste`,
+  locked read-only by the open itself, see "Locked read-only tabs" below). Multi-line pastes into a program without bracketed paste ask first (`terminal.confirm_multiline_paste`,
   "don't ask again" for the session). OSC 52 copies land only while that terminal is focused; reads are denied by
   the core. The shell program/args, profiles and env are user-only settings (project layers are stripped, like
   LSP/agent commands), and so are `confirm_multiline_paste` (a safety prompt) and `scrollback` (memory). Agents get
@@ -2038,8 +2059,13 @@ panel_for(workspace_id, cx); kill_all(cx)
 - **Lifecycle.** On exit: "[Process exited with code N]" banner, the tab stays until a key or close
   (`terminal.close_on_exit`). Kill asks first only when shell integration reports a running command. App quit:
   sessions saved and every terminal killed (`kill_all`); dropping a view kills its process tree. Session restore
-  (`terminal.restore`): panel tabs/splits and custom names per project root in `<data dir>/terminal/sessions.json`
-  (≤ 12 tabs × 4 splits), fresh shells in the saved folders, started lazily (see "Lazy session restore" above); editor-area terminals are not restored.
+  (`terminal.restore`): panel tabs/splits and custom names, **one file per project root**
+  (`<data dir>/terminal/sessions/<FNV-1a of the root>.json`, `{version, root, tabs}`; `session::project_file`), so several windows (or
+  two Lector processes) saving at once never read-modify-write a shared file; each write goes through a uniquely named temp file
+  (process id + counter) and an atomic rename, serialized in-process by a mutex. The single `sessions.json` of 0.7.0 and earlier is
+  only read, as a fallback for a root without a file of its own, and never rewritten (an emptied project keeps an empty file so its
+  legacy entry does not come back). (≤ 12 tabs × 4 splits), fresh shells in the saved folders, started lazily (see "Lazy session
+  restore" above); editor-area terminals are not restored.
 - **Settings** (`[terminal]`, `lector_config::TerminalSettings`): `shell`, `profiles`, `default_profile`, `env` (user-only),
   `font_family`, `font_size`, `line_height` (unset: code font, 1.2), `scrollback` (10000, user-only), `cursor_style`,
   `cursor_blink`, `copy_on_select`, `ctrl_c_copies_selection`, `option_as_meta`, `confirm_multiline_paste` (user-only),
@@ -2783,6 +2809,17 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   `CodeView::editable(text, file_name, options, cx)`); otherwise the owner swaps the source (file tabs:
   `DocumentModel` emits `DocumentEvent::SourceChanged`, the `FileView` calls `CodeView::set_source`).
   `CodeView::set_read_only` / `editor::ToggleReadOnly` block editing per view (lock in the tab and status bar).
+  **Locked read-only tabs.** `FileView::set_read_only_lock(Some(reason))` (mirrored by `CodeView::set_read_only_locked`) is a
+  restriction that nothing but the owner lifts: `CodeView::is_read_only()` stays true whatever `set_read_only` is given, so
+  `FileView::setup_from_model` (load, reload, external change), the settings and the document lock cannot make the tab editable.
+  Toggle read-only (key, context menu, status bar) does not unlock it: it emits `FileViewEvent::ReadOnlyLocked(reason)` and the
+  workspace shows the reason as a toast ("... close this tab and open the file with File > Open"); the status bar tooltip
+  shows the reason. Only **link-initiated** opens of files outside the project lock: `Workspace::open_linked_path_read_only`
+  (terminal file links; `LinkAction::OpenFile { read_only }` from `routing::route_file`) creates the tab locked *before* its
+  document loads. Explicit opens (`open_path` / `open_path_at`: File > Open, file tree, recent files, crash-log "Open",
+  Go to Definition, `lector <file>`) stay editable, as before; a link to a file that already has a tab leaves that tab as it is. The
+  lock is saved per tab (`lector_config::TabState::read_only_locked`, default false) and restored with the session
+  (`Workspace::restore_session_from`), and copies of the tab (split) are locked too.
   Views without a buffer (diff, commit, file @ revision, references, Markdown preview, binary/image/mmap files,
   lossy or windows-1252 decodes) are read-only. Default: `settings.editor.read_only` (false).
 * **Carets.** `CodeView` keeps its own sorted, merged `Vec<Selection>` (`selections()`, `primary_index()`,
@@ -2956,9 +2993,18 @@ appears as a diff inside the file's own tab.
   still there": the agent's whole-file write may have replaced them). While reviewing, an edit that touches a pending hunk
   (including a disk reload) falls back to the review tab at once. The agent's own write is recognised by its edit having no
   origin view.
-* *Follow-up.* "Refine…" opens the prompt box again; the instruction becomes a new turn in the same session, measured
+* *Follow-up.* "Refine…" opens the prompt box again; the instruction becomes a new turn, measured
   against what the file would be with the pending hunks undone, and its result replaces the pending hunks (decided hunks
-  stay decided).
+  stay decided). The turn runs on the session of the pending edit while that session is alive (`resolve_session`); starting a
+  new agent session stops the old one, so a refinement after that goes to the panel's current session and the edit re-subscribes
+  to it (`Active::session`, `_session_events` and the event task follow the session of the running turn). A turn that fails
+  puts the pending changes back for review with the failure as a note (or ends as failed when nothing changed).
+* *Turn ids belong to a session.* `TurnId`s restart at 1 in every `AgentSession`, so a `TurnId` is only meaningful together with
+  its session. Everything that outlives a frame holds the `AgentSession` (a cheap `Arc` handle) next to the id: the review tab's
+  `SummaryHeader` and its "Undo turn" (disabled with a tooltip when the turn is gone, running, already undone or has nothing to
+  restore), the panel's buttons and file menu, `UndoConflict`, the inline edit (`review_turn_in`, `undo_turn_in`); the panel's
+  summary cache is keyed `(SessionId, TurnId)` and its per-turn UI state is cleared when it attaches another session. The
+  turn-id-only `review_turn` / `undo_turn` mean "of the current session". The provenance cache was already keyed by session.
 * *Known gaps.* Word-level highlights inside a changed line are not drawn; the merged view hides folds and sticky headers;
   diagnostics squiggles can sit on the wrong row while it is up; a failed or cancelled turn that already wrote the file is
   shown as a review with a note (the write cannot be taken back except by Undo). Not exercised with a real agent in a real

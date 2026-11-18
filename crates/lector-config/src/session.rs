@@ -42,6 +42,9 @@ pub struct TabState {
     pub scroll_row: u32,
     /// Whether it is the selected tab of its pane.
     pub active: bool,
+    /// A file tab locked read-only (opened from a link that points outside the project): it
+    /// comes back locked after a restart.
+    pub read_only_locked: bool,
 }
 
 impl Default for TabKind {
@@ -202,6 +205,7 @@ mod tests {
                             },
                             scroll_row: 42,
                             active: true,
+                            read_only_locked: false,
                         },
                         TabState {
                             kind: TabKind::Diff {
@@ -210,6 +214,7 @@ mod tests {
                             },
                             scroll_row: 0,
                             active: false,
+                            read_only_locked: false,
                         },
                     ],
                 },

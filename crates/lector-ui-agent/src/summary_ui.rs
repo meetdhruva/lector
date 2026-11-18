@@ -5,9 +5,9 @@
 
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, AnyElement, App, Context, Entity, FontWeight, WeakEntity, Window};
+use gpui::{div, prelude::*, AnyElement, App, Context, FontWeight, WeakEntity, Window};
 use lector_agent::summary::{NavTarget, SummaryFile, TurnSummary};
-use lector_agent::TurnId;
+use lector_agent::{AgentSession, TurnId};
 use lector_git::ChangeKind;
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, Tooltip};
 use lector_ui::icons::IconName;
@@ -157,8 +157,13 @@ fn file_row(ix: usize, f: &SummaryFile, open_file: OpenFile, cx: &App) -> AnyEle
 
 /// The header of a turn's review tab: the card plus an "Undo turn" button. A view of its own so
 /// the review tab can hold it (`ReviewView::set_header_view`).
+///
+/// The header belongs to the session the turn came from. Turn ids restart at 1 in every agent
+/// session, so the button acts on that session's turn (never on whatever session the panel
+/// shows now), and is disabled with an explanation when that turn cannot be undone any more.
 pub struct SummaryHeader {
     summary: Rc<TurnSummary>,
+    session: AgentSession,
     turn: TurnId,
     panel: WeakEntity<AgentPanel>,
     review: WeakEntity<lector_ui_git::review_tab::ReviewView>,
@@ -166,20 +171,49 @@ pub struct SummaryHeader {
 }
 
 impl SummaryHeader {
-    /// A header for the review tab `review` of `turn`.
+    /// A header for the review tab `review` of turn `turn` of `session`.
     pub fn new(
         summary: Rc<TurnSummary>,
+        session: AgentSession,
         turn: TurnId,
         panel: WeakEntity<AgentPanel>,
-        review: &Entity<lector_ui_git::review_tab::ReviewView>,
+        review: WeakEntity<lector_ui_git::review_tab::ReviewView>,
     ) -> Self {
         SummaryHeader {
             summary,
+            session,
             turn,
             panel,
-            review: review.downgrade(),
+            review,
             undone: false,
         }
+    }
+
+    /// Why "Undo turn" is unavailable, or `None` when it can be clicked.
+    pub fn undo_unavailable(&self) -> Option<&'static str> {
+        if self.undone {
+            return Some("This turn was undone. Undo it again from the Activity Log.");
+        }
+        match self.session.turn(self.turn) {
+            None => Some("This turn is no longer available in its agent session."),
+            Some(t) if t.undone => Some("This turn was already undone."),
+            Some(t) if !t.state.is_finished() => Some("The turn is still running."),
+            Some(t) if t.journal_id.is_none() => Some("This turn has nothing to restore."),
+            Some(_) => None,
+        }
+    }
+
+    /// The "Undo turn" button: undoes the turn of the header's own session.
+    pub fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.undo_unavailable().is_some() {
+            return;
+        }
+        let (session, turn) = (self.session.clone(), self.turn);
+        let _ = self
+            .panel
+            .update(cx, |p, cx| p.undo_turn_in(session, turn, false, cx));
+        self.undone = true;
+        cx.notify();
     }
 }
 
@@ -194,8 +228,7 @@ impl Render for SummaryHeader {
                 });
             });
         });
-        let (panel, turn) = (self.panel.clone(), self.turn);
-        let me = cx.entity().downgrade();
+        let unavailable = self.undo_unavailable();
         let undone = self.undone;
         let ui = cx.theme().ui.clone();
         v_flex()
@@ -214,17 +247,11 @@ impl Render for SummaryHeader {
                     .style(ButtonStyle::Subtle)
                     .icon(IconName::Undo)
                     .compact()
-                    .disabled(undone)
-                    .tooltip(Tooltip::text(
+                    .disabled(unavailable.is_some())
+                    .tooltip(Tooltip::text(unavailable.unwrap_or(
                         "Restore the files this turn changed (undoable from the Activity Log)",
-                    ))
-                    .on_click(move |_, _, cx| {
-                        let _ = panel.update(cx, |p, cx| p.undo_turn(turn, false, cx));
-                        let _ = me.update(cx, |h, cx| {
-                            h.undone = true;
-                            cx.notify();
-                        });
-                    }),
+                    )))
+                    .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
                 ),
             )
     }

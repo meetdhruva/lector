@@ -14,6 +14,9 @@ mod summary_ui;
 pub mod update_model;
 mod update_ui;
 
+#[cfg(test)]
+mod session_tests;
+
 use gpui::{App, AppContext, Entity, Window};
 use lector_agent::AgentManager;
 use lector_ui::actions::agent as agent_actions;
@@ -97,9 +100,11 @@ fn register_actions(ws: &mut Workspace, panel: &Entity<AgentPanel>) {
     ws.register_action(move |_, _: &agent_actions::ReviewLastTurn, window, cx| {
         let p = p.clone();
         window.defer(cx, move |window, cx| {
-            let last = p.read(cx).last_turn_id();
+            let last = p.read(cx).last_turn();
             match last {
-                Some(id) => p.update(cx, |p, cx| p.review_turn(id, window, cx)),
+                Some((session, id)) => {
+                    p.update(cx, |p, cx| p.review_turn_in(session, id, None, window, cx))
+                }
                 None => p.update(cx, |p, cx| p.toast("The agent has no turns yet.", cx)),
             }
         });
@@ -109,9 +114,9 @@ fn register_actions(ws: &mut Workspace, panel: &Entity<AgentPanel>) {
         reveal(ws, window, cx);
         let p = p.clone();
         window.defer(cx, move |_, cx| {
-            let last = p.read(cx).last_turn_id();
+            let last = p.read(cx).last_turn();
             match last {
-                Some(id) => p.update(cx, |p, cx| p.undo_turn(id, false, cx)),
+                Some((session, id)) => p.update(cx, |p, cx| p.undo_turn_in(session, id, false, cx)),
                 None => p.update(cx, |p, cx| p.toast("The agent has no turns yet.", cx)),
             }
         });
