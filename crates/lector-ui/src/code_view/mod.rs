@@ -37,7 +37,7 @@ pub use display_map::DisplayMap;
 pub use edit::{EditBuffer, EditBufferEvent, RopeSource};
 pub use element::CodeElement;
 pub use layers::{RowBackground, RowWidget, WidgetAnchor};
-pub use popup::{place_popup, EditorPopup, Placement, Vertical};
+pub use popup::{place_popup, CommandHook, EditorPopup, Placement, Vertical};
 pub use selection::{Pos, Selection};
 pub use source::{
     CodeSource, DecorationColor, GutterMark, GutterMarkKind, HighlightSpan, InMemorySource,
@@ -205,6 +205,9 @@ pub struct InlineMarks {
     /// Scrollbar markers: row and color.
     pub scrollbar: Vec<(u32, Hsla)>,
 }
+
+/// A boxed action listener (see [`CodeView::command`]).
+type ActionListener<A> = Box<dyn Fn(&A, &mut Window, &mut App) + 'static>;
 
 type GutterIconCallback = Rc<dyn Fn(u32, &mut Window, &mut App)>;
 
@@ -1153,6 +1156,19 @@ impl CodeView {
             })
     }
 
+    /// Registers `command` as an action listener that first lets an owner holding input
+    /// back apply it (see [`CodeView::run_command_hook`]). Every action of the view goes
+    /// through here.
+    fn command<A: 'static>(
+        cx: &Context<Self>,
+        command: fn(&mut Self, &A, &mut Window, &mut Context<Self>),
+    ) -> ActionListener<A> {
+        Box::new(cx.listener(move |this, action, window, cx| {
+            this.run_command_hook(cx);
+            command(this, action, window, cx);
+        }))
+    }
+
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selections(false, cx, |this, sel| {
             if sel.is_empty() {
@@ -1477,14 +1493,7 @@ impl CodeView {
             Some((r, sels, changed, rope))
         })?;
         if changed && self.manage_source {
-            let name = self
-                .path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string());
-            self.source = Rc::new(RopeSource::new(rope, name.as_deref()));
-            self.display_map_key = None;
-            self.fold_ranges_version = None;
+            self.use_rope_source(rope);
         }
         let (sels, primary) = selection::normalize(new_sels.0, new_sels.1);
         self.selections = sels;
@@ -1496,6 +1505,29 @@ impl CodeView {
         self.selections_changed(true, cx);
         tracing::trace!(target: "lector_ui::perf", elapsed_us = started.elapsed().as_micros() as u64, "code view edit");
         Some(result)
+    }
+
+    /// Shows `rope` as the plain source.
+    fn use_rope_source(&mut self, rope: Rope) {
+        let name = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string());
+        self.source = Rc::new(RopeSource::new(rope, name.as_deref()));
+        self.display_map_key = None;
+        self.fold_ranges_version = None;
+    }
+
+    /// Makes the source reflect the buffer right now. A view whose owner manages the source
+    /// only learns of an edit when the owner's change event arrives, after the current
+    /// update; code that edits and then keeps going in the same update (an owner finishing
+    /// held-back input before a command) calls this so the command measures the new text.
+    /// The owner's own source replaces it when its event arrives, before anything is drawn.
+    pub(crate) fn sync_source_with_buffer(&mut self, cx: &mut Context<Self>) {
+        if let Some(rope) = self.buffer.as_ref().map(|b| b.read(cx).text().clone()) {
+            self.use_rope_source(rope);
+        }
     }
 
     /// [`CodeView::edit`] for operations returning only a transaction.
@@ -2025,6 +2057,7 @@ impl CodeView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.run_command_hook(cx);
         window.focus(&self.focus_handle);
         let (mode, range) = match click_count {
             2 => (
@@ -2449,6 +2482,10 @@ impl EntityInputHandler for CodeView {
         if !self.is_editable() {
             return;
         }
+        if self.marked.is_none() {
+            // A composition starts: what an owner holds back goes in first.
+            self.run_command_hook(cx);
+        }
         let Some(rope) = self.buffer_text(cx) else {
             return;
         };
@@ -2536,71 +2573,71 @@ impl Render for CodeView {
             .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
-            .on_action(cx.listener(Self::move_up))
-            .on_action(cx.listener(Self::move_down))
-            .on_action(cx.listener(Self::move_left))
-            .on_action(cx.listener(Self::move_right))
-            .on_action(cx.listener(Self::select_up))
-            .on_action(cx.listener(Self::select_down))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::page_up))
-            .on_action(cx.listener(Self::page_down))
-            .on_action(cx.listener(Self::select_page_up))
-            .on_action(cx.listener(Self::select_page_down))
-            .on_action(cx.listener(Self::move_word_left))
-            .on_action(cx.listener(Self::move_word_right))
-            .on_action(cx.listener(Self::select_word_left))
-            .on_action(cx.listener(Self::select_word_right))
-            .on_action(cx.listener(Self::move_to_line_start))
-            .on_action(cx.listener(Self::move_to_line_end))
-            .on_action(cx.listener(Self::select_to_line_start))
-            .on_action(cx.listener(Self::select_to_line_end))
-            .on_action(cx.listener(Self::scroll_to_top))
-            .on_action(cx.listener(Self::scroll_to_bottom))
-            .on_action(cx.listener(Self::select_to_top))
-            .on_action(cx.listener(Self::select_to_bottom))
-            .on_action(cx.listener(Self::select_all_action))
-            .on_action(cx.listener(Self::clear_selection))
-            .on_action(cx.listener(Self::copy_action))
-            .on_action(cx.listener(Self::toggle_soft_wrap))
-            .on_action(cx.listener(Self::toggle_minimap))
-            .on_action(cx.listener(Self::toggle_fold))
-            .on_action(cx.listener(Self::fold_all))
-            .on_action(cx.listener(Self::unfold_all))
-            .on_action(cx.listener(Self::find_next))
-            .on_action(cx.listener(Self::find_prev))
-            .on_action(cx.listener(Self::next_change))
-            .on_action(cx.listener(Self::prev_change))
-            .on_action(cx.listener(Self::select_line))
-            .on_action(cx.listener(Self::select_next_occurrence))
-            .on_action(cx.listener(Self::select_all_occurrences))
-            .on_action(cx.listener(Self::add_cursor_above))
-            .on_action(cx.listener(Self::add_cursor_below))
-            .on_action(cx.listener(Self::split_selection_into_lines))
-            .on_action(cx.listener(Self::show_context_menu))
+            .on_action(Self::command(cx, Self::move_up))
+            .on_action(Self::command(cx, Self::move_down))
+            .on_action(Self::command(cx, Self::move_left))
+            .on_action(Self::command(cx, Self::move_right))
+            .on_action(Self::command(cx, Self::select_up))
+            .on_action(Self::command(cx, Self::select_down))
+            .on_action(Self::command(cx, Self::select_left))
+            .on_action(Self::command(cx, Self::select_right))
+            .on_action(Self::command(cx, Self::page_up))
+            .on_action(Self::command(cx, Self::page_down))
+            .on_action(Self::command(cx, Self::select_page_up))
+            .on_action(Self::command(cx, Self::select_page_down))
+            .on_action(Self::command(cx, Self::move_word_left))
+            .on_action(Self::command(cx, Self::move_word_right))
+            .on_action(Self::command(cx, Self::select_word_left))
+            .on_action(Self::command(cx, Self::select_word_right))
+            .on_action(Self::command(cx, Self::move_to_line_start))
+            .on_action(Self::command(cx, Self::move_to_line_end))
+            .on_action(Self::command(cx, Self::select_to_line_start))
+            .on_action(Self::command(cx, Self::select_to_line_end))
+            .on_action(Self::command(cx, Self::scroll_to_top))
+            .on_action(Self::command(cx, Self::scroll_to_bottom))
+            .on_action(Self::command(cx, Self::select_to_top))
+            .on_action(Self::command(cx, Self::select_to_bottom))
+            .on_action(Self::command(cx, Self::select_all_action))
+            .on_action(Self::command(cx, Self::clear_selection))
+            .on_action(Self::command(cx, Self::copy_action))
+            .on_action(Self::command(cx, Self::toggle_soft_wrap))
+            .on_action(Self::command(cx, Self::toggle_minimap))
+            .on_action(Self::command(cx, Self::toggle_fold))
+            .on_action(Self::command(cx, Self::fold_all))
+            .on_action(Self::command(cx, Self::unfold_all))
+            .on_action(Self::command(cx, Self::find_next))
+            .on_action(Self::command(cx, Self::find_prev))
+            .on_action(Self::command(cx, Self::next_change))
+            .on_action(Self::command(cx, Self::prev_change))
+            .on_action(Self::command(cx, Self::select_line))
+            .on_action(Self::command(cx, Self::select_next_occurrence))
+            .on_action(Self::command(cx, Self::select_all_occurrences))
+            .on_action(Self::command(cx, Self::add_cursor_above))
+            .on_action(Self::command(cx, Self::add_cursor_below))
+            .on_action(Self::command(cx, Self::split_selection_into_lines))
+            .on_action(Self::command(cx, Self::show_context_menu))
             .when(self.buffer.is_some(), |el| {
-                el.on_action(cx.listener(Self::undo))
-                    .on_action(cx.listener(Self::redo))
-                    .on_action(cx.listener(Self::cut))
-                    .on_action(cx.listener(Self::paste))
-                    .on_action(cx.listener(Self::newline))
-                    .on_action(cx.listener(Self::newline_below))
-                    .on_action(cx.listener(Self::newline_above))
-                    .on_action(cx.listener(Self::backspace))
-                    .on_action(cx.listener(Self::delete))
-                    .on_action(cx.listener(Self::delete_word_left))
-                    .on_action(cx.listener(Self::delete_word_right))
-                    .on_action(cx.listener(Self::delete_to_line_start))
-                    .on_action(cx.listener(Self::delete_line))
-                    .on_action(cx.listener(Self::tab))
-                    .on_action(cx.listener(Self::indent))
-                    .on_action(cx.listener(Self::outdent))
-                    .on_action(cx.listener(Self::toggle_comment))
-                    .on_action(cx.listener(Self::duplicate_line))
-                    .on_action(cx.listener(Self::move_line_up))
-                    .on_action(cx.listener(Self::move_line_down))
-                    .on_action(cx.listener(Self::toggle_read_only_action))
+                el.on_action(Self::command(cx, Self::undo))
+                    .on_action(Self::command(cx, Self::redo))
+                    .on_action(Self::command(cx, Self::cut))
+                    .on_action(Self::command(cx, Self::paste))
+                    .on_action(Self::command(cx, Self::newline))
+                    .on_action(Self::command(cx, Self::newline_below))
+                    .on_action(Self::command(cx, Self::newline_above))
+                    .on_action(Self::command(cx, Self::backspace))
+                    .on_action(Self::command(cx, Self::delete))
+                    .on_action(Self::command(cx, Self::delete_word_left))
+                    .on_action(Self::command(cx, Self::delete_word_right))
+                    .on_action(Self::command(cx, Self::delete_to_line_start))
+                    .on_action(Self::command(cx, Self::delete_line))
+                    .on_action(Self::command(cx, Self::tab))
+                    .on_action(Self::command(cx, Self::indent))
+                    .on_action(Self::command(cx, Self::outdent))
+                    .on_action(Self::command(cx, Self::toggle_comment))
+                    .on_action(Self::command(cx, Self::duplicate_line))
+                    .on_action(Self::command(cx, Self::move_line_up))
+                    .on_action(Self::command(cx, Self::move_line_down))
+                    .on_action(Self::command(cx, Self::toggle_read_only_action))
             })
             .child(CodeElement::new(cx.entity()))
             .children(self.context_menu.render())

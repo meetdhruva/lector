@@ -17,7 +17,7 @@ use lector_theme::{Appearance, ThemeRegistry};
 use serde_json::{json, Value};
 
 use super::*;
-use crate::actions::editor::{TriggerParameterHints, TriggerSuggest, Undo};
+use crate::actions::editor::{Paste, TriggerParameterHints, TriggerSuggest, Undo};
 use crate::code_view::{Pos, Selection};
 use crate::theme::{ThemeMode, ThemeState};
 
@@ -1082,6 +1082,204 @@ fn an_acceptance_that_gets_no_answer_commits_the_unresolved_item(cx: &mut TestAp
     assert!(!s
         .ctl
         .read_with(cx, |c, _| c.is_accepting() || c.has_session()));
+}
+
+/// Opens "fo", accepts `foo_bar` with Enter and leaves the acceptance waiting for the (slow)
+/// resolve answer. The text is still "\nfo".
+fn accept_and_wait<'a>(
+    cx: &'a mut TestAppContext,
+    env: &Env,
+) -> (Session, &'a mut VisualTestContext) {
+    let (s, cx) = open_foo(cx, env);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    assert_eq!(s.text(cx), "\nfo");
+    (s, cx)
+}
+
+/// The acceptance is over: nothing pending, no session, no leftover key context flag.
+fn assert_acceptance_over(s: &Session, cx: &mut VisualTestContext) {
+    assert!(!s
+        .ctl
+        .read_with(cx, |c, _| c.is_accepting() || c.has_session()));
+    assert!(!s.visible(cx));
+    let armed = s
+        .code_view(cx)
+        .read_with(cx, |v, _| v.has_context_flag(FLAG_ACCEPTING));
+    assert!(!armed, "the command hook is disarmed");
+}
+
+fn carets(s: &Session, cx: &mut VisualTestContext) -> Vec<Pos> {
+    s.selections(cx).iter().map(|x| x.head).collect()
+}
+
+#[gpui::test]
+fn backspace_during_a_pending_acceptance_deletes_the_queued_text(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfo", "x is held back");
+    cx.simulate_keystrokes("backspace");
+    cx.run_until_parked();
+    // The commit (as listed), then x, then Backspace removed that x: the completion only.
+    assert_eq!(s.text(cx), "\nfoo_bar");
+    assert_eq!(carets(&s, cx), vec![Pos::new(1, 7)]);
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn backspace_without_queued_text_deletes_the_last_character_of_the_completion(
+    cx: &mut TestAppContext,
+) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_keystrokes("backspace");
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_ba");
+    assert_eq!(carets(&s, cx), vec![Pos::new(1, 6)]);
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn a_caret_move_during_a_pending_acceptance_applies_after_the_queued_text(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("left");
+    cx.run_until_parked();
+    assert_acceptance_over(&s, cx);
+    // Left moved over the x that was typed before it: the caret is between the two.
+    cx.simulate_input("y");
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_baryx");
+}
+
+#[gpui::test]
+fn enter_during_a_pending_acceptance_commits_then_breaks_the_line(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_bar\n");
+    assert_eq!(carets(&s, cx), vec![Pos::new(2, 0)]);
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn tab_during_a_pending_acceptance_commits_then_indents(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let text = s.text(cx);
+    assert!(text.starts_with("\nfoo_bar"), "{text:?}");
+    assert!(
+        text.len() > "\nfoo_bar".len(),
+        "Tab did its own thing: {text:?}"
+    );
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn paste_during_a_pending_acceptance_lands_after_the_commit(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("PASTED".to_string()));
+    cx.simulate_input("x");
+    // A programmatic dispatch, not a keystroke: it must go through the same choke point.
+    cx.dispatch_action(Paste);
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_barxPASTED");
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn undo_during_a_pending_acceptance_undoes_the_queued_text_only(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_input("x");
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    // Commit = one step, the queued x = the next, Undo = the command: x is gone, the
+    // completion stays.
+    assert_eq!(s.text(cx), "\nfoo_bar");
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfo");
+}
+
+#[gpui::test]
+fn a_click_during_a_pending_acceptance_commits_first(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_input("x");
+    s.code_view(cx).update_in(cx, |v, window, cx| {
+        v.begin_selection(Pos::new(0, 0), 1, false, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_barx");
+    assert_eq!(carets(&s, cx), vec![Pos::new(0, 0)]);
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn the_selection_keys_during_a_pending_acceptance_finish_it_and_move_the_caret(
+    cx: &mut TestAppContext,
+) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    // The commit and the x land first, then Up moves the caret off the line.
+    assert_eq!(s.text(cx), "\nfoo_barx");
+    assert_eq!(carets(&s, cx).first().map(|p| p.row), Some(0));
+    assert_acceptance_over(&s, cx);
+}
+
+#[gpui::test]
+fn a_change_from_outside_during_a_pending_acceptance_still_ends_it(cx: &mut TestAppContext) {
+    let env = Env::new("\n", slow_resolve_script(1.5, json!([])));
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_input("x");
+    // Not a command of the view (no hook): the change event is the safety net. The caret
+    // left the word, so the commit no longer fits; the held-back text is not lost.
+    s.code_view(cx)
+        .update(cx, |c, cx| c.set_cursor(Pos::new(0, 0), cx));
+    cx.run_until_parked();
+    // (The typed x may open a new completion of its own, so only the acceptance is checked.)
+    assert!(!s.ctl.read_with(cx, |c, _| c.is_accepting()));
+    let armed = s
+        .code_view(cx)
+        .read_with(cx, |v, _| v.has_context_flag(FLAG_ACCEPTING));
+    assert!(!armed);
+    assert_eq!(s.text(cx), "x\nfo");
+}
+
+#[gpui::test]
+fn the_late_resolve_answer_after_an_early_finish_changes_nothing(cx: &mut TestAppContext) {
+    // The server still answers (it ignores the cancellation) after 0.3 s.
+    let mut script = slow_resolve_script(0.3, json!([]));
+    script["completionItem/resolve"][0]["ignore_cancel"] = json!(true);
+    let env = Env::new("\n", script);
+    let (s, cx) = accept_and_wait(cx, &env);
+    cx.simulate_keystrokes("backspace");
+    cx.run_until_parked();
+    assert_eq!(s.text(cx), "\nfoo_ba");
+    // The acceptance's own time bound passes (test clock) and the server's answer arrives
+    // (real time, bounded wait): neither may touch the document or reopen anything.
+    cx.executor()
+        .advance_clock(Duration::from_millis(ACCEPT_RESOLVE_WAIT_MS + 100));
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(s.text(cx), "\nfoo_ba");
+    assert_eq!(carets(&s, cx), vec![Pos::new(1, 6)]);
+    assert_acceptance_over(&s, cx);
 }
 
 #[gpui::test]

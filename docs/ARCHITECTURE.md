@@ -691,10 +691,22 @@ The popups are built on the session models above; the editor integration is thre
   (auto-imports), then `set_selections(commit.carets)`, so undo restores text, imports and carets together. Multi-caret follows the
   session rules (`skipped_carets`). If the document version changed so that the commit no longer fits (`CommitError`), the popup closes quietly.
   **A pending acceptance** (waiting for the resolve) is `Open::accept: Option<PendingAccept>`, a task of its own: the documentation
-  resolve (`Open::resolve`) and selection changes never replace it. While it is pending the list is frozen (the edit and caret events
-  are ignored, up/down/click do nothing, a second Enter or Tab changes nothing), and all text typed meanwhile is **held back** by the
-  input interceptor (`hold_back`) and typed after the commit in the order it came, the commit character first
-  (`insert_typed` per chunk, so auto-close and type-over still apply). The commit is one undo step, the held-back typing its own.
+  resolve (`Open::resolve`) and selection changes never replace it. While it is pending the list is frozen, and all **plain text** typed
+  meanwhile is **held back** by the input interceptor (`hold_back`) and typed after the commit in the order it came, the commit character
+  first (`insert_typed` per chunk, so auto-close and type-over still apply). **Everything else finishes the acceptance first**: Backspace,
+  Delete, Enter, Tab, paste, cut, undo/redo, caret and selection moves by key or mouse, a composition start, any other command. The
+  choke point is the view's **command hook** (`CodeView::set_command_hook`, armed by the key context flag `completion_accepting`):
+  `CodeView::run_command_hook` runs before every keyboard action (all actions are registered through `CodeView::command`, so a
+  programmatic `dispatch_action` is covered too), at the start of `begin_selection` (mouse press) and at the start of an IME composition.
+  The hook (`finish_before_command`) runs on the borrowed view: it commits the item as it stands (unresolved if the answer has not
+  arrived), types the held-back text, re-syncs the view's source with the buffer (`sync_source_with_buffer`, so a movement command
+  measures the new text), disarms itself and only then lets the command run against the resulting buffer. The late resolve answer is
+  dropped (the acceptance task is dropped with the session and re-checks its id). Undo steps: the commit, the held-back typing and the
+  command are three separate steps. Arrow Up/Down/PageUp/PageDown, Enter and Tab report "not handled" to the controller while pending, so
+  their plain action runs on the view and goes through the same hook. Not covered by the hook: a programmatic change that does not go
+  through a command (another view or a script editing the buffer or moving the caret, a platform replacement with an explicit range);
+  `after_change` is the safety net there and finishes the acceptance when the event arrives (the commit then applies only if it still
+  fits, the held-back text is typed either way). No signature help is requested for a commit finished by a command.
   Escape closes the session, which cancels the acceptance: nothing is committed and the held-back text is typed anyway (typed text is
   never lost). A failed, cancelled, stale or missing answer (300 ms) commits the item as listed. Ctrl+Space is ignored while pending.
   The session is closed with `Committed` and does not reopen for the same word; with `commit.triggers_signature_help()` signature help opens

@@ -38,10 +38,13 @@
 //!   the commit no longer fits, the popup closes quietly.
 //!   While an acceptance waits for the server it is a [`PendingAccept`] of its
 //!   own (the documentation resolve and every selection change leave it alone):
-//!   typed text is held back and typed right after the commit, in order, the
-//!   commit character first; the list does not move; Escape cancels the
-//!   acceptance (nothing is committed, the held-back text is typed); a failed,
-//!   stale or missing answer commits the item as the server listed it.
+//!   plain typed text is held back and typed right after the commit, in order,
+//!   the commit character first; the list does not move. Any other input (a
+//!   command, a click, a composition) first finishes the acceptance through the
+//!   view's command hook ([`finish_before_command`]: the item as it stands, then
+//!   the held-back text, then the command; the late answer is dropped); Escape
+//!   cancels the acceptance (nothing is committed, the held-back text is typed);
+//!   a failed, stale or missing answer commits the item as the server listed it.
 //! * **Snippets** (`editor.completion.snippets`): there is no tab-stop session
 //!   in the editor. The caret is placed at the first stop, the rest are ignored.
 
@@ -92,6 +95,9 @@ pub const FLAG_OPEN: &str = "completion";
 /// Key context flag set while a session waits for the server's first answer
 /// (only Escape is bound: it cancels the request).
 pub const FLAG_PENDING: &str = "completion_pending";
+/// Key context flag set while an acceptance waits for the server: it arms the view's
+/// [`CommandHook`](crate::code_view::CommandHook) that finishes the acceptance first.
+pub const FLAG_ACCEPTING: &str = "completion_accepting";
 /// Rows in view at most (and the page size of PageUp / PageDown).
 pub const VISIBLE_ROWS: usize = 10;
 /// Wait after the selection settled before the documentation is resolved.
@@ -404,6 +410,8 @@ struct PendingAccept {
     /// Applies the commit when the answer arrived or the wait ran out. Dropping it cancels.
     _task: Task<()>,
     token: CancelToken,
+    /// The row's item index in the session.
+    item: usize,
     /// Text typed meanwhile (the commit character first): typed after the commit, in order.
     queued: Vec<String>,
 }
@@ -469,6 +477,15 @@ impl CompletionController {
                 });
                 true
             })));
+        });
+        // Anything but plain text (a command, a click, a composition) first finishes a
+        // pending acceptance, so the user's input applies in the order it was given.
+        let weak = this.clone();
+        code_view.update(cx, |v, _| {
+            v.set_command_hook(Some((
+                FLAG_ACCEPTING,
+                Rc::new(move |view, cx| finish_before_command(&weak, view, cx)),
+            )));
         });
         let subscription = cx.subscribe(
             code_view,
@@ -565,6 +582,22 @@ impl CompletionController {
     /// An acceptance is waiting for the server's answer.
     pub fn is_accepting(&self) -> bool {
         self.open.as_ref().is_some_and(|o| o.accept.is_some())
+    }
+
+    /// The session id and item of the pending acceptance.
+    fn pending_accept(&self) -> Option<(u64, usize)> {
+        let open = self.open.as_ref()?;
+        open.accept.as_ref().map(|p| (open.id, p.item))
+    }
+
+    /// Finishes a pending acceptance right now (see [`CompletionController::finish_accept`]):
+    /// the item as it stands, then the held-back text. `false` when none was pending.
+    fn finish_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((id, item)) = self.pending_accept() else {
+            return false;
+        };
+        self.finish_accept(id, item, Vec::new(), cx);
+        true
     }
 
     /// While an acceptance is pending: keeps `text` to type after the commit. `false` when
@@ -811,10 +844,11 @@ impl CompletionController {
             .code_view
             .upgrade()
             .and_then(|v| v.update(cx, |v, _| v.take_typed()));
-        // An acceptance is pending: the list must not follow edits or the caret until the
-        // commit landed (it would drop the acceptance). The commit checks the text itself.
-        if self.is_accepting() {
-            return;
+        // The view's commands finish a pending acceptance before they run. A change that
+        // got here with one still pending came from outside (another view, a programmatic
+        // edit): finish it now; the commit checks that the text still fits.
+        if let Some((id, item)) = self.pending_accept() {
+            self.finish_accept(id, item, Vec::new(), cx);
         }
         let Some((rope, caret, _)) = caret_state(&self.code_view, cx) else {
             return;
@@ -1115,6 +1149,27 @@ impl CompletionController {
 
     /// Ends the session and hides the popup.
     pub fn close(&mut self, reason: CloseReason, cx: &mut Context<Self>) {
+        let held_back = self.end_session(reason);
+        if let Some(code_view) = self.code_view.upgrade() {
+            let any = {
+                let v = code_view.read(cx);
+                v.has_popup(POPUP_KEY)
+                    || v.has_context_flag(FLAG_OPEN)
+                    || v.has_context_flag(FLAG_PENDING)
+                    || v.has_context_flag(FLAG_ACCEPTING)
+            };
+            if any {
+                code_view.update(cx, clear_popup_state);
+            }
+        }
+        self.type_held_back(held_back, cx);
+        cx.notify();
+    }
+
+    /// The part of [`CompletionController::close`] that does not touch the view: drops the
+    /// session, cancels its requests and a pending acceptance (and its resolve answer).
+    /// Returns the text held back by that acceptance.
+    fn end_session(&mut self, reason: CloseReason) -> Vec<String> {
         let mut held_back = Vec::new();
         if let Some(mut open) = self.open.take() {
             open.token.cancel();
@@ -1132,23 +1187,27 @@ impl CompletionController {
         }
         self.list_top = 0;
         self.scroll_remainder = 0.;
-        if let Some(code_view) = self.code_view.upgrade() {
-            let any = {
-                let v = code_view.read(cx);
-                v.has_popup(POPUP_KEY)
-                    || v.has_context_flag(FLAG_OPEN)
-                    || v.has_context_flag(FLAG_PENDING)
-            };
-            if any {
-                code_view.update(cx, |v, cx| {
-                    v.set_popup(POPUP_KEY, None, cx);
-                    v.set_context_flag(FLAG_OPEN, false, cx);
-                    v.set_context_flag(FLAG_PENDING, false, cx);
-                });
-            }
-        }
-        self.type_held_back(held_back, cx);
-        cx.notify();
+        held_back
+    }
+
+    /// A view command is about to run with an acceptance pending: takes the acceptance over
+    /// (the late resolve answer is dropped with its task) and ends the session. What is left
+    /// for the view to apply, in order: the item as it stands, then the held-back text.
+    fn take_pending_for_command(&mut self, view: &CodeView, cx: &App) -> Option<EarlyFinish> {
+        let open = self.open.as_mut()?;
+        let pending = open.accept.take()?;
+        pending.token.cancel();
+        let commit = commit_at(&open.session, view, pending.item, cx);
+        let reason = if commit.is_some() {
+            CloseReason::Committed
+        } else {
+            CloseReason::Dismissed
+        };
+        self.end_session(reason);
+        Some(EarlyFinish {
+            commit,
+            typed: pending.queued,
+        })
     }
 
     // ---- key actions ---------------------------------------------------------------------
@@ -1177,9 +1236,10 @@ impl CompletionController {
         if !self.popup_visible() {
             return false;
         }
-        // The item being committed stays selected.
+        // Moving the selection is a command: not handled here, so the key's plain action
+        // runs on the view, whose command hook finishes the acceptance first.
         if self.is_accepting() {
-            return true;
+            return false;
         }
         if let Some(open) = self.open.as_mut() {
             f(&mut open.session);
@@ -1201,6 +1261,12 @@ impl CompletionController {
     /// Enter: accepts, or (with `accept_on_enter` off) closes the list.
     pub(crate) fn accept_on_enter(&mut self, cx: &mut Context<Self>) -> EnterOutcome {
         if !self.popup_visible() {
+            return EnterOutcome::NotOpen;
+        }
+        // Enter while an acceptance waits is a command like any other: report "not open", so
+        // the line break is dispatched to the view, whose command hook finishes the
+        // acceptance first.
+        if self.is_accepting() {
             return EnterOutcome::NotOpen;
         }
         if AppSettings::get(cx).editor.completion.accept_on_enter {
@@ -1225,13 +1291,18 @@ impl CompletionController {
         let Some(open) = self.open.as_mut() else {
             return false;
         };
-        if open.accept.is_some() {
-            // Already committing: a second Enter / Tab changes nothing, a commit character
-            // typed meanwhile is held back like any other text.
-            if let (Some(text), Some(pending)) = (then_type, open.accept.as_mut()) {
-                pending.queued.push(text);
-            }
-            return true;
+        if let Some(pending) = open.accept.as_mut() {
+            // A commit character typed meanwhile is held back like any other text. Enter
+            // and Tab are commands: they finish the acceptance and then do their own thing.
+            return match then_type {
+                Some(text) => {
+                    pending.queued.push(text);
+                    true
+                }
+                // Not handled: the key's plain action runs on the view, whose command hook
+                // finishes the acceptance first.
+                None => false,
+            };
         }
         let Some((item_ix, item)) = open.session.selected_item() else {
             return false;
@@ -1268,6 +1339,10 @@ impl CompletionController {
             };
             wait_token.cancel();
             let _ = this.update(cx, |this, cx| {
+                // Finished early by a command or a cancel meanwhile: the answer is moot.
+                if this.pending_accept() != Some((id, item_ix)) {
+                    return;
+                }
                 if let (Some(r), Some(open)) = (resolved, this.open.as_mut().filter(|o| o.id == id))
                 {
                     open.session.apply_resolved(generation, item_ix, r);
@@ -1279,8 +1354,12 @@ impl CompletionController {
             open.accept = Some(PendingAccept {
                 _task: task,
                 token,
+                item: item_ix,
                 queued: then_type.into_iter().collect(),
             });
+        }
+        if let Some(code_view) = self.code_view.upgrade() {
+            code_view.update(cx, |v, cx| v.set_context_flag(FLAG_ACCEPTING, true, cx));
         }
         true
     }
@@ -1311,28 +1390,13 @@ impl CompletionController {
                 // Closed meanwhile (`close` typed what was held back).
                 return;
             };
-            let Some((rope, ..)) = caret_state(&self.code_view, cx) else {
-                self.close(CloseReason::Dismissed, cx);
-                self.type_held_back(then_type, cx);
-                return;
-            };
-            let v = code_view.read(cx);
-            let carets: Vec<usize> = v
-                .selections()
-                .iter()
-                .map(|s| edit::pos_to_offset(&rope, s.head))
-                .collect();
-            open.session.commit(&rope, &carets, v.primary_index(), item)
+            commit_at(&open.session, code_view.read(cx), item, cx)
         };
-        let commit = match commit {
-            Ok(c) => c,
-            Err(err) => {
-                // The text moved on: nothing sensible to insert any more.
-                tracing::debug!(target: "lector_ui::lsp", "completion not applied: {err}");
-                self.close(CloseReason::Dismissed, cx);
-                self.type_held_back(then_type, cx);
-                return;
-            }
+        let Some(commit) = commit else {
+            // The text moved on: nothing sensible to insert any more.
+            self.close(CloseReason::Dismissed, cx);
+            self.type_held_back(then_type, cx);
+            return;
         };
         let applied = apply_commit(&code_view, &commit, cx);
         self.close(CloseReason::Committed, cx);
@@ -1370,7 +1434,7 @@ impl CompletionController {
     }
 
     fn click_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        if self.is_accepting() {
+        if self.finish_pending(cx) {
             return;
         }
         if let Some(open) = self.open.as_mut() {
@@ -1380,9 +1444,98 @@ impl CompletionController {
     }
 }
 
+/// What finishing an acceptance ahead of a view command leaves for the view to apply.
+struct EarlyFinish {
+    /// The item as the session stands; `None` when the text no longer fits it.
+    commit: Option<CompletionCommit>,
+    /// The text held back meanwhile, in the order it was typed.
+    typed: Vec<String>,
+}
+
+/// The commit of `item` against the text and carets `view` has right now. `None` (logged)
+/// when the text moved so that the commit no longer fits.
+fn commit_at(
+    session: &CompletionSession,
+    view: &CodeView,
+    item: usize,
+    cx: &App,
+) -> Option<CompletionCommit> {
+    let rope = view.buffer()?.read(cx).text().clone();
+    let carets: Vec<usize> = view
+        .selections()
+        .iter()
+        .map(|s| edit::pos_to_offset(&rope, s.head))
+        .collect();
+    match session.commit(&rope, &carets, view.primary_index(), item) {
+        Ok(commit) => Some(commit),
+        Err(err) => {
+            tracing::debug!(target: "lector_ui::lsp", "completion not applied: {err}");
+            None
+        }
+    }
+}
+
+/// Hides the popup and drops the key context flags of a session.
+fn clear_popup_state(v: &mut CodeView, cx: &mut Context<CodeView>) {
+    v.set_popup(POPUP_KEY, None, cx);
+    v.set_context_flag(FLAG_OPEN, false, cx);
+    v.set_context_flag(FLAG_PENDING, false, cx);
+    v.set_context_flag(FLAG_ACCEPTING, false, cx);
+}
+
+/// The view's command hook: a command, a click or a composition is about to run while an
+/// acceptance waits for the server. Finishes the acceptance first, synchronously, on `view`
+/// itself (it is borrowed by the command, so the controller cannot update it): commits the
+/// item as it stands (one undo step), types the held-back text (the next one), and only
+/// then lets the command run against that buffer. The late resolve answer is dropped.
+///
+/// No signature help is requested for this commit: the command may already have moved on.
+fn finish_before_command(
+    controller: &WeakEntity<CompletionController>,
+    view: &mut CodeView,
+    cx: &mut Context<CodeView>,
+) {
+    let Some(controller) = controller.upgrade() else {
+        clear_popup_state(view, cx);
+        return;
+    };
+    let early = controller.update(cx, |c, cx| c.take_pending_for_command(view, cx));
+    clear_popup_state(view, cx);
+    let Some(early) = early else {
+        return;
+    };
+    if let Some(commit) = &early.commit {
+        apply_commit_in(view, commit, cx);
+    }
+    for chunk in &early.typed {
+        view.insert_typed(chunk, cx);
+    }
+    // The command that follows measures the text we just changed.
+    view.sync_source_with_buffer(cx);
+    // The edits' own change events must not read as a caret move.
+    let state = view.buffer().map(|b| {
+        let rope = b.read(cx).text().clone();
+        let caret = edit::pos_to_offset(&rope, view.selection().head);
+        (rope.version(), caret)
+    });
+    controller.update(cx, |c, cx| {
+        c.last_key = state;
+        cx.notify();
+    });
+}
+
 /// Applies a commit to the view as one undo step: the edits (main and additional) in
 /// one `apply_edits`, then every caret. Returns whether the buffer took it.
 fn apply_commit(code_view: &Entity<CodeView>, commit: &CompletionCommit, cx: &mut App) -> bool {
+    code_view.update(cx, |v, cx| apply_commit_in(v, commit, cx))
+}
+
+/// [`apply_commit`] on a view that is already borrowed.
+fn apply_commit_in(
+    v: &mut CodeView,
+    commit: &CompletionCommit,
+    cx: &mut Context<CodeView>,
+) -> bool {
     let edits: Vec<lector_buffer::TextEdit> = commit
         .edits
         .iter()
@@ -1392,27 +1545,25 @@ fn apply_commit(code_view: &Entity<CodeView>, commit: &CompletionCommit, cx: &mu
         })
         .collect();
     let carets = commit.carets.clone();
-    code_view.update(cx, |v, cx| {
-        let primary = v.primary_index();
-        v.edit(cx, move |b| {
-            let tx = b.apply_edits(edits);
-            let n = carets.len() as u64;
-            // Same id scheme as the view's own conversion: the largest id is the primary caret.
-            let sels = carets
-                .iter()
-                .enumerate()
-                .map(|(ix, c)| lector_buffer::Selection {
-                    id: if ix == primary { n + 1 } else { ix as u64 + 1 },
-                    anchor: *c,
-                    head: *c,
-                    goal: None,
-                })
-                .collect();
-            b.set_selections(sels);
-            ((), tx)
-        })
-        .is_some()
+    let primary = v.primary_index();
+    v.edit(cx, move |b| {
+        let tx = b.apply_edits(edits);
+        let n = carets.len() as u64;
+        // Same id scheme as the view's own conversion: the largest id is the primary caret.
+        let sels = carets
+            .iter()
+            .enumerate()
+            .map(|(ix, c)| lector_buffer::Selection {
+                id: if ix == primary { n + 1 } else { ix as u64 + 1 },
+                anchor: *c,
+                head: *c,
+                goal: None,
+            })
+            .collect();
+        b.set_selections(sels);
+        ((), tx)
     })
+    .is_some()
 }
 
 fn docs_width() -> Pixels {

@@ -15,7 +15,10 @@
 //! `CodeView && completion` only exist while the popup is open, and it can
 //! observe plain typing: [`CodeView::take_typed`] gives the text of the last
 //! keystroke, and [`CodeView::set_input_interceptor`] runs before typed text
-//! is inserted (commit characters).
+//! is inserted (commit characters). An owner that holds input back (a completion
+//! acceptance waiting for the server) also registers a [`CommandHook`]
+//! ([`CodeView::set_command_hook`]): the view runs it before every command, mouse
+//! press and composition start, so the owner can apply what it holds first.
 
 use std::rc::Rc;
 
@@ -44,6 +47,11 @@ pub type DismissHook = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Decides whether typed text is handled by the owner instead of being inserted:
 /// `true` swallows it (the owner inserts it later itself).
 pub type InputInterceptor = Rc<dyn Fn(&str, &mut Window, &mut App) -> bool>;
+
+/// Runs before any command (keyboard action, mouse press, composition start) of the view,
+/// while the key context flag it was registered with is set. It gets the view itself, so
+/// the owner can edit it synchronously before the command reads the buffer and carets.
+pub type CommandHook = Rc<dyn Fn(&mut CodeView, &mut gpui::Context<CodeView>)>;
 
 /// A popup hosted by a [`CodeView`].
 #[derive(Clone)]
@@ -123,6 +131,8 @@ pub(crate) struct PopupState {
     flags: Vec<&'static str>,
     typed: Option<String>,
     interceptor: Option<InputInterceptor>,
+    /// The flag that arms the hook, and the hook.
+    command_hook: Option<(&'static str, CommandHook)>,
     blur: Option<Subscription>,
 }
 
@@ -206,6 +216,27 @@ impl CodeView {
     /// Installs (or removes) the hook that sees typed text before it is inserted.
     pub fn set_input_interceptor(&mut self, f: Option<InputInterceptor>) {
         self.popups.interceptor = f;
+    }
+
+    /// Installs (or removes) the hook that runs before every command while the key context
+    /// flag `armed_by` is set (see [`CommandHook`]).
+    pub fn set_command_hook(&mut self, hook: Option<(&'static str, CommandHook)>) {
+        self.popups.command_hook = hook;
+    }
+
+    /// The single choke point for owners that hold input back: runs the [`CommandHook`]
+    /// (when its flag is set) before a command reads the buffer or the carets. Every
+    /// keyboard action is registered through [`CodeView::command`], mouse presses and
+    /// composition starts call this directly.
+    pub(crate) fn run_command_hook(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some((flag, hook)) = self.popups.command_hook.as_ref() else {
+            return;
+        };
+        if !self.popups.flags.contains(flag) {
+            return;
+        }
+        let hook = hook.clone();
+        hook(self, cx);
     }
 
     /// The key context of the view: `CodeView` plus the owners' flags.
