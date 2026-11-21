@@ -1196,6 +1196,7 @@ fn chmod(p: &Path, mode: u32) {
 #[test]
 fn the_health_probe_agrees_with_open_and_changes_nothing() {
     use super::open::Probe;
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut cases = vec![
         ProbeCase::Missing,
         ProbeCase::Healthy,
@@ -1211,7 +1212,8 @@ fn the_health_probe_agrees_with_open_and_changes_nothing() {
         ProbeCase::MissingInReadOnlyDir,
         ProbeCase::DamagedInReadOnlyDir,
     ]);
-    let mut skipped = Vec::new();
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut skipped: Vec<ProbeCase> = Vec::new();
     for case in cases {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("data");
@@ -1226,6 +1228,7 @@ fn the_health_probe_agrees_with_open_and_changes_nothing() {
         };
         let mut child = None;
         // Restores permissions so that the store can be opened and the folder cleaned up.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut restore: Box<dyn Fn()> = Box::new(|| {});
         match case {
             ProbeCase::Missing => {}
