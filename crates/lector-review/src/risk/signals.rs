@@ -4,7 +4,6 @@
 //! rows it is based on so that the reason can point at its evidence.
 
 use std::ops::Range;
-use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -88,10 +87,11 @@ struct Sigs {
 /// The signal regexes, compiled once. `None` only if a pattern does not compile (a bug the
 /// tests catch); the content signals are then skipped instead of panicking.
 fn sigs() -> Option<&'static Sigs> {
-    static SIGNAL_PATTERNS: OnceLock<Option<Sigs>> = OnceLock::new();
+    static SIGNAL_PATTERNS: std::sync::OnceLock<Option<Sigs>> = std::sync::OnceLock::new();
     SIGNAL_PATTERNS.get_or_init(|| compile_sigs().ok()).as_ref()
 }
 
+#[rustfmt::skip]
 fn compile_sigs() -> Result<Sigs, regex::Error> {
     let re = Regex::new;
     Ok(Sigs {

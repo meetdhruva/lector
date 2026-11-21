@@ -24,5 +24,7 @@ pub use crate::commands::{
 };
 pub use crate::core::{AppCore, CoreOptions};
 pub use crate::db::Db;
+pub use crate::documents::{Document, Indentation, LineEnding, LineHighlights};
 pub use crate::git_service::{GitService, GitSnapshot, RepoState};
+pub use crate::project::{Project, ProjectError};
 pub use crate::scheduler::{JobHandle, JobKey, Priority, Scheduler};

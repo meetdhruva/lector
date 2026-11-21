@@ -12,10 +12,10 @@ use std::sync::Arc;
 use gpui::SharedString;
 use lector_app::review_queue::{FileMoves, MoveSpan};
 use lector_diff::{RowKind, Segment};
-use lector_theme::{Color, TextStyle};
-use lector_ui::code_view::{CodeSource, DecorationColor, HighlightSpan, RowDecoration, SpanStyle};
 use lector_review::review::{FileDiff, LineSpan};
 use lector_review::structural::{Mark, StructuralDiff};
+use lector_theme::{Color, TextStyle};
+use lector_ui::code_view::{CodeSource, DecorationColor, HighlightSpan, RowDecoration, SpanStyle};
 
 static NEXT_VERSION: AtomicU64 = AtomicU64::new(1 << 40);
 
@@ -706,8 +706,8 @@ mod tests {
     use super::*;
     use lector_diff::DiffOptions;
     use lector_git::{ChangeKind, FileChange, Side};
-    use lector_syntax::LanguageRegistry;
     use lector_review::review::diff_bytes;
+    use lector_syntax::LanguageRegistry;
 
     fn diff(old: &str, new: &str) -> Arc<FileDiff> {
         let change = FileChange {
@@ -723,7 +723,8 @@ mod tests {
             Some(old.as_bytes().to_vec()),
             Some(new.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(), lector_app::content_cache::ContentCache::global(),
+            &DiffOptions::default(),
+            lector_app::content_cache::ContentCache::global(),
         ))
     }
 

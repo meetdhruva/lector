@@ -10,6 +10,7 @@ use gpui::{
     Point, SharedString, Subscription, Task, Window,
 };
 use lector_git::{graph, Changeset, CommitInfo, EdgeKind, GraphRow, LogQuery, Oid, RefKind};
+use lector_review::review::WORKDIR_REV;
 use lector_ui::actions::picker as picker_actions;
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::list::{virtual_list, VirtualListState};
@@ -19,7 +20,6 @@ use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_review::review::WORKDIR_REV;
 
 use crate::review_tab::ref_pill;
 use crate::store::{GitStore, GitStoreEvent};

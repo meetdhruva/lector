@@ -47,8 +47,8 @@ crates = [
 [[layer]]
 name = "analysis"
 # Below the stateful app. lector-review is the stateless review analysis (ADR 0001);
-# lector-workspace is being dissolved into it and lector-app; lector-perf is a dev-only gate runner.
-crates = ["lector-perf", "lector-review", "lector-workspace"]
+# lector-perf is a dev-only gate runner.
+crates = ["lector-perf", "lector-review"]
 
 [[layer]]
 name = "app"

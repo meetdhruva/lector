@@ -13,9 +13,9 @@ use lector_app::commands::Source;
 use lector_app::documents::DocumentStore;
 use lector_app::journal::Journal;
 use lector_app::provenance::{LineQuery, ProvenanceKind};
+use lector_app::Project;
 use lector_app::{AppCore, CommandContext, CoreOptions};
 use lector_git::Changeset;
-use lector_app::project::Project;
 use parking_lot::Mutex;
 use serde_json::json;
 
@@ -217,8 +217,8 @@ fn writes_are_checkpointed_reviewable_and_undoable() {
     );
     let title = lector_review::review::changeset_title(Some(repo), &cs);
     assert!(title.contains("turn 1"), "{title}");
-    let view = lector_app::project::load_changeset(&fx.project, &cs, &fx.core.review_store())
-        .unwrap();
+    let view =
+        lector_app::project::load_changeset(&fx.project, &cs, &fx.core.review_store()).unwrap();
     assert_eq!(view.files.len(), 2);
 
     // Journal: one entry per write and one for the turn (with the undo).

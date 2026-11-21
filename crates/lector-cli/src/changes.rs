@@ -4,11 +4,11 @@ use std::ops::Range;
 
 use anyhow::{anyhow, bail, Context as _};
 use lector_app::commands::read::file_diff_json;
+use lector_app::Project;
 use lector_diff::moves::{detect_moved, detect_moved_across, CrossFileMove, MovedBlock};
 use lector_git::{ChangeKind, Changeset, Repo};
 use lector_review::review::{self, ChangesetView, DiffKind, FileDiff, ReviewFile};
 use lector_review::risk::{rank_files_with, RiskLevel, RiskReport};
-use lector_app::project::Project;
 use serde_json::{json, Value};
 
 use crate::args::{ChangesArgs, DiffArgs};
@@ -152,7 +152,7 @@ pub fn assess_files(
     let mut diffs: Vec<FileDiff> = Vec::new();
     let mut origin: Vec<usize> = Vec::new();
     for (i, file) in view.files.iter().enumerate() {
-        match review::load_file_diff(project, &file.change, &opts) {
+        match lector_app::project::load_file_diff(project, &file.change, &opts) {
             Ok(diff) => {
                 diffs.push(diff);
                 origin.push(i);
@@ -233,7 +233,7 @@ pub fn run_changes(args: &ChangesArgs, io: &mut Io) -> anyhow::Result<()> {
     let project = open_repo_project(&dir)?;
     let cs = changes_changeset(args, &project)?;
     let core = open_core();
-    let view = review::load_changeset(&project, &cs, &core.review_store())
+    let view = lector_app::project::load_changeset(&project, &cs, &core.review_store())
         .with_context(|| "cannot load the changes")?;
 
     let mut risk_skipped = None;
@@ -591,7 +591,7 @@ pub fn run_diff(args: &DiffArgs, io: &mut Io) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("not inside a git repository"))?;
     let cs = parse_changeset(repo, &args.changeset)?;
     let core = open_core();
-    let view = review::load_changeset(&project, &cs, &core.review_store())
+    let view = lector_app::project::load_changeset(&project, &cs, &core.review_store())
         .with_context(|| "cannot load the changes")?;
     let only = args
         .file
@@ -618,7 +618,7 @@ pub fn run_diff(args: &DiffArgs, io: &mut Io) -> anyhow::Result<()> {
         .collect();
     let mut loaded: Vec<(String, FileDiff)> = Vec::new();
     for f in wanted {
-        let diff = review::load_file_diff(&project, &f.change, &opts)
+        let diff = lector_app::project::load_file_diff(&project, &f.change, &opts)
             .with_context(|| format!("cannot diff {}", f.path()))?;
         loaded.push((f.path().to_string(), diff));
     }

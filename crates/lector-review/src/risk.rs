@@ -31,7 +31,6 @@
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
-use std::sync::OnceLock;
 
 use lector_diff::LineDiff;
 use lector_git::ChangeKind;
@@ -742,23 +741,19 @@ struct Danger {
     what: &'static str,
 }
 
-/// The regex tables, compiled once. `None` only if a pattern does not compile (a bug the
-/// tests catch); the regex-based signals are then skipped instead of panicking.
+/// The regex tables, compiled once; `None` (signals skipped, no panic) if one fails to compile.
 fn patterns() -> Option<&'static Patterns> {
-    static RISK_PATTERNS: OnceLock<Option<Patterns>> = OnceLock::new();
-    RISK_PATTERNS.get_or_init(|| compile_patterns().ok()).as_ref()
+    static RISK_PATTERNS: std::sync::OnceLock<Option<Patterns>> = std::sync::OnceLock::new();
+    let tables = RISK_PATTERNS.get_or_init(|| compile_patterns().ok());
+    tables.as_ref()
 }
 
+#[rustfmt::skip]
 fn compile_patterns() -> Result<Patterns, regex::Error> {
     let re = Regex::new;
     let d = |s: &str, families: &'static [Family], kind, param, what| -> Result<Danger, regex::Error> {
-        Ok(Danger {
-        re: re(s)?,
-        families,
-        kind,
-        param,
-        what,
-    })};
+        Ok(Danger { re: re(s)?, families, kind, param, what })
+    };
     use Family::*;
     Ok(Patterns {
         cond: re(r"\b(if|else|elif|match|switch|case|while|guard|unless|when)\b")?,
@@ -1761,7 +1756,8 @@ mod tests {
             old.map(|s| s.as_bytes().to_vec()),
             new.map(|s| s.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(), &crate::content::NoCache,
+            &DiffOptions::default(),
+            &crate::content::NoCache,
         )
     }
 

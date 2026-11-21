@@ -13,10 +13,10 @@ use gpui::{
     prelude::*, App, Axis, ClipboardItem, Entity, Focusable, SharedString, Subscription, Task,
     Window,
 };
+use lector_app::project::{FileList, GitStatusMap, Location, NavHistory, Project};
 use lector_config::{PaneState, Session, TabKind, TabState};
 use lector_lsp::ServerState;
 use lector_search::CancelToken;
-use lector_app::project::{FileList, GitStatusMap, Location, NavHistory, Project};
 
 use super::Workspace;
 use super::WorkspaceEvent;
@@ -758,7 +758,7 @@ impl Workspace {
     }
 
     /// Opens the document with the language server so it is warm for hover
-    /// and navigation (idempotent per text; adapter until lector-workspace
+    /// and navigation (idempotent per text; adapter until the project model
     /// exposes it).
     fn warm_up_lsp(&self, view: &Entity<FileView>, cx: &mut gpui::Context<Self>) {
         let Some(lsp) = self.project.lsp().cloned() else {
@@ -1069,7 +1069,7 @@ impl Workspace {
 
     // Definitions, references.
 
-    fn active_doc_offset(&self, cx: &App) -> Option<(lector_app::documents::Document, usize)> {
+    fn active_doc_offset(&self, cx: &App) -> Option<(lector_app::Document, usize)> {
         let view = self.active_file_view(cx)?;
         let v = view.read(cx);
         let doc = v.live_document(cx)?.clone();
@@ -1088,13 +1088,13 @@ impl Workspace {
         };
         let project = self.project.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let targets = cx
-                .background_executor()
-                .spawn(
-                    async move { lector_app::project::symbols::definitions(&project, &doc, offset) },
-                )
-                .await
-                .unwrap_or_default();
+            let targets =
+                cx.background_executor()
+                    .spawn(async move {
+                        lector_app::project::symbols::definitions(&project, &doc, offset)
+                    })
+                    .await
+                    .unwrap_or_default();
             let _ = this.update_in(cx, |ws, window, cx| {
                 ws.show_targets(targets, "Definitions", window, cx)
             });

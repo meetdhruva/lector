@@ -797,7 +797,14 @@ pub fn load_file_diff_with(
 ) -> Result<FileDiff> {
     let old_loaded = load_side(repo, &change.old)?;
     let new_loaded = normalize_loaded_pair(&old_loaded, &change.new, load_side(repo, &change.new)?);
-    let mut fd = build_file_diff(change.clone(), &old_loaded, &new_loaded, languages, opts, cache);
+    let mut fd = build_file_diff(
+        change.clone(),
+        &old_loaded,
+        &new_loaded,
+        languages,
+        opts,
+        cache,
+    );
     fd.content_id = pair_content_id(change, &old_loaded, &new_loaded);
     Ok(fd)
 }
@@ -1484,7 +1491,8 @@ mod tests {
         let langs = LanguageRegistry::new();
         let changes = repo.changes(&Changeset::WorkingTree).unwrap();
         let lib = changes.iter().find(|c| c.path() == "lib.rs").unwrap();
-        let fd = load_file_diff_with(&repo, &langs, lib, &DiffOptions::default(), &NoCache).unwrap();
+        let fd =
+            load_file_diff_with(&repo, &langs, lib, &DiffOptions::default(), &NoCache).unwrap();
         assert_eq!(fd.kind, DiffKind::Text);
         assert_eq!(fd.diff.hunks.len(), 1);
         let changed: Vec<_> = fd
@@ -1562,7 +1570,8 @@ mod tests {
             &repo,
             &LanguageRegistry::new(),
             &changes[0],
-            &DiffOptions::default(), &NoCache,
+            &DiffOptions::default(),
+            &NoCache,
         )
         .unwrap();
         assert_eq!(fd.kind, DiffKind::Image(ImageFormat::Png));
@@ -1587,7 +1596,8 @@ mod tests {
             Some(old.clone()),
             Some(new.clone()),
             &langs,
-            &DiffOptions::default(), &NoCache,
+            &DiffOptions::default(),
+            &NoCache,
         );
         assert_eq!(exact.diff.hunks.len(), 1);
         let settings = DiffSettings {
@@ -1599,7 +1609,8 @@ mod tests {
             Some(old),
             Some(new),
             &langs,
-            &diff_options(&settings), &NoCache,
+            &diff_options(&settings),
+            &NoCache,
         );
         assert!(ws.diff.hunks.is_empty());
     }
@@ -1650,7 +1661,8 @@ mod tests {
             &LanguageRegistry::new(),
             "lib.rs",
             "main",
-            &DiffOptions::default(), &NoCache,
+            &DiffOptions::default(),
+            &NoCache,
         )
         .unwrap();
         assert!(fd.is_identical());
@@ -1718,7 +1730,8 @@ mod tests {
             &repo,
             &LanguageRegistry::new(),
             &big.change,
-            &DiffOptions::default(), &NoCache,
+            &DiffOptions::default(),
+            &NoCache,
         )
         .unwrap();
         eprintln!(

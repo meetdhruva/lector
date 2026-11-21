@@ -34,8 +34,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use lector_app::commands::{CommandError, Source};
 use lector_app::documents::DocumentStore;
+use lector_app::Project;
 use lector_app::{AppCore, Command, CommandContext};
-use lector_app::project::Project;
 use serde_json::{json, Map, Value};
 
 /// Newest protocol revision this server implements.

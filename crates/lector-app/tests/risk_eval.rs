@@ -16,8 +16,8 @@ use risk_eval::harness;
 
 use std::collections::BTreeSet;
 
-use lector_syntax::LanguageRegistry;
 use lector_review::risk::{self, EvidenceSide, RiskWeights};
+use lector_syntax::LanguageRegistry;
 
 /// Holdout top-1 measured when the set was frozen: 18 of 18.
 const MEASURED_HOLDOUT_TOP1: usize = 18;

@@ -175,14 +175,14 @@ pub struct OpenRequest {
     pub fixed_size: Option<(f32, f32)>,
     /// The project, if already opened (e.g. on a background thread while
     /// the app starts); opened on demand otherwise.
-    pub project: Option<lector_app::project::Project>,
+    pub project: Option<lector_app::Project>,
 }
 
 /// Opens a workspace window for `request`.
 pub fn open_workspace_window(cx: &mut App, request: OpenRequest) -> anyhow::Result<()> {
     let project = match request.project.clone() {
         Some(p) => p,
-        None => lector_app::project::Project::open(
+        None => lector_app::Project::open(
             &request.root,
             settings::AppSettings::get(cx).as_ref().clone(),
         )?,

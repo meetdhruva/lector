@@ -6,11 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use lector_app::Project;
 use lector_config::{ReviewStore, Settings};
 use lector_git::{Changeset, LogQuery};
-use lector_search::CancelToken;
-use lector_app::project::Project;
 use lector_review::{conflicts, review};
+use lector_search::CancelToken;
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -211,7 +211,8 @@ fn exercise(project: &Project, store: &ReviewStore) {
             project.languages(),
             first,
             "HEAD",
-            &review::diff_options(&project.settings().diff), lector_app::content_cache::ContentCache::global(),
+            &review::diff_options(&project.settings().diff),
+            lector_app::content_cache::ContentCache::global(),
         );
     }
 }

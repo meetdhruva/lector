@@ -14,6 +14,8 @@ use lector_app::review_queue::{
     hunk_fingerprints, intra_file_moves, FileMoves, HunkFingerprint, HunkReviewStore, MoveSpan,
 };
 use lector_git::{Changeset, Side};
+use lector_review::review::{DiffKind, FileDiff};
+use lector_review::structural::{self, Budget};
 use lector_theme::Theme;
 use lector_ui::actions::diff as diff_actions;
 use lector_ui::code_view::{
@@ -24,8 +26,6 @@ use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::markdown::{self, RenderOptions};
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_review::review::{DiffKind, FileDiff};
-use lector_review::structural::{self, Budget};
 
 use super::{DiffView, DiffViewEvent, Layout};
 use crate::diff_source::{DiffColumn, DiffSource, MovedOverlay, OverlayColors, StructuralMarks};
@@ -646,9 +646,7 @@ impl DiffView {
             (Side::Workdir(_) | Side::Index(_), _) => None,
             (_, Some(v)) => match lector_review::review::parse_changeset_key(&v.key)? {
                 Changeset::Commit(oid) => Some(oid.to_string()),
-                Changeset::Range { to, .. } if to != lector_review::review::WORKDIR_REV => {
-                    Some(to)
-                }
+                Changeset::Range { to, .. } if to != lector_review::review::WORKDIR_REV => Some(to),
                 Changeset::BranchVsBase { branch, .. } => Some(branch),
                 _ => None,
             },

@@ -5,8 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use lector_syntax::{LanguageRegistry, Syntax};
 use lector_review::structural::{self, Budget};
+use lector_syntax::{LanguageRegistry, Syntax};
 
 /// One generated function (about 14 lines).
 fn function(i: usize) -> String {

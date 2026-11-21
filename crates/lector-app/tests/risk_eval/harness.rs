@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, FileChange, Side};
-use lector_syntax::LanguageRegistry;
 use lector_review::review::{diff_bytes, FileDiff};
+use lector_syntax::LanguageRegistry;
 use serde::Deserialize;
 
 /// One file of a changeset: base and head content (`null` = absent on that side).
@@ -96,7 +96,8 @@ pub fn diffs_of(case: &Case, langs: &LanguageRegistry) -> Vec<Arc<FileDiff>> {
                 f.base.as_ref().map(|s| s.as_bytes().to_vec()),
                 f.head.as_ref().map(|s| s.as_bytes().to_vec()),
                 langs,
-                &DiffOptions::default(), lector_app::content_cache::ContentCache::global(),
+                &DiffOptions::default(),
+                lector_app::content_cache::ContentCache::global(),
             ))
         })
         .collect()

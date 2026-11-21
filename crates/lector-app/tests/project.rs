@@ -3,14 +3,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
+use lector_app::project::navigation::{Location, NavHistory};
+use lector_app::project::symbols::{self, TargetSource};
+use lector_app::project::{FileGitState, Project};
+use lector_app::{Indentation, LineEnding};
 use lector_config::Settings;
 use lector_diff::GutterKind;
 use lector_search::CancelToken;
 use lector_text::Point;
-use lector_app::project::navigation::{Location, NavHistory};
-use lector_app::project::{FileGitState, Project};
-use lector_app::project::symbols::{self, TargetSource};
-use lector_app::documents::{Indentation, LineEnding};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -677,4 +677,29 @@ fn symlinked_root_spellings_resolve_to_project_paths() {
         Some("src/new.rs")
     );
     assert_eq!(project.relative_path(Path::new("/elsewhere/x.rs")), None);
+}
+
+/// The `Project` wrappers of the review analysis (moved with them from the old review
+/// module, where the fixture came from the review tests).
+#[test]
+fn project_wrappers() {
+    use lector_app::project::{load_changeset, load_file_diff};
+    use lector_config::ReviewStore;
+    use lector_diff::DiffOptions;
+    use lector_git::Changeset;
+
+    let t = tempfile::tempdir().unwrap();
+    init_repo(t.path());
+    let src = |x: u32| format!("fn main() {{\n    let x = {x};\n    println!(\"{{x}}\");\n}}\n");
+    write(t.path(), "lib.rs", &src(1));
+    commit_all(t.path());
+    write(t.path(), "lib.rs", &src(2));
+    let project = Project::open(t.path(), Settings::default()).unwrap();
+    let st = tempfile::tempdir().unwrap();
+    let store = ReviewStore::open(st.path().join("review-state.json"));
+    let view = load_changeset(&project, &Changeset::Unstaged, &store).unwrap();
+    assert!(view.index_of("lib.rs").is_some());
+    let lib = view.files[view.index_of("lib.rs").unwrap()].change.clone();
+    let fd = load_file_diff(&project, &lib, &DiffOptions::default()).unwrap();
+    assert_eq!(fd.stats().added, 1);
 }

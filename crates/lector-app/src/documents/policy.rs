@@ -3,10 +3,10 @@
 
 use std::time::Duration;
 
+use crate::documents::{Document, Indentation, LineEnding};
 use lector_buffer::{BufferOptions, CommentTokens, IndentStyle, TextEdit};
 use lector_config::{AutoSave, Settings};
 use lector_text::Rope;
-use crate::documents::{Document, Indentation, LineEnding};
 
 /// Shortest auto-save delay honoured (typing faster than this never saves).
 pub const MIN_AUTO_SAVE_DELAY: Duration = Duration::from_millis(100);

@@ -673,8 +673,8 @@ mod tests {
     use super::*;
     use lector_diff::DiffOptions;
     use lector_git::{ChangeKind, FileChange, Side};
-    use lector_syntax::LanguageRegistry;
     use lector_review::review::diff_bytes;
+    use lector_syntax::LanguageRegistry;
 
     fn diff_for(path: &str, old: Option<&str>, new: Option<&str>) -> Arc<FileDiff> {
         let change = FileChange {
@@ -694,7 +694,8 @@ mod tests {
             old.map(|s| s.as_bytes().to_vec()),
             new.map(|s| s.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(), crate::content_cache::ContentCache::global(),
+            &DiffOptions::default(),
+            crate::content_cache::ContentCache::global(),
         ))
     }
 

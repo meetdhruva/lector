@@ -253,7 +253,7 @@ fn reveal_panel_does_not_toggle(cx: &mut TestAppContext) {
     });
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
-    let project = lector_app::project::Project::open(dir.path(), settings).unwrap();
+    let project = lector_app::Project::open(dir.path(), settings).unwrap();
     let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
     let shown = |ws: &Workspace, cx: &App| ws.is_panel_shown(SidebarPanel::Changes, cx);
 
@@ -297,7 +297,7 @@ fn outcome_toasts_use_the_level_icon(cx: &mut TestAppContext) {
         })
     });
     let dir = tempfile::tempdir().unwrap();
-    let project = lector_app::project::Project::open(dir.path(), settings).unwrap();
+    let project = lector_app::Project::open(dir.path(), settings).unwrap();
     let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
     for (level, want) in [
         (NoticeLevel::Success, ToastLevel::Success),
@@ -425,7 +425,7 @@ fn workspace_opens_documents_from_project(cx: &mut TestAppContext) {
     .unwrap();
     std::fs::write(dir.path().join("README.md"), "# Title\n\nHello *world*.\n").unwrap();
     std::fs::write(dir.path().join("data.bin"), [0u8, 1, 2, 0, 255]).unwrap();
-    let project = lector_app::project::Project::open(dir.path(), settings).unwrap();
+    let project = lector_app::Project::open(dir.path(), settings).unwrap();
     let root = project.root().to_path_buf();
 
     let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));

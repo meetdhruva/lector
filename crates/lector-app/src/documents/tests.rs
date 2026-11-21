@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::project::Project;
 use lector_buffer::TextEdit;
 use lector_config::Settings;
 use lector_lsp::{Diagnostic, DiagnosticSeverity, DocumentDiagnostics};
 use lector_text::PointUtf16;
-use crate::project::Project;
 use parking_lot::Mutex;
 
 use super::*;

@@ -317,10 +317,10 @@ pub fn unstage_paths_for(change: &FileChange) -> Vec<String> {
 mod tests {
     use super::*;
     use gpui::{Focusable as _, TestAppContext, VisualTestContext};
+    use lector_app::Project;
     use lector_app::{AppCore, CoreOptions};
     use lector_ui::actions::workspace::UndoLastOperation;
     use lector_ui::views::Workspace;
-    use lector_app::project::Project;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")

@@ -8,11 +8,11 @@ use gpui::{div, prelude::*, AnyElement, Context, Task};
 use lector_app::review_queue::{
     next_unreviewed, totals, FileProgress, HunkReviewStore, Position, QueueGroup,
 };
+use lector_review::risk::RiskLevel;
 use lector_ui::components::{h_flex, metrics};
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_review::risk::RiskLevel;
 
 use super::{DiffViewEvent, ReviewView};
 use crate::review_model::{analyze_changes, ChangesAnalysis};
@@ -491,9 +491,9 @@ impl ReviewView {
 mod tests {
     use super::*;
     use gpui::{Entity, TestAppContext, VisualTestContext};
+    use lector_app::Project;
     use lector_app::{AppCore, CoreOptions};
     use lector_ui::views::Workspace;
-    use lector_app::project::Project;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")

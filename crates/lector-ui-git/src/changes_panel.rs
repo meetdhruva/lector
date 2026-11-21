@@ -13,6 +13,8 @@ use gpui::{
 use lector_app::review_queue::QueueGroup;
 use lector_diff::DiffStats;
 use lector_git::{ChangeKind, Changeset, FileChange, Side};
+use lector_review::review::{self, ChangesetView, ReviewFile};
+use lector_review::risk::RiskLevel;
 use lector_ui::actions::git as git_actions;
 use lector_ui::actions::picker as picker_actions;
 use lector_ui::actions::workspace as ws_actions;
@@ -24,8 +26,6 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::WorkspaceEvent;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_review::review::{self, ChangesetView, ReviewFile};
-use lector_review::risk::RiskLevel;
 
 use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};

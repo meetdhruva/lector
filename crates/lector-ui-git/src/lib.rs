@@ -622,7 +622,12 @@ pub fn open_file_at_revision(
             .file_at(&rev, &rel)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("{rel} does not exist at {short}"))?;
-        let side = lector_review::review::side_from_bytes(&rel, bytes, project.languages(), lector_app::content_cache::ContentCache::global());
+        let side = lector_review::review::side_from_bytes(
+            &rel,
+            bytes,
+            project.languages(),
+            lector_app::content_cache::ContentCache::global(),
+        );
         Ok::<_, String>((side, short, rel))
     });
     window

@@ -7,12 +7,12 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, Criterion};
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, FileChange, Side};
-use lector_syntax::{LanguageRegistry, Syntax};
-use lector_text::Text;
 use lector_review::review::diff_bytes;
 use lector_review::risk;
 use lector_review::structural::{self, Budget};
 use lector_review::{ContentId, NoCache};
+use lector_syntax::{LanguageRegistry, Syntax};
+use lector_text::Text;
 
 const RUST_SMALL: &str = include_str!("../../lector-app/src/project/navigation.rs");
 const RUST_MEDIUM: &str = include_str!("../../lector-app/src/project/symbols.rs");

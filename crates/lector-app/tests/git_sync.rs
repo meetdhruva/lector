@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex, Once};
 use lector_app::commands::git_sync::SyncHost;
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::{Journal, UndoMode};
+use lector_app::Project;
 use lector_app::{AppCore, CoreOptions, Outcome};
 use lector_config::Settings;
 use lector_git::{SyncErrorKind, SyncEvent};
-use lector_app::project::Project;
 use serde_json::{json, Value};
 
 fn hermetic() {

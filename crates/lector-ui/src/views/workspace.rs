@@ -17,7 +17,7 @@ use super::find_bar::FindBar;
 use super::go_to_line::GoToLine;
 use super::pane::{new_pane, CodeItem, Pane, PaneEvent, PaneItem, PaneNode};
 use crate::editor::{FileView, Reveal};
-use lector_app::project::Project;
+use lector_app::Project;
 
 mod chrome;
 mod editing;

@@ -396,9 +396,8 @@ fn list_changes() -> FnCommand {
         |cx, args| {
             let project = cx.require_project()?;
             let cs = changeset_arg(cx, args)?;
-            let view =
-                crate::project::load_changeset(project, &cs, &cx.core.review_store())
-                    .context("cannot load changeset")?;
+            let view = crate::project::load_changeset(project, &cs, &cx.core.review_store())
+                .context("cannot load changeset")?;
             let files: Vec<Value> = view
                 .files
                 .iter()
@@ -500,11 +499,7 @@ fn show_diff() -> FnCommand {
 }
 
 /// One file's diff as compact JSON: hunks with git-style headers and `+`/`-`/` ` lines.
-pub fn file_diff_json(
-    path: &str,
-    diff: &lector_review::review::FileDiff,
-    context: u32,
-) -> Value {
+pub fn file_diff_json(path: &str, diff: &lector_review::review::FileDiff, context: u32) -> Value {
     use lector_review::review::DiffKind;
     let mut v = json!({
         "path": path,

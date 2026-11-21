@@ -9,13 +9,13 @@ use gpui::{
     App, AppContext, Context, Entity, EntityId, Global, Hsla, SharedString, Subscription, Task,
     WeakEntity, Window,
 };
+use lector_app::Project;
 use lector_diff::{diff_lines, DiffOptions, LineDiff};
 use lector_git::{BlameHunk, Oid};
 use lector_ui::code_view::{CodeView, GutterAnnotation, GutterAnnotations};
 use lector_ui::editor::{DocumentEvent, DocumentModel};
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_app::project::Project;
 
 use crate::store::GitStore;
 use crate::util::{now_secs, short_relative_time};

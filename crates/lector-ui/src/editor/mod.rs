@@ -33,10 +33,9 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, Pixels, Point, PromptLevel, SharedString, Subscription,
     Task, WeakEntity, Window,
 };
+use lector_app::{Document, Indentation, LineEnding, Project};
 use lector_fs::{FileKind, ImageFormat};
 use lector_syntax::{OutlineItem, SymbolKind};
-use lector_app::documents::{Document, Indentation, LineEnding};
-use lector_app::project::Project;
 
 pub use doc_store::{document_store, set_document_store};
 pub use model::{

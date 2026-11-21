@@ -11,8 +11,8 @@ use gpui::{
     div, prelude::*, AnyElement, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, SharedString, StyledText, Task, Window,
 };
-use lector_app::documents::Document;
 use lector_app::project::{Project, Target, TargetSource};
+use lector_app::Document;
 
 use crate::components::context_menu::{ContextMenu, ContextMenuState};
 use crate::components::list::{virtual_list, VirtualListState};

@@ -10,9 +10,9 @@ use std::sync::Once;
 use lector_app::commands::git_write::BackupUnavailable;
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::{Journal, UndoError, UndoMode, UndoRecord, UndoStatus};
+use lector_app::Project;
 use lector_app::{AppCore, CoreOptions, Outcome};
 use lector_config::Settings;
-use lector_app::project::Project;
 use serde_json::{json, Value};
 
 fn hermetic() {

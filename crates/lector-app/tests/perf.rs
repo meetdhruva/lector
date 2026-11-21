@@ -2,14 +2,14 @@
 //! (`Project::load_document`, as a file tab does) and serve the first screen.
 //!
 //! Ignored by default (writes 1 GB). Run in release mode:
-//! `LECTOR_PERF_DIR=/tmp [LECTOR_PERF_DROP_CACHES=1] cargo test -p lector-workspace --release --test perf -- --ignored --nocapture`
+//! `LECTOR_PERF_DIR=/tmp [LECTOR_PERF_DROP_CACHES=1] cargo test -p lector-app --release --test perf -- --ignored --nocapture`
 
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use lector_app::Project;
 use lector_config::Settings;
-use lector_app::project::Project;
 
 #[test]
 #[ignore = "writes a 1 GB file; run explicitly in release mode"]

@@ -11,11 +11,11 @@ use std::sync::Arc;
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, WeakEntity, Window};
 use lector_app::git_service::{GitSnapshot, RepoState, Subscription};
+use lector_app::Project;
 use lector_config::{ReviewStore, Settings};
 use lector_git::{HeadInfo, Repo, StatusEntry};
-use lector_ui::views::{Workspace, WorkspaceEvent};
 use lector_review::conflicts::ConflictState;
-use lector_app::project::Project;
+use lector_ui::views::{Workspace, WorkspaceEvent};
 
 use crate::review_model::{ModelInputs, ReviewModel};
 

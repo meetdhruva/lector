@@ -466,4 +466,57 @@ mod tests {
         assert_eq!(st.syntax.hits + st.syntax.misses, 80);
         assert!(st.syntax.entries <= 5);
     }
+
+    /// The `lector-review` seam: the app's cache and `NoCache` give identical file diffs, on a
+    /// miss and on a hit, and the review functions really go through the cache.
+    #[test]
+    fn cached_and_uncached_file_diffs_are_identical() {
+        use lector_git::{ChangeKind, FileChange, Side};
+        use lector_review::review::{diff_bytes, side_from_bytes, FileDiff};
+        use lector_review::NoCache;
+
+        let langs = LanguageRegistry::new();
+        let old = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
+        let new = "fn main() {\n    let x = 2;\n    println!(\"{x}\");\n}\nfn added() {}\n";
+        let change = FileChange {
+            old_path: Some("lib.rs".into()),
+            new_path: Some("lib.rs".into()),
+            kind: ChangeKind::Modified,
+            old: Side::Workdir("lib.rs".into()),
+            new: Side::Workdir("lib.rs".into()),
+            binary: None,
+        };
+        let opts = DiffOptions::default();
+        let diff = |cache: &dyn DerivedCache| {
+            let (o, n) = (old.as_bytes().to_vec(), new.as_bytes().to_vec());
+            diff_bytes(change.clone(), Some(o), Some(n), &langs, &opts, cache)
+        };
+        let view = |fd: &FileDiff| {
+            let sexp =
+                |s: &lector_review::review::DiffSide| s.syntax.as_ref().map(|t| t.debug_sexp());
+            (
+                fd.kind.clone(),
+                fd.diff.clone(),
+                fd.split.clone(),
+                fd.unified.clone(),
+                (sexp(&fd.old), sexp(&fd.new)),
+                (fd.old.line_highlights(0..5), fd.new.line_highlights(0..6)),
+                fd.inline_for_old(1).map(|i| (*i).clone()),
+            )
+        };
+        let cache = ContentCache::default();
+        let uncached = view(&diff(&NoCache));
+        assert_eq!(view(&diff(&cache)), uncached, "miss");
+        assert_eq!(view(&diff(&cache)), uncached, "hit");
+        let st = cache.stats();
+        assert_eq!((st.syntax.misses, st.syntax.hits), (2, 2));
+        assert_eq!((st.diffs.misses, st.diffs.hits), (1, 1));
+
+        let side = |cache: &dyn DerivedCache| {
+            let s = side_from_bytes("lib.rs", old.as_bytes().to_vec(), &langs, cache);
+            (s.syntax.as_ref().map(|t| t.debug_sexp()), s.line_count())
+        };
+        assert_eq!(side(&cache), side(&NoCache));
+        assert_eq!(cache.stats().syntax.hits, 3);
+    }
 }

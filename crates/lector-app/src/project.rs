@@ -17,16 +17,14 @@ use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
 use lector_config::Settings;
-use lector_git::{BlameHunk, ChangeKind, Oid, Repo, StatusEntry};
+use lector_diff::DiffOptions;
+use lector_git::{BlameHunk, ChangeKind, Changeset, FileChange, Oid, Repo, StatusEntry};
 use lector_lsp::{LspManager, ServerConfig};
+use lector_review::review::{self, ChangesetView, FileDiff};
 use lector_search::{walk_files, CancelToken, WalkOptions};
 use lector_syntax::{LanguageRegistry, SymbolIndex, Syntax};
 use lector_text::Text;
 use parking_lot::{Mutex, RwLock};
-
-use lector_diff::DiffOptions;
-use lector_git::{Changeset, FileChange};
-use lector_review::review::{self, ChangesetView, FileDiff};
 
 use crate::content_cache::ContentCache;
 use crate::documents::Document;
@@ -66,8 +64,6 @@ impl From<lector_review::Error> for ProjectError {
 
 /// `Result` alias for the project model.
 pub type Result<T> = std::result::Result<T, ProjectError>;
-
-use ProjectError as Error;
 
 /// Files larger than this are skipped by the symbol indexer.
 const INDEX_MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -337,7 +333,7 @@ impl Project {
     fn open_with(root: &Path, settings: Settings, discover_git: bool) -> Result<Project> {
         let root = dunce::canonicalize(root)?;
         if !root.is_dir() {
-            return Err(Error::Other(format!(
+            return Err(ProjectError::Other(format!(
                 "{} is not a directory",
                 root.display()
             )));
@@ -655,7 +651,11 @@ impl Project {
 
     /// Blame of `rel_path` (relative to the root), cached by (path, HEAD, mtime, size).
     pub fn blame(&self, rel_path: &str) -> Result<Arc<Vec<BlameHunk>>> {
-        let repo = self.inner.repo.as_ref().ok_or(Error::NotARepository)?;
+        let repo = self
+            .inner
+            .repo
+            .as_ref()
+            .ok_or(ProjectError::NotARepository)?;
         let meta = std::fs::metadata(self.absolute_path(rel_path)).ok();
         let key = BlameKey {
             head: repo.head().ok().and_then(|h| h.oid),
@@ -726,7 +726,7 @@ pub fn load_changeset(
     cs: &Changeset,
     store: &lector_config::ReviewStore,
 ) -> Result<ChangesetView> {
-    let repo = project.repo().ok_or(Error::NotARepository)?;
+    let repo = project.repo().ok_or(ProjectError::NotARepository)?;
     let opts = review::diff_options(&project.settings().diff);
     Ok(review::load_changeset_with(repo, cs, store, &opts)?)
 }
@@ -737,9 +737,15 @@ pub fn load_file_diff(
     change: &FileChange,
     opts: &DiffOptions,
 ) -> Result<FileDiff> {
-    let repo = project.repo().ok_or(Error::NotARepository)?;
+    let repo = project.repo().ok_or(ProjectError::NotARepository)?;
     let cache = ContentCache::global();
-    Ok(review::load_file_diff_with(repo, project.languages(), change, opts, cache)?)
+    Ok(review::load_file_diff_with(
+        repo,
+        project.languages(),
+        change,
+        opts,
+        cache,
+    )?)
 }
 
 #[cfg(test)]

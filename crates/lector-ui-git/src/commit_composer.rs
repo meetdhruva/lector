@@ -661,9 +661,9 @@ pub fn output_box(
 mod tests {
     use super::*;
     use gpui::{div, FocusHandle, TestAppContext, Window};
+    use lector_app::Project;
     use lector_app::{AppCore, CoreOptions};
     use lector_ui::views::Workspace;
-    use lector_app::project::Project;
 
     /// Hosts a composer inside a container so the tests can tell when focus leaves it.
     struct Host {

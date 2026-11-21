@@ -10,9 +10,9 @@ use lector_app::provenance::{
     LineProvenance, LineQuery, ProvenanceKind, ProvenanceProvider, PRIORITY_AGENT,
 };
 use lector_app::AppCore;
+use lector_app::Project;
 use lector_diff::remap::LineMap;
 use lector_diff::{diff_lines, DiffOptions};
-use lector_app::project::Project;
 use parking_lot::Mutex;
 
 use crate::config::AgentConfig;

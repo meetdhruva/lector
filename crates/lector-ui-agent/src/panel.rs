@@ -17,12 +17,12 @@ use lector_agent::{
 };
 use lector_app::commands::Source;
 use lector_app::AppCore;
+use lector_app::Project;
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::text_area::{TextArea, TextAreaEvent};
 use lector_ui::markdown::Block;
 use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
-use lector_app::project::Project;
 use serde_json::json;
 
 use crate::feedback::Chip;
