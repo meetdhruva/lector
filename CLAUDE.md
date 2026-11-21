@@ -1,10 +1,11 @@
 # Lector — contributor guide (humans and agents)
 
-Lector is a reading-first, read-only (v0.1.0) code viewer and git review tool in Rust.
-Read `docs/ARCHITECTURE.md` first: it defines crate boundaries and public API contracts.
+Lector is a reading-first code viewer, git review tool and light editor in Rust.
+Read `docs/ARCHITECTURE.md` first: it defines the layers, what each crate owns, the cross-crate
+flows and the security rules. API contracts live in rustdoc; decisions in `docs/adr/`.
 
 ## Rules
-- Write policy (v0.2+, see `docs/ARCHITECTURE.md` "Write policy"): Lector writes to the
+- Write policy (see `docs/ARCHITECTURE.md` "Write policy"): Lector writes to the
   user's files or repository **only** as the direct result of an explicit user action
   (save, stage, commit, discard, resolve...). Nothing happens on open, on focus, on a
   timer (except opt-in auto-save) or as a side effect of reading. Discards ask first.
@@ -16,7 +17,8 @@ Read `docs/ARCHITECTURE.md` first: it defines crate boundaries and public API co
   binary `lector-cli` ships on Windows, see `docs/RELEASING.md`); stdout of `lector mcp` carries
   protocol messages only, logs go to stderr. `--json` formats are stable (add fields, never rename).
 - Respect the layering in `docs/ARCHITECTURE.md`. Never add a dependency on a higher layer.
-- Public API changes to a contract in `docs/ARCHITECTURE.md` must update that doc.
+- A change to a crate's purpose, a cross-crate flow or a security rule updates `docs/ARCHITECTURE.md`;
+  API contracts are doc comments next to the code and change with it.
 - No `unwrap()`/`expect()` on user data or I/O. `thiserror` in libraries, `anyhow` in the app.
 - `#![forbid(unsafe_code)]` in every crate except `lector-text` (mmap) — and document each `unsafe`.
 - Tests live next to code (`#[cfg(test)]`) plus `tests/` for integration. Use `proptest`

@@ -21,3 +21,10 @@ Separately in CI: `cargo deny` (advisories, licences, duplicate major versions r
 - *Clippy lints / custom dylint*: heavier toolchain coupling than text and metadata checks
   need; these rules are about crate edges and call sites, which `cargo metadata` plus a
   tokenizer-level scan (comments and strings stripped, `#[cfg(test)]` regions skipped) answer.
+
+## Clarifications at implementation
+Recorded by the architect, before merge of step 7.
+
+- `lector-archcheck` depends on `toml` as well as `serde_json` (it reads `arch/layers.toml` and
+  `arch/baseline.toml`). The intent stands: a small, dependency-light checker with no workspace
+  crate dependencies.

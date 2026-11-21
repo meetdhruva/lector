@@ -362,7 +362,7 @@ and the quit hook that runs `lector_app::shutdown::shutdown` last. Logging goes 
    since; `UndoMode::Force` ("Restore anyway") backs up the present state first, so every undo is
    itself undoable.
 
-Saving a file is the other write: `DocHandle::save` (see flow 6) encodes the buffer and calls
+Saving a file is the other write: `DocHandle::save` (see [Opening and editing a document](#opening-and-editing-a-document)) encodes the buffer and calls
 `lector_fs::write_atomic`. Discards and other overwrites are backed up and undoable instead of
 confirmed; what still confirms is listed under [Write policy](#write-policy). Every write command
 declares `undo: Undoable | NotUndoable(reason)`; `crates/lector-app/tests/undo_roundtrip.rs`
@@ -512,6 +512,8 @@ Rustdoc: `lector_app::store` (concern table), `lector_app::store::open`,
    becomes a `DiskConflict` (Reload / Keep mine / Compare), a deleted file is tracked.
 
 ## Security rules
+
+The reasons behind these rules are in [ADR 0009](adr/0009-security-posture.md).
 
 ### Write policy
 Lector writes to the user's files or repository **only** as the direct result of an explicit user
