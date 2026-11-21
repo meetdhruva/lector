@@ -65,7 +65,7 @@ fn git_credential_fill_uses_askpass() {
     let home = tempfile::tempdir().expect("tempdir");
     let seen: Arc<Mutex<Vec<PromptRequest>>> = Arc::default();
     let s = seen.clone();
-    let server = AskpassServer::start(home.path(), move |req| {
+    let server = AskpassServer::start(home.path(), threads(), move |req| {
         let reply = match req.kind {
             PromptKind::Username => PromptReply::Answer(Secret::new("ann")),
             PromptKind::Password => PromptReply::Answer(Secret::new("s3cret pass")),
@@ -89,9 +89,16 @@ fn git_credential_fill_uses_askpass() {
 
 fn cancelling_fails_git_without_a_terminal_prompt() {
     let home = tempfile::tempdir().expect("tempdir");
-    let server = AskpassServer::start(home.path(), |_| PromptReply::Cancel).expect("server");
+    let server = AskpassServer::start(home.path(), threads(), |_| PromptReply::Cancel).expect("server");
     let out = credential_fill(&server, home.path());
     assert!(!out.success(), "git must fail when the user cancels");
     assert!(!out.stdout_text().contains("password="));
     println!("cancelling_fails_git_without_a_terminal_prompt ... ok");
+}
+
+/// Runs each askpass connection on its own thread (the app uses the scheduler).
+fn threads() -> lector_base::thread::TaskRunner {
+    std::sync::Arc::new(|task| {
+        std::thread::spawn(task);
+    })
 }

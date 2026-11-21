@@ -18,6 +18,7 @@
 //! * GPUI before-save hooks (format on save) run before the store saves;
 //! * the auto-save timer follows [`lector_app::documents::auto_save_decision`].
 
+use crate::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -392,19 +393,18 @@ impl DocumentModel {
         let store = self.store.clone();
         let warm = target_row.saturating_sub(40)..target_row + 120;
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let opened = cx
-                .background_executor()
-                .spawn(async move {
-                    store.open_with(
-                        &path,
-                        &project,
-                        OpenOptions {
-                            buffer_options: None,
-                            warm_rows: Some(warm),
-                        },
-                    )
-                })
-                .await;
+            let key = view_key(JobKind::DocumentOpen, this.entity_id());
+            let opened = background(cx, key, Priority::Visible, move |_| {
+                store.open_with(
+                    &path,
+                    &project,
+                    OpenOptions {
+                        buffer_options: None,
+                        warm_rows: Some(warm),
+                    },
+                )
+            });
+            let Ok(opened) = opened.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 match opened {
@@ -852,10 +852,8 @@ impl DocumentModel {
                 path,
                 ..SaveRequest::from_settings(&editor)
             };
-            let result = cx
-                .background_executor()
-                .spawn(async move { handle.save(req) })
-                .await;
+            let key = view_key(JobKind::DocumentSave, this.entity_id());
+            let result = background(cx, key, Priority::Visible, move |_| handle.save(req)).await?;
             let outcome = match result {
                 Ok(StoreSaveOutcome::Saved) => SaveOutcome::Saved,
                 Ok(StoreSaveOutcome::Unchanged) => SaveOutcome::Unchanged,
@@ -938,16 +936,15 @@ impl DocumentModel {
             return;
         };
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    if discard {
-                        handle.reload()
-                    } else {
-                        handle.check_disk()
-                    }
-                })
-                .await;
+            let key = view_key(JobKind::DocumentReload, this.entity_id());
+            let result = background(cx, key, Priority::Visible, move |_| {
+                if discard {
+                    handle.reload()
+                } else {
+                    handle.check_disk()
+                }
+            });
+            let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 if let Err(err) = result {

@@ -10,6 +10,7 @@
 //! "Resolve Anyway"), then saves through the normal save path, stages the file
 //! and moves on to the next conflicted file.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -231,7 +232,8 @@ impl MergeEditor {
             .as_ref()
             .map(|r| r.theirs_label.clone())
             .unwrap_or_default();
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::ConflictParse, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             let ours_view = conflicts::side_view(&text, &parse, Side::Ours);
             let theirs_view = conflicts::side_view(&text, &parse, Side::Theirs);
             let base_markers = conflicts::side_view(&text, &parse, Side::Base);
@@ -259,7 +261,9 @@ impl MergeEditor {
             (ours_view, theirs_view, base_view, ours, theirs, base)
         });
         self.building = Some(cx.spawn(async move |this, cx| {
-            let (ours_view, theirs_view, base_view, ours, theirs, base) = work.await;
+            let Ok((ours_view, theirs_view, base_view, ours, theirs, base)) = work.await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 this.building = None;
                 let make = |side: lector_review::review::DiffSide, cx: &mut Context<Self>| {

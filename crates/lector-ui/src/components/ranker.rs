@@ -18,10 +18,9 @@
 //!
 //! This module does not touch GPUI and starts no thread of its own.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use lector_app::scheduler::{JobHandle, JobKey, Priority, Scheduler};
+use lector_app::scheduler::{JobHandle, JobKey, JobKind, Priority, Scheduler, Subject};
 use lector_base::fuzzy::{Matcher, Query, Ranked, INTERACTIVE_WORK_BUDGET, WORK_PER_CANDIDATE};
 
 /// One ranked row: the candidate's index and the byte offsets to highlight.
@@ -77,15 +76,11 @@ pub struct ListRanker<T: Send + Sync + 'static> {
 impl<T: Send + Sync + 'static> ListRanker<T> {
     /// A ranker over `items`, matching the text `text(item)` and keeping the best `limit`.
     pub fn new(items: Arc<Vec<T>>, text: fn(&T) -> &str, limit: usize) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
         ListRanker {
             items,
             text,
             limit,
-            key: JobKey::new(format!(
-                "picker-rank:{}",
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )),
+            key: JobKey::new(JobKind::PickerRank, Subject::unique()),
             matcher: Matcher::new(),
             generation: 0,
             landed: 0,
@@ -108,8 +103,8 @@ impl<T: Send + Sync + 'static> ListRanker<T> {
         let (items, text, limit) = (self.items.clone(), self.text, self.limit);
         self.spawned = true;
         let handle = Scheduler::global().spawn(
+            self.key.clone(),
             Priority::Interactive,
-            Some(self.key.clone()),
             move |cancel| {
                 Matcher::new()
                     .rank_by_cancellable(&query, &items, text, limit, cancel)

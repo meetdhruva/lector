@@ -2,6 +2,7 @@
 //! recent files first for an empty query, `path:line[:col]` suffixes, file
 //! icons and git status colors.
 
+use crate::background::{background, JobError, JobKey, JobKind, Priority, Subject};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -71,6 +72,8 @@ pub struct FileFinderDelegate {
     rows_stamp: Option<u64>,
     /// Enter was pressed while the rows were still those of an older query.
     confirm_waiting: bool,
+    /// Feeds the candidates; dropping it (the finder closed) stops the feed.
+    _feed_task: Task<Result<(), JobError>>,
 }
 
 const MAX_ROWS: u32 = 300;
@@ -84,14 +87,22 @@ impl FileFinderDelegate {
         recent: Vec<Arc<str>>,
         status: Arc<GitStatusMap>,
         on_open: impl Fn(PathBuf, Option<(u32, Option<u32>)>, &mut Window, &mut App) + 'static,
+        cx: &App,
     ) -> Self {
         let list = PathList::new();
         let injector = list.injector();
         let feed = files.clone();
-        // Pushing a million paths takes a while; do it off the main thread.
-        std::thread::spawn(move || {
-            for path in &feed.paths {
-                injector.push(path.clone(), path);
+        // Pushing a million paths takes a while: off the main thread, stopped when the finder
+        // closes (dropping `feed_task` cancels the job).
+        let key = JobKey::new(JobKind::PickerFeed, Subject::unique());
+        let feed_task = background(cx, key, Priority::Visible, move |cancel| {
+            for chunk in feed.paths.chunks(4096) {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                for path in chunk {
+                    injector.push(path.clone(), path);
+                }
             }
         });
         FileFinderDelegate {
@@ -104,6 +115,7 @@ impl FileFinderDelegate {
             selected: 0,
             line: None,
             on_open: Rc::new(on_open),
+            _feed_task: feed_task,
             tick_task: None,
             counts: (0, 0),
             rows_stamp: None,
@@ -342,6 +354,7 @@ mod tests {
                 Vec::new(),
                 Arc::default(),
                 move |path, _, _, _| sink.borrow_mut().push(path),
+                cx,
             );
             Picker::new(delegate, window, cx)
         });

@@ -3,6 +3,7 @@
 //! git will commit as, the Commit button (disabled with an explanation), hook and
 //! commit errors, and a success toast with the short sha.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use gpui::{
     div, prelude::*, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, Hsla, SharedString, Subscription, Task, Window,
@@ -168,9 +169,10 @@ impl CommitComposer {
         let Some(repo) = self.store.read(cx).repo().cloned() else {
             return;
         };
-        let work = cx.background_spawn(async move { repo.identity() });
+        let key = view_key(JobKind::GitIdentity, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| repo.identity());
         self.identity_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let Ok(result) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.identity = match result {
                     Ok(Some((name, email))) => IdentityState::Known(name, email),
@@ -215,9 +217,10 @@ impl CommitComposer {
         };
         self.amend = true;
         self.saved_message = Some(self.editor.read(cx).text().to_string());
-        let work = cx.background_spawn(async move { repo.last_commit_message() });
+        let key = view_key(JobKind::GitCommitMessage, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| repo.last_commit_message());
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let Ok(result) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 if !this.amend {
                     return;
@@ -281,7 +284,9 @@ impl CommitComposer {
         let core = lector_ui::commands_bridge::core(cx);
         // The registry's `git.commit` (journaled like every write, ADR 0002). Its data has the
         // recorded subject and, for the toast's "Push" button (v0.7), the upstream state.
-        let work = cx.background_spawn(async move {
+        // A write the user asked for: never replaced, survives the composer closing.
+        let key = view_key(JobKind::GitWrite, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             Journal::install(&core);
             let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
             let outcome = core.registry().invoke("git.commit", args, &ctx)?;
@@ -297,7 +302,9 @@ impl CommitComposer {
         });
         let store = self.store.clone();
         self.commit_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work
+                .await
+                .unwrap_or_else(|e| Err(CommandError::Failed(e.into())));
             let _ = this.update(cx, |this, cx| {
                 this.committing = false;
                 match result {

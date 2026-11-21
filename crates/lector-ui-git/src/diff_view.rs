@@ -12,7 +12,6 @@ use gpui::{
     FontWeight, Hsla, ImageSource, MouseButton, MouseDownEvent, Pixels, SharedString, Subscription,
     Task, WeakEntity, Window,
 };
-use lector_base::CancelToken;
 use lector_config::DiffLayout;
 use lector_diff::{DiffOptions, DiffStats, Whitespace};
 use lector_git::{ChangeKind, Changeset, FileChange, Side};
@@ -28,7 +27,7 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::Workspace;
-use lector_ui::{ActiveTheme, ColorExt};
+use lector_ui::{background::{background, view_key, JobKind, Priority}, ActiveTheme, ColorExt};
 
 use crate::confirm::{confirm, ConfirmSpec};
 use crate::diff_source::{hunk_display_starts, DiffColumn, DiffMeta, DiffSource};
@@ -336,7 +335,8 @@ impl DiffView {
         let repo_override = self.review_ctx.as_ref().and_then(|c| c.repo.clone());
         let comment_query = self.comment_query(cx);
         let service = lector_ui::commands_bridge::core(cx).review();
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::GitChangeset, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |cancel| {
             let repo = match &repo_override {
                 Some(r) => r,
                 None => project
@@ -344,13 +344,12 @@ impl DiffView {
                     .ok_or_else(|| "Not a git repository".to_string())?,
             };
             let languages = project.languages().clone();
-            let cancel = CancelToken::new();
             let diff = match &target {
                 DiffTarget::Change(change) => {
-                    service.file_diff(repo, &languages, change, &opts, &cancel)
+                    service.file_diff(repo, &languages, change, &opts, cancel)
                 }
                 DiffTarget::FileVsRev { path, rev } => {
-                    service.file_vs_revision(repo, &languages, path, rev, &opts, &cancel)
+                    service.file_vs_revision(repo, &languages, path, rev, &opts, cancel)
                 }
             }
             .map_err(|e| e.to_string())?;
@@ -379,7 +378,7 @@ impl DiffView {
             })
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
@@ -1884,18 +1883,19 @@ pub fn restore_item(
             let service = lector_ui::commands_bridge::core(cx).review();
             let view = cx.new(|cx| {
                 let svc = service.clone();
-                let task = cx.background_spawn(async move {
+                let key = view_key(JobKind::GitFileSummary, cx.entity_id());
+                let task = background(cx, key, Priority::Visible, move |cancel| {
                     let change = repo
                         .changes(&cs)
                         .ok()?
                         .into_iter()
                         .find(|c| c.path() == path)?;
-                    let summary = svc.file_summary(&repo, &change, &opts, &CancelToken::new());
+                    let summary = svc.file_summary(&repo, &change, &opts, cancel);
                     let (stats, binary, hash) = summary.ok()?;
                     Some((change, stats, binary, hash))
                 });
                 cx.spawn(async move |this, cx| {
-                    let Some((change, stats, binary, hash)) = task.await else {
+                    let Ok(Some((change, stats, binary, hash))) = task.await else {
                         return;
                     };
                     let _ = this.update(cx, |v: &mut DiffView, cx| {

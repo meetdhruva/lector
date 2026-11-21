@@ -1,6 +1,7 @@
 //! Find References results: a pane item listing locations grouped by file
 //! with highlighted preview lines; clicking opens the location.
 
+use crate::background::{background, view_key, JobKind, Priority};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -94,13 +95,13 @@ impl ReferencesView {
         let project = self.project.clone();
         self.loading = true;
         self.task = Some(cx.spawn(async move |this, cx| {
-            let targets = cx
-                .background_executor()
-                .spawn(async move {
-                    lector_app::project::symbols::references(&project, &doc, offset)
-                        .unwrap_or_default()
-                })
-                .await;
+            // Waits on the language server (then searches text): the blocking lane.
+            let key = view_key(JobKind::LspReferences, this.entity_id());
+            let targets = background(cx, key, Priority::Visible, move |_| {
+                lector_app::project::symbols::references(&project, &doc, offset)
+                    .unwrap_or_default()
+            });
+            let Ok(targets) = targets.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.set_targets(targets);
                 cx.notify();

@@ -39,6 +39,7 @@ use super::{
     CommandContext, CommandRegistry, CommandSpec, FnCommand, NoticeLevel, Outcome, UiRequest,
 };
 use crate::core::AppCore;
+use crate::scheduler::{JobKey, JobKind, Priority, Scheduler, Subject};
 use crate::journal::UndoRecord;
 
 // ---------------------------------------------------------------------------------------------
@@ -82,6 +83,8 @@ pub struct SyncHost {
     running: Mutex<BTreeMap<u64, (RunningSync, CancelToken)>>,
     listeners: Mutex<Vec<(u64, Listener)>>,
     next: AtomicU64,
+    /// Runs askpass connections (a prompt waits for the user: the blocking lane).
+    scheduler: Option<Scheduler>,
 }
 
 impl std::fmt::Debug for SyncHost {
@@ -156,7 +159,12 @@ impl Drop for OpGuard {
 impl SyncHost {
     /// The core's host (created on first use).
     pub fn of(core: &AppCore) -> Arc<SyncHost> {
-        core.extension_or_init(|| Arc::new(SyncHost::default()))
+        core.extension_or_init(|| {
+            Arc::new(SyncHost {
+                scheduler: Some(core.scheduler().clone()),
+                ..SyncHost::default()
+            })
+        })
     }
 
     /// Sets the environment added to network git commands — the UI passes
@@ -199,7 +207,15 @@ impl SyncHost {
                 None => askpass::PromptReply::Cancel,
             }
         };
-        let started = AskpassServer::start(runtime_dir, delegate).and_then(|server| {
+        let runner = self
+            .scheduler
+            .clone()
+            .unwrap_or_else(Scheduler::global)
+            .task_runner(
+                JobKey::new(JobKind::AskpassPrompt, Subject::App),
+                Priority::Visible,
+            );
+        let started = AskpassServer::start(runtime_dir, runner, delegate).and_then(|server| {
             let exe = std::env::current_exe().map_err(AskpassError::Io)?;
             let helper = server.helper_program(&exe).map_err(AskpassError::Io)?;
             Ok((server.env(&helper), server))

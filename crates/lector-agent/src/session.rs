@@ -18,7 +18,8 @@ use lector_app::commands::Source;
 use lector_app::documents::{DocumentStore, SaveRequest};
 use lector_app::journal::{ActivityEntry, Journal, UndoError, UndoMode, UndoRecord};
 use lector_app::Project;
-use lector_app::{AppCore, CommandContext};
+use lector_app::{AppCore, CommandContext, JobKey, JobKind, Priority, Subject};
+use lector_base::thread::{spawn_named, ThreadKind};
 use lector_git::ShadowRepo;
 use parking_lot::{Condvar, Mutex};
 use serde_json::{json, Value};
@@ -162,6 +163,24 @@ struct Shared {
     /// Set when the current process's stderr reached EOF.
     stderr_eof: Arc<std::sync::atomic::AtomicBool>,
     shadow: Mutex<Option<ShadowRepo>>,
+}
+
+impl Shared {
+    /// The scheduler subject of this session's jobs (turns, requests from the agent).
+    fn subject(&self) -> Subject {
+        Subject::Session(self.id.0)
+    }
+}
+
+/// Fails a turn whose job was dropped without running (the scheduler shut down).
+struct TurnGuard(Option<(Arc<Shared>, TurnId)>);
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        if let Some((shared, id)) = self.0.take() {
+            shared.finish_turn(id, TurnState::Failed("Lector is shutting down".into()));
+        }
+    }
 }
 
 /// One conversation with one agent in one project. Cheap to clone.
@@ -358,16 +377,16 @@ impl AgentSession {
         };
         self.shared.emit(AgentEvent::StatusChanged);
         self.shared.emit(AgentEvent::TurnStarted(id));
+        // A turn waits on the agent for as long as it works: the scheduler's blocking lane. A
+        // turn dropped unrun (the scheduler shut down) ends as failed instead of hanging busy.
         let shared = self.shared.clone();
-        let spawned = std::thread::Builder::new()
-            .name(format!("agent-turn-{}", id.0))
-            .spawn(move || run_turn(shared, id, text, context));
-        if let Err(err) = spawned {
-            self.shared.finish_turn(
-                id,
-                TurnState::Failed(format!("cannot start a thread: {err}")),
-            );
-        }
+        let unrun = TurnGuard(Some((self.shared.clone(), id)));
+        let key = JobKey::new(JobKind::AgentTurn, self.shared.subject());
+        let _ = self.shared.core.scheduler().spawn(key, Priority::Visible, move |_| {
+            let mut unrun = unrun;
+            unrun.0 = None;
+            run_turn(shared, id, text, context);
+        });
         Ok(id)
     }
 
@@ -540,20 +559,18 @@ impl AgentSession {
             let tail = shared.stderr.clone();
             let eof = shared.stderr_eof.clone();
             eof.store(false, Ordering::Release);
-            let _ = std::thread::Builder::new()
-                .name("agent-stderr".into())
-                .spawn(move || {
-                    let _done = SetOnDrop(eof);
-                    for line in BufReader::new(stderr).lines() {
-                        let Ok(line) = line else { break };
-                        tracing::debug!(target: "lector_agent::stderr", "{line}");
-                        let mut t = tail.lock();
-                        if t.len() == STDERR_LINES {
-                            t.pop_front();
-                        }
-                        t.push_back(line);
+            let _ = spawn_named(ThreadKind::PipeReader, "agent stderr", move || {
+                let _done = SetOnDrop(eof);
+                for line in BufReader::new(stderr).lines() {
+                    let Ok(line) = line else { break };
+                    tracing::debug!(target: "lector_agent::stderr", "{line}");
+                    let mut t = tail.lock();
+                    if t.len() == STDERR_LINES {
+                        t.pop_front();
                     }
-                });
+                    t.push_back(line);
+                }
+            });
         }
         let generation = {
             let mut st = shared.state.lock();
@@ -565,7 +582,12 @@ impl AgentSession {
             generation,
         });
         let weak: Weak<dyn Handler> = Arc::downgrade(&(handler.clone() as Arc<dyn Handler>));
-        let conn = Connection::new(stdout, stdin, weak);
+        // Requests from the agent may wait for the user: the scheduler's blocking lane.
+        let requests = shared.core.scheduler().task_runner(
+            JobKey::new(JobKind::AgentRequest, shared.subject()),
+            Priority::Visible,
+        );
+        let conn = Connection::new(stdout, stdin, weak, requests);
         match handshake(&conn, shared) {
             Ok((acp_session, embedded_context, agent_name)) => {
                 let mut st = shared.state.lock();

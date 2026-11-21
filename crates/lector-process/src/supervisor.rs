@@ -120,13 +120,13 @@ impl Supervisor {
     pub fn shutdown(&self, grace: Duration) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         let alive = self.inner.alive();
-        let threads: Vec<_> = alive
-            .into_iter()
-            .map(|s| std::thread::spawn(move || s.terminate(grace)))
-            .collect();
-        for t in threads {
-            let _ = t.join();
-        }
+        // In parallel, joined before returning (scoped: bounded by `grace` plus the reap wait).
+        std::thread::scope(|scope| {
+            for s in &alive {
+                scope.spawn(move || s.terminate(grace));
+            }
+        });
+        crate::child::sweep_lingering();
     }
 
     /// True after [`shutdown`](Self::shutdown).

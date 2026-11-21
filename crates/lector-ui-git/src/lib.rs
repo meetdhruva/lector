@@ -26,11 +26,13 @@ pub mod store;
 pub mod sync;
 pub mod sync_dialogs;
 pub mod sync_model;
+pub mod sync_reads;
 pub mod util;
 
 #[cfg(test)]
 mod sync_tests;
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::rc::Rc;
 
 use gpui::{actions, App, AppContext, ClipboardItem, Entity, SharedString, Window};
@@ -312,7 +314,7 @@ pub fn init(cx: &mut App) {
             let s = s.clone();
             window.defer(cx, move |window, cx| {
                 let s2 = s.clone();
-                changes_panel::pick_from_repo(
+                ref_picker::pick_from_repo(
                     &s,
                     "Compare file with…",
                     window,
@@ -520,9 +522,12 @@ fn copy_permalink(
         };
         a.row..end
     });
-    let task = cx.background_spawn(async move { repo.permalink(&rel, lines, None) });
+    let key = view_key(JobKind::GitLookup, cx.entity_id());
+    let task = background(cx, key, Priority::Visible, move |_| {
+        repo.permalink(&rel, lines, None)
+    });
     cx.spawn(async move |ws, cx| {
-        let result = task.await;
+        let Ok(result) = task.await else { return };
         let _ = ws.update(cx, |ws, cx| match result {
             Ok(Some(link)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(link));
@@ -612,7 +617,8 @@ pub fn open_file_at_revision(
     let Some(ws) = store.read(cx).workspace.upgrade() else {
         return;
     };
-    let task = cx.background_spawn(async move {
+    let key = view_key(JobKind::GitLookup, store.entity_id());
+    let task = background(cx, key, Priority::Visible, move |_| {
         let repo = project
             .repo()
             .ok_or_else(|| "not a repository".to_string())?;
@@ -634,7 +640,7 @@ pub fn open_file_at_revision(
     });
     window
         .spawn(cx, async move |cx| {
-            let result = task.await;
+            let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = cx.update(|window, cx| {
                 let (side, short, rel) = match result {
                     Ok(v) => v,

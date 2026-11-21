@@ -19,6 +19,7 @@
 //! holding the proposal back as an overlay) is documented in `docs/ARCHITECTURE.md`, "Inline agent
 //! edit and turn summaries (v0.7)".
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -699,10 +700,11 @@ impl InlineEdits {
                 buffer_text = text;
                 let abs = path.clone();
                 let _ = rel;
-                let disk = cx
-                    .background_executor()
-                    .spawn(async move { std::fs::read_to_string(abs).ok() })
-                    .await;
+                let key = view_key(JobKind::FileRead, this.entity_id());
+                let disk = background(cx, key, Priority::Visible, move |_| {
+                    std::fs::read_to_string(abs).ok()
+                });
+                let Ok(disk) = disk.await else { return };
                 if dirty || disk.as_deref().is_none_or(|d| d == buffer_text) {
                     break;
                 }

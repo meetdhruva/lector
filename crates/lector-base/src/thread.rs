@@ -6,9 +6,11 @@
 //! [`ThreadKind`]s is closed and mirrored in `arch/threads.allow` (a unit test keeps them equal);
 //! adding a kind needs an ADR.
 //!
-//! This module is the only place that calls `std::thread::Builder::spawn` (besides the
-//! scheduler's workers). There is no join-all or shutdown policy here: whoever owns the resource
-//! stops and joins its threads.
+//! This module is the only place that calls `std::thread::Builder::spawn`; the scheduler's own
+//! workers are owner threads made here too. Short work does not get a thread: it runs on the
+//! `lector-app` scheduler, and crates below it hand short tasks to their caller through a
+//! [`TaskRunner`]. There is no join-all here: whoever owns the resource stops and joins its
+//! threads; `lector_app::shutdown` reports the ones still alive at quit.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -17,6 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{Builder, JoinHandle};
 use std::time::SystemTime;
+
+/// Where a short blocking task of a crate below `lector-app` runs. Those crates do not
+/// schedule (ADR 0003, decision 4): an owner thread that has short work to hand off (an askpass
+/// connection, a language-server launch, a terminal's kill escalation) calls the runner its
+/// caller supplied, e.g. one that submits a job to the `lector-app` scheduler. A runner must
+/// run each task exactly once, or drop it unrun when the work was cancelled; it may run it on
+/// the calling thread.
+pub type TaskRunner = std::sync::Arc<dyn Fn(Box<dyn FnOnce() + Send + 'static>) + Send + Sync>;
 
 /// The closed set of owner-thread kinds. [`as_str`](Self::as_str) spells each one exactly as
 /// `arch/threads.allow` does (`kind:<name>`).
@@ -30,21 +40,15 @@ pub enum ThreadKind {
     PtyWaiter,
     /// Terminal: parses PTY output into the screen grid.
     PtyParser,
-    /// Terminal: reaps a killed shell.
-    PtyReaper,
     /// Language server: reads and dispatches its stdout.
     LspReader,
     /// Language server: writes requests to its stdin.
     LspWriter,
     /// Language server: request-timeout watchdog.
     LspWatchdog,
-    /// Language server: delayed launch / restart.
-    LspLaunch,
     /// Askpass: the accept loop of the credential socket.
     AskpassListener,
-    /// Askpass: one connection of the credential socket.
-    AskpassConnection,
-    /// File watcher: debounce loop (and the one-time recursive watch registration).
+    /// File watcher: its debounce loop (registration runs as a scheduler job).
     FileWatcher,
     /// Fallback polling when no watcher could be registered.
     WatchPoll,
@@ -54,54 +58,37 @@ pub enum ThreadKind {
     SchedulerTimer,
     /// Pumps a child's stdout or stderr (process supervisor, git, agent and server stderr).
     PipeReader,
-    /// Feeds a child's stdin so large input cannot deadlock against full output pipes.
+    /// Pumps a child's stdin for as long as the input lasts, so large input cannot deadlock
+    /// against full output pipes.
     PipeWriter,
-    /// Reaps a killed child process.
-    ProcessReaper,
-    /// A short helper that terminates one child or server during shutdown, joined at once.
-    ShutdownHelper,
     /// Agent client: reads the ACP connection.
     AcpReader,
-    /// Agent client: serves one blocking ACP request from the agent.
-    AcpRequest,
-    /// Agent client: runs one agent turn.
-    AgentTurn,
     /// The file picker's matching thread.
     PickerWorker,
     /// The mock forge server used by tests (accept loop and connections).
     MockServer,
-    /// Loads settings, the project and themes while the GUI starts.
-    StartupLoader,
 }
 
 impl ThreadKind {
     /// Every kind, in declaration order.
-    pub const ALL: [ThreadKind; 25] = [
+    pub const ALL: [ThreadKind; 17] = [
         ThreadKind::PtyReader,
         ThreadKind::PtyWriter,
         ThreadKind::PtyWaiter,
         ThreadKind::PtyParser,
-        ThreadKind::PtyReaper,
         ThreadKind::LspReader,
         ThreadKind::LspWriter,
         ThreadKind::LspWatchdog,
-        ThreadKind::LspLaunch,
         ThreadKind::AskpassListener,
-        ThreadKind::AskpassConnection,
         ThreadKind::FileWatcher,
         ThreadKind::WatchPoll,
         ThreadKind::SchedulerWorker,
         ThreadKind::SchedulerTimer,
         ThreadKind::PipeReader,
         ThreadKind::PipeWriter,
-        ThreadKind::ProcessReaper,
-        ThreadKind::ShutdownHelper,
         ThreadKind::AcpReader,
-        ThreadKind::AcpRequest,
-        ThreadKind::AgentTurn,
         ThreadKind::PickerWorker,
         ThreadKind::MockServer,
-        ThreadKind::StartupLoader,
     ];
 
     /// The kind's name as written in `arch/threads.allow`, e.g. `"pty-reader"`.
@@ -111,27 +98,19 @@ impl ThreadKind {
             ThreadKind::PtyWriter => "pty-writer",
             ThreadKind::PtyWaiter => "pty-waiter",
             ThreadKind::PtyParser => "pty-parser",
-            ThreadKind::PtyReaper => "pty-reaper",
             ThreadKind::LspReader => "lsp-reader",
             ThreadKind::LspWriter => "lsp-writer",
             ThreadKind::LspWatchdog => "lsp-watchdog",
-            ThreadKind::LspLaunch => "lsp-launch",
             ThreadKind::AskpassListener => "askpass-listener",
-            ThreadKind::AskpassConnection => "askpass-connection",
             ThreadKind::FileWatcher => "file-watcher",
             ThreadKind::WatchPoll => "watch-poll",
             ThreadKind::SchedulerWorker => "scheduler-worker",
             ThreadKind::SchedulerTimer => "scheduler-timer",
             ThreadKind::PipeReader => "pipe-reader",
             ThreadKind::PipeWriter => "pipe-writer",
-            ThreadKind::ProcessReaper => "process-reaper",
-            ThreadKind::ShutdownHelper => "shutdown-helper",
             ThreadKind::AcpReader => "acp-reader",
-            ThreadKind::AcpRequest => "acp-request",
-            ThreadKind::AgentTurn => "agent-turn",
             ThreadKind::PickerWorker => "picker-worker",
             ThreadKind::MockServer => "mock-server",
-            ThreadKind::StartupLoader => "startup-loader",
         }
     }
 }

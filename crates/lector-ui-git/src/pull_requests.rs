@@ -5,6 +5,7 @@
 //! (Approve / Request changes / Comment; confirmation, since it is public and
 //! irreversible) and the sign-in help.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -442,7 +443,9 @@ impl PullRequestsPanel {
         };
         self.state = PanelState::Loading;
         let filter = self.filter;
-        let task = cx.background_spawn(async move {
+        // Network: the blocking lane. A newer refresh (filter change) replaces this one.
+        let key = view_key(JobKind::ForgeRead, cx.entity_id());
+        let task = background(cx, key, Priority::Visible, move |_| {
             let Some(token) = lector_forge::auth_token(&remote) else {
                 return Err(None);
             };
@@ -452,7 +455,9 @@ impl PullRequestsPanel {
                 .map_err(|e| Some(SharedString::from(e.to_string())))
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let r = task.await;
+            let r = task
+                .await
+                .unwrap_or_else(|e| Err(Some(SharedString::from(e.to_string()))));
             let _ = this.update(cx, |this, cx| {
                 this.state = match r {
                     Ok(list) => PanelState::Loaded(list),
@@ -487,7 +492,8 @@ impl PullRequestsPanel {
         let store = self.store.clone();
         let core = lector_ui::commands_bridge::core(cx);
         let comments = CommentStore::for_core(&core);
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::ForgeRead, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             let token = lector_forge::auth_token(&remote)
                 .ok_or_else(|| "no token: see Review > Sign In".to_string())?;
             let forge = lector_forge::connect(&remote, token.clone());
@@ -498,7 +504,7 @@ impl PullRequestsPanel {
             Ok::<_, String>(Arc::new(session))
         });
         let task = cx.spawn_in(window, async move |this, cx| {
-            let r = work.await;
+            let r = work.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update_in(cx, |this, window, cx| {
                 this.opening = None;
                 match r {
@@ -860,10 +866,16 @@ impl SubmitReviewDialog {
         let weak_ws = ws.downgrade();
         confirm(&ws, spec, window, cx, move |window, cx| {
             let store = CommentStore::for_core(&lector_ui::commands_bridge::core(cx));
-            let task = cx.background_spawn(async move { session.submit(&store, event, &body) });
+            let key = view_key(JobKind::ForgeWrite, weak_ws.entity_id());
+            let task = background(cx, key, Priority::Visible, move |_| {
+                session.submit(&store, event, &body)
+            });
             window
                 .spawn(cx, async move |cx| {
-                    let r = task.await;
+                    let r = match task.await {
+                        Ok(r) => r.map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
                     let _ = weak_ws.update(cx, |ws, cx| match r {
                         Ok(s) => {
                             let mut msg = format!("Review submitted to {target}");

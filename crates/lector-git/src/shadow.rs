@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
+use crate::pipes::{drain, feed_while, output_with_input};
 use crate::{ChangeKind, FileChange, Oid, Repo, Side};
 
 /// Default size cap of one shadow repository for [`ShadowRepo::prune`].
@@ -731,7 +732,7 @@ impl ShadowRepo {
             child.wait_with_output()
         };
         let output = output?;
-        let stderr_text = stderr.join().unwrap_or_default();
+        let stderr_text = stderr.join();
         if let Err(err) = result {
             // A broken pipe means fast-import died first; its message explains why.
             if !stderr_text.trim().is_empty() {
@@ -998,13 +999,8 @@ impl ShadowRepo {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(spawn_error)?;
-        let mut stdin = child.stdin.take();
+        let stdin = child.stdin.take();
         let input: String = oids.iter().map(|o| format!("{o}\n")).collect();
-        let writer = std::thread::spawn(move || {
-            if let Some(stdin) = stdin.as_mut() {
-                let _ = stdin.write_all(input.as_bytes());
-            }
-        });
         let stderr = drain(child.stderr.take());
         let mut reader = BufReader::new(
             child
@@ -1012,6 +1008,7 @@ impl ShadowRepo {
                 .take()
                 .ok_or_else(|| Error::Git("cat-file has no stdout".into()))?,
         );
+        let outcome = feed_while(stdin, input.as_bytes(), || {
         let mut outcome = Ok(());
         for (index, oid) in oids.iter().enumerate() {
             let mut header = String::new();
@@ -1048,7 +1045,8 @@ impl ShadowRepo {
         drop(reader);
         let _ = child.kill();
         let _ = child.wait();
-        let _ = writer.join();
+        outcome
+        });
         let _ = stderr.join();
         outcome
     }
@@ -2145,19 +2143,6 @@ fn spawn_error(err: io::Error) -> Error {
     }
 }
 
-/// Collects a child's stderr on a thread so a chatty child can't block on a full pipe.
-fn drain(pipe: Option<std::process::ChildStderr>) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut pipe) = pipe {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            text = String::from_utf8_lossy(&bytes).into_owned();
-        }
-        text
-    })
-}
-
 /// Runs `cmd` to completion, feeding `stdin`; non-zero exit is [`Error::GitCommand`].
 fn exec(mut cmd: Command, what: &str, stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     cmd.stdin(if stdin.is_some() {
@@ -2167,20 +2152,8 @@ fn exec(mut cmd: Command, what: &str, stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     })
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let mut child: Child = cmd.spawn().map_err(spawn_error)?;
-    let writer = match (stdin, child.stdin.take()) {
-        (Some(input), Some(mut pipe)) => {
-            let input = input.to_vec();
-            Some(std::thread::spawn(move || {
-                let _ = pipe.write_all(&input);
-            }))
-        }
-        _ => None,
-    };
-    let output = child.wait_with_output()?;
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
+    let child: Child = cmd.spawn().map_err(spawn_error)?;
+    let output = output_with_input(child, stdin)?;
     if output.status.success() {
         return Ok(output.stdout);
     }

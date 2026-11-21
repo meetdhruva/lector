@@ -28,6 +28,7 @@
 //! alacritty's own `tty`/`event_loop` modules are not used because they own
 //! the PTY and the read loop themselves and would duplicate portable-pty.
 
+use lector_base::thread::{spawn_named, ThreadKind};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,6 +135,7 @@ pub struct Terminal {
     scroll_to_bottom_on_input: bool,
     initial_cwd: PathBuf,
     name: String,
+    kill_runner: Option<lector_base::thread::TaskRunner>,
 }
 
 impl std::fmt::Debug for Terminal {
@@ -154,10 +156,9 @@ fn pty_size(size: TermSize) -> PtySize {
     }
 }
 
-fn spawn_thread(name: &str, f: impl FnOnce() + Send + 'static) -> Result<(), TerminalError> {
-    std::thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
+/// Starts one of the session's owner threads (ADR 0003).
+fn spawn_thread(kind: ThreadKind, f: impl FnOnce() + Send + 'static) -> Result<(), TerminalError> {
+    spawn_named(kind, "terminal", f)
         .map(|_| ())
         .map_err(TerminalError::Thread)
 }
@@ -252,7 +253,7 @@ impl Terminal {
         let (writer_tx, writer_rx) = unbounded::<Vec<u8>>();
 
         // Writer.
-        spawn_thread("lector-term-writer", move || {
+        spawn_thread(ThreadKind::PtyWriter, move || {
             while let Ok(bytes) = writer_rx.recv() {
                 if writer
                     .write_all(&bytes)
@@ -266,7 +267,7 @@ impl Terminal {
 
         // Reader.
         let reader_tx = data_tx.clone();
-        spawn_thread("lector-term-reader", move || {
+        spawn_thread(ThreadKind::PtyReader, move || {
             let mut buf = vec![0u8; READ_CHUNK];
             loop {
                 match reader.read(&mut buf) {
@@ -285,7 +286,7 @@ impl Terminal {
 
         // Waiter.
         let waiter_tx = data_tx;
-        spawn_thread("lector-term-waiter", move || {
+        spawn_thread(ThreadKind::PtyWaiter, move || {
             let info = match child.wait() {
                 Ok(status) => ExitInfo {
                     code: status.exit_code(),
@@ -304,7 +305,7 @@ impl Terminal {
         // Parser.
         let parser_shared = shared.clone();
         let parser_writer = writer_tx.clone();
-        spawn_thread("lector-term-parser", move || {
+        spawn_thread(ThreadKind::PtyParser, move || {
             parser_loop(&parser_shared, &data_rx, &parser_writer)
         })?;
 
@@ -318,6 +319,7 @@ impl Terminal {
             scroll_to_bottom_on_input: options.scroll_to_bottom_on_input,
             initial_cwd: cwd,
             name: options.profile.name.clone(),
+            kill_runner: options.kill_runner.clone(),
         })
     }
 
@@ -488,6 +490,15 @@ impl Terminal {
         }
     }
 
+    /// Runs the kill escalation on the [kill runner](SpawnOptions::kill_runner), or here.
+    #[cfg(any(unix, windows))]
+    fn run_kill(&self, task: Box<dyn FnOnce() + Send + 'static>) {
+        match &self.kill_runner {
+            Some(run) => run(task),
+            None => task(),
+        }
+    }
+
     fn kill_tree(&self, grace: Duration) {
         #[cfg(unix)]
         {
@@ -503,7 +514,7 @@ impl Terminal {
             victims.signal(Signal::CONT);
             let shared = self.shared.clone();
             let mut killer = self.killer.lock().clone_killer();
-            let _ = spawn_thread("lector-term-reaper", move || {
+            self.run_kill(Box::new(move || {
                 let deadline = Instant::now() + grace;
                 while Instant::now() < deadline {
                     if !victims.any_alive() {
@@ -515,14 +526,14 @@ impl Terminal {
                 if !shared.exited.load(Ordering::Acquire) {
                     let _ = killer.kill();
                 }
-            });
+            }));
         }
         #[cfg(windows)]
         {
             let _ = grace;
             let pid = self.pid;
             let mut killer = self.killer.lock().clone_killer();
-            let _ = spawn_thread("lector-term-reaper", move || {
+            self.run_kill(Box::new(move || {
                 if let Some(pid) = pid {
                     use std::os::windows::process::CommandExt;
                     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -535,7 +546,7 @@ impl Terminal {
                         .status();
                 }
                 let _ = killer.kill();
-            });
+            }));
         }
         #[cfg(not(any(unix, windows)))]
         {

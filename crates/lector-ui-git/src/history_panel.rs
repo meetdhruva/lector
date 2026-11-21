@@ -1,6 +1,7 @@
 //! The History sidebar panel: a virtualized commit log with a painted graph
 //! column, ref pills, filtering, paging, and file/line history modes.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -175,7 +176,8 @@ impl HistoryPanel {
         let skip = self.commits.len();
         let scope = self.scope.clone();
         let filter = parse_filter(self.filter.read(cx).text());
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::GitLog, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             match scope {
                 HistoryScope::Log { rev, all } => repo.log(&LogQuery {
                     rev,
@@ -207,7 +209,10 @@ impl HistoryPanel {
             }
         });
         self.loading = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = match work.await {
+                Ok(page) => page.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
@@ -557,7 +562,7 @@ impl HistoryPanel {
                 )
                 .entry("Branch or Tag…", move |window, cx| {
                     let set2 = set2.clone();
-                    crate::changes_panel::pick_from_repo(
+                    crate::ref_picker::pick_from_repo(
                         &store,
                         "Show history of…",
                         window,

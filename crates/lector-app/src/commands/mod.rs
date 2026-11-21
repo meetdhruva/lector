@@ -637,8 +637,8 @@ impl CommandRegistry {
         Ok(outcome)
     }
 
-    /// Runs [`CommandRegistry::invoke`] on the core's scheduler at
-    /// [`crate::scheduler::Priority::Interactive`].
+    /// Runs [`CommandRegistry::invoke`] on the core's scheduler (blocking lane, job kind
+    /// [`crate::scheduler::JobKind::Command`], `Visible`).
     pub fn invoke_async(
         &self,
         id: &str,
@@ -648,7 +648,11 @@ impl CommandRegistry {
         let this = self.clone();
         let id = id.to_string();
         let scheduler = cx.core.scheduler().clone();
-        scheduler.spawn(crate::scheduler::Priority::Interactive, None, move |_| {
+        let key = crate::scheduler::JobKey::new(
+            crate::scheduler::JobKind::Command,
+            crate::scheduler::Subject::App,
+        );
+        scheduler.spawn(key, crate::scheduler::Priority::Visible, move |_| {
             this.invoke(&id, args, &cx)
         })
     }

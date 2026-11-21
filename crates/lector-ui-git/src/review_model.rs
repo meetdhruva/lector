@@ -5,6 +5,7 @@
 //! Everything here is read-only: it diffs and analyzes in the background and keeps the user's
 //! "last looked" mark in Lector's own database, never in the repository.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -268,10 +269,11 @@ impl ReviewModel {
         let status = inputs.status.clone();
         let work_root = root.clone();
         self.fingerprint_task = Some(cx.spawn(async move |this, cx| {
-            let fingerprint = cx
-                .background_executor()
-                .spawn(async move { changes_fingerprint(&work_root, &status) })
-                .await;
+            let key = view_key(JobKind::ReviewFingerprint, this.entity_id());
+            let fingerprint = background(cx, key, Priority::Background, move |_| {
+                changes_fingerprint(&work_root, &status)
+            });
+            let Ok(fingerprint) = fingerprint.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.fingerprint = Some(fingerprint);
                 cx.emit(ReviewModelEvent::Hint);
@@ -281,20 +283,19 @@ impl ReviewModel {
         let service = lector_ui::commands_bridge::core(cx).review();
         self.analysis_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ANALYSIS_DELAY).await;
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let changes = inputs.repo.changes(&Changeset::WorkingTree).ok()?;
-                    Some(analyze_changes(
-                        &service,
-                        &inputs.repo,
-                        &inputs.languages,
-                        &changes,
-                        &inputs.diff_options,
-                        inputs.detect_moved,
-                    ))
-                })
-                .await;
+            let key = view_key(JobKind::ReviewAnalysis, this.entity_id());
+            let result = background(cx, key, Priority::Background, move |_| {
+                let changes = inputs.repo.changes(&Changeset::WorkingTree).ok()?;
+                Some(analyze_changes(
+                    &service,
+                    &inputs.repo,
+                    &inputs.languages,
+                    &changes,
+                    &inputs.diff_options,
+                    inputs.detect_moved,
+                ))
+            });
+            let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.working = result.map(Arc::new);
                 cx.emit(ReviewModelEvent::Analysis);

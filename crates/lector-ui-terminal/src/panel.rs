@@ -2,6 +2,7 @@
 //! reorder, middle-click close, activity / bell / failed-command marks, cwd tooltips) and the
 //! active tab's splits. Inactive tabs are not rendered, so they never snapshot or repaint.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -577,13 +578,15 @@ impl TerminalPanel {
         let sessions = lector_ui::commands_bridge::core(cx)
             .store()
             .terminal_sessions();
-        self.save_task = Some(cx.spawn(async move |_, cx| {
+        self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(1))
                 .await;
-            let write =
-                cx.background_spawn(async move { crate::session::save(&sessions, &root, &tabs) });
-            if let Err(err) = write.await {
+            let key = view_key(JobKind::TerminalSessions, this.entity_id());
+            let write = background(cx, key, Priority::Background, move |_| {
+                crate::session::save(&sessions, &root, &tabs)
+            });
+            if let Ok(Err(err)) = write.await {
                 tracing::warn!("terminal session: {err}");
             }
         }));

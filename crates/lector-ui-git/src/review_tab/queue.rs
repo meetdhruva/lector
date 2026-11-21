@@ -2,6 +2,7 @@
 //! reason, generated and lock files in a collapsed "Low-risk & generated" group, reviewed-hunk
 //! progress and "next unreviewed".
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::sync::Arc;
 
 use gpui::{div, prelude::*, AnyElement, Context, Task};
@@ -103,9 +104,8 @@ impl ReviewView {
         let db = core.db().clone();
         let service = core.review();
         self.queue.task = Some(cx.spawn(async move |this, cx| {
-            let analysis = cx
-                .background_executor()
-                .spawn(async move {
+            let job = view_key(JobKind::ReviewAnalysis, this.entity_id());
+            let analysis = background(cx, job, Priority::Visible, move |_| {
                     let analysis =
                         analyze_changes(&service, &repo, &languages, &changes, &opts, detect);
                     // Persisted reviewed hunks of every analyzed file.
@@ -122,10 +122,9 @@ impl ReviewView {
                         })
                         .collect();
                     (analysis, marks)
-                })
-                .await;
+                });
+            let Ok((analysis, marks)) = analysis.await else { return };
             let _ = this.update(cx, |this, cx| {
-                let (analysis, marks) = analysis;
                 if let Some(view) = &this.view {
                     let mut all = vec![Vec::new(); view.files.len()];
                     for (path, flags) in marks {

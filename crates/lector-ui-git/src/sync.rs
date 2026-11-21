@@ -12,7 +12,8 @@
 //! ([`crate::sync_model::failure_view`]). Nothing runs on a timer unless `git.auto_fetch` is
 //! set (user-level, default off).
 
-use std::path::{Path, PathBuf};
+use lector_ui::background::{background, view_key, JobKind, Priority};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -26,7 +27,7 @@ use lector_app::commands::git_sync::{
 };
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
-use lector_app::{Outcome, Priority};
+use lector_app::Outcome;
 use lector_git::{Progress, Repo, SyncError, SyncEvent};
 use lector_ui::actions::{git as git_actions, workspace as ws_actions};
 use lector_ui::components::context_menu::ContextMenu;
@@ -38,6 +39,8 @@ use lector_ui::views::sidebar::SidebarPanel;
 use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
+
+pub use crate::sync_reads::{load_status, unreachable_commits};
 use serde_json::{json, Value};
 
 use crate::askpass_ui::{self, PromptContext};
@@ -48,7 +51,7 @@ use crate::sync_dialogs::{show_input, show_notice, DialogButton, InputSpec, Leve
 use crate::sync_model::{
     control_view, failure_view, generic_failure, last_fetched_label, plan, success_view,
     validate_branch_name, FailureContext, FailureView, NextStep, OpKind, Plan, PrimaryAction,
-    RemoteInfo, SyncAction, SyncStatus,
+    SyncAction, SyncStatus,
 };
 
 /// Commands of one operation, run in order.
@@ -129,33 +132,6 @@ pub fn any_controller(cx: &App) -> Option<Entity<SyncController>> {
         .0
         .iter()
         .find_map(WeakEntity::upgrade)
-}
-
-fn fetch_head_time(git_dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(git_dir.join("FETCH_HEAD"))
-        .and_then(|m| m.modified())
-        .ok()
-}
-
-/// Reads the full sync status (blocking; background thread).
-pub fn load_status(repo: &Repo) -> Result<SyncStatus, String> {
-    let st = repo.upstream_status().map_err(|e| e.to_string())?;
-    let head_short = repo.head().ok().and_then(|h| h.oid).map(|o| o.short());
-    let remotes = repo
-        .remotes()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| RemoteInfo {
-            url: lector_git::sync::redact_credentials(&r.url),
-            name: r.name,
-        })
-        .collect();
-    Ok(SyncStatus::from_upstream(
-        &st,
-        head_short,
-        remotes,
-        fetch_head_time(repo.git_dir()),
-    ))
 }
 
 /// How a failed command is reported.
@@ -341,9 +317,10 @@ impl SyncController {
         let Some(repo) = self.store.read(cx).repo().cloned() else {
             return;
         };
-        let work = cx.background_spawn(async move { load_status(&repo) });
+        let key = view_key(JobKind::GitSyncStatus, cx.entity_id());
+        let work = background(cx, key, Priority::Background, move |_| load_status(&repo));
         self.status_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let Ok(result) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(status) => this.status = status,
@@ -559,24 +536,24 @@ impl SyncController {
         cx.emit(SyncEvent2::Changed);
         cx.notify();
         let core = lector_ui::commands_bridge::core(cx);
-        let scheduler = core.scheduler().clone();
-        let job = scheduler
-            .spawn(Priority::Interactive, None, move |_| {
-                Journal::install(&core);
-                let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
-                let mut outcomes: Vec<(&'static str, Outcome)> = Vec::new();
-                for (id, args) in steps {
-                    match core.registry().invoke(id, args, &ctx) {
-                        Ok(o) => outcomes.push((id, o)),
-                        Err(e) => return Err((outcomes, e)),
-                    }
+        // Network and writes: the blocking lane (it waits on the remote), never replaced; the
+        // operation is cancelled through `SyncHost::cancel_repo`, which kills git.
+        let key = view_key(JobKind::Command, cx.entity_id());
+        let job = background(cx, key, Priority::Visible, move |_| {
+            Journal::install(&core);
+            let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
+            let mut outcomes: Vec<(&'static str, Outcome)> = Vec::new();
+            for (id, args) in steps {
+                match core.registry().invoke(id, args, &ctx) {
+                    Ok(o) => outcomes.push((id, o)),
+                    Err(e) => return Err((outcomes, e)),
                 }
-                Ok(outcomes)
-            })
-            .into_future();
+            }
+            Ok(outcomes)
+        });
         let store = self.store.clone();
         self.op_task = Some(cx.spawn(async move |this, cx| {
-            let result = job.await;
+            let result = job.await.ok();
             let _ = cx.update(|cx| {
                 if let Some(id) = prompt_op {
                     askpass_ui::end_operation(id, cx);
@@ -757,9 +734,12 @@ impl SyncController {
                     let Some(workdir) = self.workdir(cx) else {
                         return;
                     };
-                    let work = cx.background_spawn(async move { credential_helpers(&workdir) });
+                    let key = view_key(JobKind::GitConfigRead, cx.entity_id());
+                    let work = background(cx, key, Priority::Visible, move |_| {
+                        credential_helpers(&workdir)
+                    });
                     cx.spawn(async move |this, cx| {
-                        ctx.credential_helpers = work.await;
+                        ctx.credential_helpers = work.await.unwrap_or_default();
                         let _ = this.update(cx, |this, cx| {
                             let mut view = failure_view(&op, &e, &ctx);
                             if let Some(why) = askpass_ui::start_error(cx) {
@@ -917,7 +897,8 @@ impl SyncController {
         ) else {
             return;
         };
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::GitRefs, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             let branches = repo.branches().unwrap_or_default();
             let local: Vec<String> = branches
                 .iter()
@@ -941,7 +922,7 @@ impl SyncController {
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let (local, choices) = work.await;
+                let Ok((local, choices)) = work.await else { return };
                 let _ = cx.update(|window, cx| {
                     let existing = local.clone();
                     let spec = InputSpec {
@@ -1166,11 +1147,12 @@ impl SyncController {
             return;
         };
         let n = name.clone();
-        let work = cx.background_spawn(async move { unreachable_commits(&repo, &n) });
+        let key = view_key(JobKind::GitRefs, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| unreachable_commits(&repo, &n));
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let lost = work.await;
+                let Ok(lost) = work.await else { return };
                 let _ = cx.update(|window, cx| {
                     let _ = this.update(cx, |this, cx| {
                         if lost.is_empty() {
@@ -1279,7 +1261,8 @@ impl SyncController {
         ) else {
             return;
         };
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::GitRefs, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             let mut branches = repo.branches().unwrap_or_default();
             branches.sort_by_key(|b| std::cmp::Reverse(b.time));
             branches
@@ -1310,7 +1293,7 @@ impl SyncController {
         let on_pick = Rc::new(on_pick);
         window
             .spawn(cx, async move |cx| {
-                let choices = work.await;
+                let Ok(choices) = work.await else { return };
                 let _ = cx.update(|window, cx| {
                     if choices.is_empty() {
                         ws.update(cx, |ws, cx| {
@@ -1411,11 +1394,14 @@ impl SyncController {
         ) else {
             return;
         };
-        let work = cx.background_spawn(async move { repo.stashes().unwrap_or_default() });
+        let key = view_key(JobKind::GitRefs, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
+            repo.stashes().unwrap_or_default()
+        });
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let stashes = work.await;
+                let Ok(stashes) = work.await else { return };
                 let _ = cx.update(|window, cx| {
                     if stashes.is_empty() {
                         ws.update(cx, |ws, cx| {
@@ -1461,41 +1447,6 @@ enum RefFilter {
     Local,
     LocalNotCurrent,
     Remote,
-}
-
-/// Commits of `branch` that no other ref has (shown before deleting an unmerged branch):
-/// those not on `HEAD` and not on the branch's upstream. At most 50, "abc1234 summary".
-pub fn unreachable_commits(repo: &Repo, branch: &str) -> Vec<String> {
-    let log = |rev: String| {
-        repo.log(&lector_git::LogQuery {
-            rev: Some(rev),
-            limit: 200,
-            ..Default::default()
-        })
-        .unwrap_or_default()
-    };
-    let mut lost = log(format!("HEAD..{branch}"));
-    let others: Vec<lector_git::Branch> = repo
-        .branches()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|b| b.name != branch && !b.head)
-        .collect();
-    for other in others {
-        if lost.is_empty() {
-            break;
-        }
-        let keep: std::collections::HashSet<lector_git::Oid> =
-            log(format!("{}..{branch}", other.name))
-                .into_iter()
-                .map(|c| c.oid)
-                .collect();
-        lost.retain(|c| keep.contains(&c.oid));
-    }
-    lost.into_iter()
-        .take(50)
-        .map(|c| format!("{} {}", c.oid.short(), c.summary))
-        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------

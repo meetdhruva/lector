@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn the_scrub_list_names_every_askpass_variable() {
-        let server = AskpassServer::start_tcp(|_| PromptReply::Cancel).expect("server");
+        let server = AskpassServer::start_tcp(test_runner(), |_| PromptReply::Cancel).expect("server");
         for (name, _) in server.env(Path::new("/x/lector-askpass")) {
             let name = name.to_string_lossy().into_owned();
             assert!(SCRUB_ENV.contains(&name.as_str()), "{name} not scrubbed");
@@ -360,4 +360,12 @@ mod tests {
             assert_eq!(askpass_helper_path(exe), exe);
         }
     }
+}
+
+/// A [`TaskRunner`](lector_base::thread::TaskRunner) on plain threads for this crate's unit tests.
+#[cfg(test)]
+pub(crate) fn test_runner() -> lector_base::thread::TaskRunner {
+    std::sync::Arc::new(|task| {
+        std::thread::spawn(task);
+    })
 }

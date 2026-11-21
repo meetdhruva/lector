@@ -1,6 +1,7 @@
 //! The Changes sidebar panel: working tree sections (Conflicts / Staged /
 //! Unstaged / Untracked) or any other changeset, with per-file stats.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -35,7 +36,7 @@ use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};
 use crate::diff_view::{open_diff, settings_diff_options, DiffTarget, ViewedTarget};
 use crate::operation_banner::OperationBanner;
-use crate::ref_picker::{pick_ref, ref_choices};
+use crate::ref_picker::{pick_from_repo};
 use crate::review_model::{ChangesAnalysis, FileRisk, ReviewModelEvent};
 use crate::staging::{run_op, unstage_paths_for, GitOp};
 use crate::store::{GitStore, GitStoreEvent};
@@ -252,11 +253,11 @@ impl ChangesPanel {
         let opts = settings_diff_options(store, cx);
         let status = store.status.clone();
         let mode = self.mode.clone();
-        let work = cx.background_spawn(async move {
-            let cancel = CancelToken::new();
+        let key = view_key(JobKind::GitChangeset, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |cancel| {
             let load = |cs: &Changeset| {
                 review
-                    .changeset(&repo, cs, &opts, &cancel)
+                    .changeset(&repo, cs, &opts, cancel)
                     .map_err(|e| e.to_string())
             };
             let mut sections = Vec::new();
@@ -285,7 +286,7 @@ impl ChangesPanel {
             Ok::<_, String>(Content { sections })
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 match result {
@@ -1427,30 +1428,6 @@ impl ChangesPanel {
             None => div().into_any_element(),
         }
     }
-}
-
-/// Loads ref choices in the background, then shows a picker.
-pub fn pick_from_repo(
-    store: &Entity<GitStore>,
-    placeholder: &'static str,
-    window: &mut Window,
-    cx: &mut App,
-    on_pick: impl Fn(crate::ref_picker::RefChoice, &mut Window, &mut App) + 'static,
-) {
-    let Some(repo) = store.read(cx).repo().cloned() else {
-        return;
-    };
-    let Some(ws) = store.read(cx).workspace.upgrade() else {
-        return;
-    };
-    let task = cx.background_spawn(async move { ref_choices(&repo) });
-    window
-        .spawn(cx, async move |cx| {
-            let choices = task.await;
-            let _ =
-                cx.update(|window, cx| pick_ref(&ws, placeholder, choices, on_pick, window, cx));
-        })
-        .detach();
 }
 
 impl Render for ChangesPanel {
