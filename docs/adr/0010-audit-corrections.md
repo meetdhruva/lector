@@ -39,12 +39,11 @@ defeated by an import alias. The first two are also in released 0.7.1.
    at a time, which git requires anyway; not bounded by the compute workers). `DocumentSave`
    stays on compute (bounded by file size) unless a before-save hook calls a language server,
    in which case that wait is a blocking-lane job.
-6. **Agent writes are gated by Lector, not by the agent's manners.** `fs/write_text_file` is
-   refused when the backup into the shadow repository fails (in a folder without git: when
-   the per-turn file backup fails; a turn must stay undoable as one step everywhere). The
-   first write of a session to a path outside the files the user attached asks the user once
-   per session ("allow edits in this project": once / for this session / reject) unless the
-   user enabled `agent.auto_allow_writes` (user-level setting, default off).
+6. **An agent write that cannot be undone is refused.** `fs/write_text_file` is refused when
+   its backup fails (shadow repository, or in a folder without git the per-turn file backup):
+   a turn stays undoable as one step everywhere. The document says "confined, journaled and
+   undoable", not "permission-gated": asking before a write remains the agent's choice (see
+   known gaps).
 7. **Lector's data is private.** The data directory and everything created under it (shadow
    repositories, logs, crash reports, session records) are owner-only: directory `0700`,
    files `0600` on Unix; an existing directory with wider permissions is narrowed once at
@@ -63,6 +62,7 @@ defeated by an import alias. The first two are also in released 0.7.1.
   `lector-forge`; it should move behind an app service.
 - Language servers found on `PATH` start when a file opens and read project configuration.
 - Whether a project's settings may turn on auto-save and format on save.
+- Whether Lector itself asks the user before an agent's first write in a session.
 
 ## Rejected
 - *Fix the agent path check in place*: three implementations already drifted once.
