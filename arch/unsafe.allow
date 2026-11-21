@@ -1,0 +1,3 @@
+# Crates exempt from #![forbid(unsafe_code)]. Every `unsafe` block or impl in them needs an
+# adjacent `// SAFETY:` comment (checked by `arch-check hygiene`).
+crate:lector-text # memory-mapped file loading (crates/lector-text/src/mapped.rs)

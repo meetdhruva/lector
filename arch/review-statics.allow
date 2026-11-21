@@ -1,0 +1,3 @@
+# Statics that crates/lector-review may declare, by item name (ADR 0001): immutable lookup tables
+# such as compiled regexes and tree-sitter query tables held in a OnceLock. One name per line,
+# each with a reason. Empty until lector-review exists.

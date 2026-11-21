@@ -1,0 +1,15 @@
+# Where threads may be created (ADR 0003). Both files are future homes: the named-thread helper
+# in lector-base (ADR 0005) and the scheduler's own workers. Nothing else may call
+# thread::spawn / thread::Builder / spawn_scoped, so every current use is baselined.
+crates/lector-base/src/thread.rs
+crates/lector-app/src/scheduler.rs
+
+# Closed list of owner-thread kinds for lector_base::thread::spawn_named (ADR 0003, decision 3):
+# a thread that is itself a long-lived resource. Provisional spellings until spawn_named exists;
+# comparison ignores case, `-` and `_`. Adding a kind needs an ADR.
+kind:pty-reader
+kind:pty-writer
+kind:lsp-reader
+kind:askpass-listener
+kind:file-watcher
+kind:scheduler-worker
