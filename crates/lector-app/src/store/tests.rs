@@ -1127,3 +1127,213 @@ fn the_health_probe_creates_nothing_and_names_the_problem() {
     );
     assert!(aside_copies(dir.path()).is_empty());
 }
+
+// ---- the health probe agrees with Store::open --------------------------------------------
+
+/// Every file in `dir` (recursively): name, bytes, modification time.
+fn exact_listing(dir: &Path) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {
+    let mut out: Vec<_> = walk(dir)
+        .into_iter()
+        .map(|p| {
+            let meta = std::fs::symlink_metadata(&p).ok();
+            let bytes = if p.is_file() {
+                std::fs::read(&p).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            (
+                p.to_string_lossy().into_owned(),
+                bytes,
+                meta.and_then(|m| m.modified().ok()),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// What `Store::open` did, in the probe's terms.
+fn agrees(probe: &super::open::Probe, store: &Store) -> bool {
+    use super::open::Probe;
+    match probe {
+        Probe::Missing | Probe::Healthy => {
+            store.mode() == StoreMode::ReadWrite && store.recovered_from().is_none()
+        }
+        Probe::Damaged(_) => {
+            store.mode() == StoreMode::ReadWrite && store.recovered_from().is_some()
+        }
+        Probe::ReadOnly(_) => matches!(store.mode(), StoreMode::ReadOnly { .. }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProbeCase {
+    Missing,
+    Healthy,
+    NewerSchema,
+    Locked,
+    Damaged,
+    #[cfg(unix)]
+    Unreadable,
+    #[cfg(unix)]
+    ReadableNotWritable,
+    #[cfg(unix)]
+    HealthyInReadOnlyDir,
+    #[cfg(unix)]
+    MissingInReadOnlyDir,
+    #[cfg(unix)]
+    DamagedInReadOnlyDir,
+}
+
+#[cfg(unix)]
+fn chmod(p: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// The probe of `lector health` says what `Store::open` will do, for every state of the file,
+/// and leaves the folder exactly as it was (names, bytes, modification times).
+#[test]
+fn the_health_probe_agrees_with_open_and_changes_nothing() {
+    use super::open::Probe;
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cases = vec![
+        ProbeCase::Missing,
+        ProbeCase::Healthy,
+        ProbeCase::NewerSchema,
+        ProbeCase::Locked,
+        ProbeCase::Damaged,
+    ];
+    #[cfg(unix)]
+    cases.extend([
+        ProbeCase::Unreadable,
+        ProbeCase::ReadableNotWritable,
+        ProbeCase::HealthyInReadOnlyDir,
+        ProbeCase::MissingInReadOnlyDir,
+        ProbeCase::DamagedInReadOnlyDir,
+    ]);
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut skipped: Vec<ProbeCase> = Vec::new();
+    for case in cases {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("data");
+        std::fs::create_dir(&dir).expect("mkdir");
+        let path = dir.join("lector.redb");
+        let healthy = |path: &Path| {
+            let store = Store::open(path);
+            store
+                .recent_projects()
+                .record(Path::new("/kept"))
+                .expect("record");
+        };
+        let mut child = None;
+        // Restores permissions so that the store can be opened and the folder cleaned up.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut restore: Box<dyn Fn()> = Box::new(|| {});
+        match case {
+            ProbeCase::Missing => {}
+            ProbeCase::Healthy => healthy(&path),
+            ProbeCase::NewerSchema => {
+                healthy(&path);
+                let store = Store::open(&path);
+                let tx = store.db().raw().begin_write().expect("write");
+                tx.open_table(crate::db::META)
+                    .expect("meta")
+                    .insert("schema_version", crate::db::SCHEMA_VERSION + 1)
+                    .expect("insert");
+                tx.commit().expect("commit");
+            }
+            ProbeCase::Locked => {
+                healthy(&path);
+                let mut c = spawn_child("hold-exclusive", &path);
+                wait_ready(&mut c);
+                child = Some(c);
+            }
+            ProbeCase::Damaged => std::fs::write(&path, b"garbage garbage garbage").expect("write"),
+            #[cfg(unix)]
+            ProbeCase::Unreadable | ProbeCase::ReadableNotWritable => {
+                healthy(&path);
+                let mode = if case == ProbeCase::Unreadable {
+                    0o000
+                } else {
+                    0o444
+                };
+                chmod(&path, mode);
+                let p = path.clone();
+                restore = Box::new(move || chmod(&p, 0o600));
+                // Privileged (root, CAP_DAC_OVERRIDE): permissions do not apply.
+                if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+                    restore();
+                    skipped.push(case);
+                    continue;
+                }
+            }
+            #[cfg(unix)]
+            ProbeCase::HealthyInReadOnlyDir
+            | ProbeCase::MissingInReadOnlyDir
+            | ProbeCase::DamagedInReadOnlyDir => {
+                match case {
+                    ProbeCase::HealthyInReadOnlyDir => healthy(&path),
+                    ProbeCase::DamagedInReadOnlyDir => {
+                        std::fs::write(&path, b"garbage garbage garbage").expect("write")
+                    }
+                    _ => {}
+                }
+                chmod(&dir, 0o555);
+                let d = dir.clone();
+                restore = Box::new(move || chmod(&d, 0o755));
+                let privileged = std::fs::File::create(dir.join("probe-privilege")).is_ok();
+                if privileged {
+                    let _ = std::fs::remove_file(dir.join("probe-privilege"));
+                    restore();
+                    skipped.push(case);
+                    continue;
+                }
+            }
+        }
+        let before = exact_listing(tmp.path());
+        let probe = Store::probe(&path);
+        assert_eq!(
+            exact_listing(tmp.path()),
+            before,
+            "{case:?}: the probe changed nothing"
+        );
+        let expected_kind = match case {
+            ProbeCase::Missing => "missing",
+            ProbeCase::Healthy => "healthy",
+            ProbeCase::Damaged => "damaged",
+            #[cfg(unix)]
+            ProbeCase::HealthyInReadOnlyDir => "healthy",
+            _ => "read-only",
+        };
+        let kind = match &probe {
+            Probe::Missing => "missing",
+            Probe::Healthy => "healthy",
+            Probe::Damaged(_) => "damaged",
+            Probe::ReadOnly(_) => "read-only",
+        };
+        assert_eq!(kind, expected_kind, "{case:?}: {probe:?}");
+        assert_eq!(
+            probe.line().is_some(),
+            matches!(kind, "damaged" | "read-only")
+        );
+        let store = Store::open(&path);
+        assert!(
+            agrees(&probe, &store),
+            "{case:?}: probe {probe:?}, open {:?} (recovered {:?})",
+            store.mode(),
+            store.recovered_from()
+        );
+        drop(store);
+        restore();
+        if let Some(c) = child {
+            assert!(release(c).success());
+        }
+    }
+    if !skipped.is_empty() {
+        // An explicit note, not a silent pass: these need an unprivileged user.
+        eprintln!(
+            "the_health_probe_agrees_with_open_and_changes_nothing: skipped {skipped:?} (running with privileges that ignore file permissions)"
+        );
+    }
+}
