@@ -10,6 +10,7 @@ description = "GPUI application shell, views and widget kit for Lector."
 
 [dependencies]
 gpui = "0.2.2"
+lector-base.workspace = true
 lector-theme.workspace = true
 lector-icons.workspace = true
 anyhow.workspace = true

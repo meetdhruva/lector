@@ -1,19 +1,19 @@
 //! Symbol pickers: file outline (`workspace::ToggleOutline`), project
 //! symbols (`workspace::ToggleSymbolFinder`) and multiple go-to-definition
-//! targets. Fuzzy matching runs on nucleo.
+//! targets. Matching uses `lector_base::fuzzy`, synchronously: the scorer rejects most names with
+//! one subsequence test, so even a large project's symbol list stays within a frame or two.
 
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::scale::px;
-use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Task, Window};
+use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Window};
+use lector_base::fuzzy::{Matcher, Query};
 use lector_syntax::SymbolKind;
 
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
 use crate::editor::symbol_badge;
-use crate::fuzzy::NucleoList;
 use crate::icons::FileIcon;
 
 /// One pickable symbol / location.
@@ -35,17 +35,19 @@ pub struct SymbolEntry {
     pub cols: std::ops::Range<usize>,
 }
 
+/// Most rows shown for a query.
+const MAX_MATCHES: usize = 500;
+
 type ConfirmCallback = Rc<dyn Fn(SymbolEntry, &mut Window, &mut App)>;
 
 /// Delegate for symbol pickers.
 pub struct SymbolPickerDelegate {
     placeholder: SharedString,
     entries: Arc<Vec<SymbolEntry>>,
-    list: NucleoList<usize>,
+    matcher: Matcher,
     rows: Vec<(usize, Vec<usize>)>,
     selected: usize,
     on_confirm: ConfirmCallback,
-    tick_task: Option<Task<()>>,
     empty: SharedString,
     loading: bool,
     keep_order: bool,
@@ -61,28 +63,13 @@ impl SymbolPickerDelegate {
         on_confirm: impl Fn(SymbolEntry, &mut Window, &mut App) + 'static,
     ) -> Self {
         let entries = Arc::new(entries);
-        let list = NucleoList::new(false);
-        let injector = list.injector();
-        let feed = entries.clone();
-        if feed.len() > 2000 {
-            std::thread::spawn(move || {
-                for (ix, e) in feed.iter().enumerate() {
-                    injector.push(ix, &e.name);
-                }
-            });
-        } else {
-            for (ix, e) in feed.iter().enumerate() {
-                injector.push(ix, &e.name);
-            }
-        }
         SymbolPickerDelegate {
             placeholder: placeholder.into(),
             entries,
-            list,
+            matcher: Matcher::new(),
             rows: Vec::new(),
             selected: 0,
             on_confirm: Rc::new(on_confirm),
-            tick_task: None,
             empty: "No symbols".into(),
             loading: false,
             keep_order,
@@ -111,15 +98,6 @@ impl SymbolPickerDelegate {
             self.selected = ix;
         }
     }
-
-    fn refresh(&mut self) {
-        self.rows = self
-            .list
-            .top(500)
-            .into_iter()
-            .map(|m| (m.item, m.positions))
-            .collect();
-    }
 }
 
 impl PickerDelegate for SymbolPickerDelegate {
@@ -143,40 +121,27 @@ impl PickerDelegate for SymbolPickerDelegate {
         &mut self,
         query: &str,
         _window: &mut Window,
-        cx: &mut Context<Picker<Self>>,
+        _cx: &mut Context<Picker<Self>>,
     ) {
         self.selected = 0;
         let query = query.trim();
         if query.is_empty() {
-            self.tick_task = None;
-            let limit = if self.keep_order { usize::MAX } else { 500 };
+            let limit = if self.keep_order {
+                usize::MAX
+            } else {
+                MAX_MATCHES
+            };
             self.rows = (0..self.entries.len().min(limit))
                 .map(|ix| (ix, Vec::new()))
                 .collect();
             return;
         }
-        self.list.set_query(query);
-        let running = self.list.tick(8);
-        self.refresh();
-        if running || (self.list.counts().1 as usize) < self.entries.len() {
-            self.tick_task = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let Ok(done) = this.update(cx, |picker, cx| {
-                    let d = &mut picker.delegate;
-                    let running = d.list.tick(5);
-                    d.refresh();
-                    cx.notify();
-                    !running && d.list.counts().1 as usize >= d.entries.len()
-                }) else {
-                    break;
-                };
-                if done {
-                    break;
-                }
-            }));
-        }
+        self.rows = self
+            .matcher
+            .rank_by(&Query::new(query), &self.entries, |e| &*e.name, MAX_MATCHES)
+            .into_iter()
+            .map(|r| (r.index, r.positions))
+            .collect();
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>) {

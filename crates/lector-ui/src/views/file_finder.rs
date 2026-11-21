@@ -13,8 +13,10 @@ use lector_app::project::{FileList, GitStatusMap};
 
 use super::file_tree::git_color;
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
-use crate::fuzzy::NucleoList;
 use crate::icons::FileIcon;
+use path_list::PathList;
+
+mod path_list;
 
 type OpenCallback = Rc<dyn Fn(PathBuf, Option<(u32, Option<u32>)>, &mut Window, &mut App)>;
 
@@ -57,7 +59,7 @@ pub struct FileFinderDelegate {
     files: Arc<FileList>,
     recent: Vec<Arc<str>>,
     status: Arc<GitStatusMap>,
-    list: NucleoList<Arc<str>>,
+    list: PathList,
     rows: Vec<Row>,
     selected: usize,
     line: Option<(u32, Option<u32>)>,
@@ -78,7 +80,7 @@ impl FileFinderDelegate {
         status: Arc<GitStatusMap>,
         on_open: impl Fn(PathBuf, Option<(u32, Option<u32>)>, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let list = NucleoList::new(true);
+        let list = PathList::new();
         let injector = list.injector();
         let feed = files.clone();
         // Pushing a million paths takes a while; do it off the main thread.

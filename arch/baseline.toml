@@ -27,7 +27,6 @@
 "crates/lector-ui/src/a11y.rs" = 1
 "crates/lector-ui/src/views/file_finder.rs" = 1
 "crates/lector-ui/src/views/search_panel.rs" = 1
-"crates/lector-ui/src/views/symbol_picker.rs" = 1
 "crates/lector/src/main.rs" = 1
 
 [background]
@@ -74,11 +73,6 @@
 "crates/lector-ui-terminal/src/session.rs" = 2
 
 [dupes]
-"crates/lector-lsp/src/fuzzy.rs" = 1
-"crates/lector-lsp/src/request.rs" = 1
-"crates/lector-process/src/cancel.rs" = 1
-"crates/lector-search/src/cancel.rs" = 1
-"crates/lector-ui/src/fuzzy.rs" = 2
 
 [size]
 "crates/lector-agent/src/inline_edit.rs" = 1725

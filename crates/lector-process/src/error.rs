@@ -18,7 +18,7 @@ pub enum ProcessError {
         #[source]
         source: std::io::Error,
     },
-    /// The run was cancelled through its [`CancelToken`](crate::CancelToken); the process
+    /// The run was cancelled through its [`CancelToken`](lector_base::CancelToken); the process
     /// tree was terminated.
     #[error("cancelled")]
     Cancelled,
@@ -34,6 +34,12 @@ pub enum ProcessError {
     /// I/O error while talking to a running process.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl From<lector_base::Cancelled> for ProcessError {
+    fn from(_: lector_base::Cancelled) -> Self {
+        ProcessError::Cancelled
+    }
 }
 
 /// Result alias for this crate.

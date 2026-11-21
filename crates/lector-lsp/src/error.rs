@@ -26,5 +26,11 @@ pub enum LspError {
     Protocol(String),
 }
 
+impl From<lector_base::Cancelled> for LspError {
+    fn from(_: lector_base::Cancelled) -> Self {
+        LspError::Cancelled
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T> = std::result::Result<T, LspError>;

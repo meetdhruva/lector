@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Agent sessions for Lector: Agent Client Protocol client, per-turn checkpoints, feedback loop."
 
 [dependencies]
+lector-base.workspace = true
 lector-app.workspace = true
 lector-git = { workspace = true, features = ["serde"] }
 lector-review.workspace = true

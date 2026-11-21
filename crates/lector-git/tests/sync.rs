@@ -8,7 +8,7 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use lector_git::CancelToken;
+use lector_base::CancelToken;
 use lector_git::{
     Error, FetchOptions, Oid, PullMode, PullStatus, PushOptions, PushRefStatus, Repo,
     StashApplyOptions, StashPushOptions, SyncError, SyncErrorKind, SyncEvent, SyncOptions,

@@ -25,8 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, bail};
+use lector_base::CancelToken;
 use lector_git::{
-    CancelToken, FetchOptions, Oid, PullMode, PullStatus, PushOptions, Repo, StashApplyOptions,
+    FetchOptions, Oid, PullMode, PullStatus, PushOptions, Repo, StashApplyOptions,
     StashPushOptions, StatusEntry, SyncEvent, SyncOptions, APPLY_WITHOUT_INDEX,
 };
 use parking_lot::{Mutex, RwLock};

@@ -57,6 +57,12 @@ pub enum Error {
     TimedOut,
 }
 
+impl From<lector_base::Cancelled> for Error {
+    fn from(_: lector_base::Cancelled) -> Self {
+        Error::Cancelled
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

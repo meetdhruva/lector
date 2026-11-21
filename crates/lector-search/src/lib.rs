@@ -7,11 +7,10 @@
 //!   (regex capture groups expanded).
 //!
 //! All blocking APIs are meant to be called from background threads and honour a
-//! [`CancelToken`].
+//! [`CancelToken`](lector_base::CancelToken).
 
 #![forbid(unsafe_code)]
 
-mod cancel;
 mod globs;
 mod grep;
 mod picker;
@@ -20,7 +19,6 @@ mod picker_store;
 mod trigram;
 mod walk;
 
-pub use cancel::CancelToken;
 pub use grep::{
     find_in_text, replacements_in_text, search_files, search_project, CaseMode, FileMatches,
     LineMatch, SearchError, SearchEvent, SearchQuery,

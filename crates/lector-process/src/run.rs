@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::RecvTimeoutError;
 
-use crate::cancel::CancelToken;
 use crate::child::{spawn_reader, Capture};
 use crate::command::{OutputMode, ProcessCommand};
 use crate::error::{ProcessError, Result};
 use crate::lines::{Line, Stream};
 use crate::supervisor::Supervisor;
+use lector_base::CancelToken;
 
 /// Options of [`Supervisor::run`] / [`Supervisor::run_streaming`].
 #[derive(Debug, Clone)]
@@ -116,8 +116,8 @@ impl Supervisor {
         opts: &RunOptions,
         mut on_line: Option<&mut dyn FnMut(&Line)>,
     ) -> Result<RunOutput> {
-        if opts.cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            return Err(ProcessError::Cancelled);
+        if let Some(cancel) = &opts.cancel {
+            cancel.check()?;
         }
         let cmd = cmd
             .clone()

@@ -52,8 +52,8 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use lector_base::CancelToken;
 use lector_diff::{diff_lines, refine_inline, DiffOptions};
-use lector_search::CancelToken;
 use lector_syntax::{Syntax, TextInput, TreeNode};
 
 /// Limits of a structural diff.

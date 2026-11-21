@@ -27,9 +27,10 @@ review state live under the platform config/data directories.
                ├─ lector-theme    theme model + built-in themes
                ├─ lector-icons    Material file icons + UI icons (SVG bytes)
                ├─ lector-text     SumTree, Rope, mmap text, coordinates (no internal deps)
-               └─ lector-process  child processes: process trees, streaming, cancel, askpass (no internal deps)
+               ├─ lector-process  child processes: process trees, streaming, cancel, askpass
+               └─ lector-base     CancelToken, the fuzzy scorer, named threads (std only; every crate may use it)
    ```
-   Allowed internal edges: `syntax→text`, `fs→text`, `diff→(none)`, `search→text?`,
+   Allowed internal edges: `*→base` (the bottom layer, ADR 0005), `syntax→text`, `fs→text`, `diff→(none)`, `search→text?`,
    `git→process`, `lsp→process`, `agent→process` (v0.7), `review→core` (stateless, ADR 0001), `app→all core`, `ui→all`.
    Nothing depends on `ui`.
 3. **Snapshots, not locks.** Text is immutable and cheaply clonable (`Arc`).
@@ -38,7 +39,8 @@ review state live under the platform config/data directories.
 4. **No async runtime in the core.** Core APIs are synchronous (blocking,
    meant to be called from a background thread) or return runtime-agnostic
    futures (`futures` channels). No tokio dependency in core crates.
-5. **Cancellation everywhere** long work happens: `CancelToken` (an `Arc<AtomicBool>`).
+5. **Cancellation everywhere** long work happens: `lector_base::CancelToken` (one type; crates import it directly,
+   none re-exports it).
 6. **Never panic on user data.** Return `Result`; libraries use `thiserror`,
    the app edge uses `anyhow`.
 7. **Every user command is an action** (palette, keybinding, menu, context menu
@@ -59,30 +61,30 @@ L7 ui-agent
 L6 frontend
   lector-cli         -> lector-agent, lector-app, lector-config, lector-diff, lector-git,
                         lector-mcp, lector-process, lector-review
-  lector-ui-git      -> lector-app, lector-buffer, lector-config, lector-diff, lector-forge,
-                        lector-fs, lector-git, lector-icons, lector-review, lector-syntax,
-                        lector-text, lector-theme, lector-ui
+  lector-ui-git      -> lector-app, lector-base, lector-buffer, lector-config, lector-diff,
+                        lector-forge, lector-fs, lector-git, lector-icons, lector-review,
+                        lector-syntax, lector-text, lector-theme, lector-ui
   lector-ui-terminal -> lector-config, lector-terminal, lector-theme, lector-ui
 L5 client
-  lector-agent       -> lector-app, lector-buffer, lector-config, lector-diff, lector-fs,
-                        lector-git, lector-process, lector-review, lector-syntax
+  lector-agent       -> lector-app, lector-base, lector-buffer, lector-config, lector-diff,
+                        lector-fs, lector-git, lector-process, lector-review, lector-syntax
   lector-mcp         -> lector-app
-  lector-ui          -> lector-app, lector-buffer, lector-config, lector-diff, lector-fs,
-                        lector-git, lector-icons, lector-lsp, lector-search, lector-syntax,
-                        lector-text, lector-theme
+  lector-ui          -> lector-app, lector-base, lector-buffer, lector-config, lector-diff,
+                        lector-fs, lector-git, lector-icons, lector-lsp, lector-search,
+                        lector-syntax, lector-text, lector-theme
 L4 app
-  lector-app         -> lector-buffer, lector-config, lector-diff, lector-fs, lector-git,
-                        lector-lsp, lector-process, lector-review, lector-search, lector-syntax,
-                        lector-text
+  lector-app         -> lector-base, lector-buffer, lector-config, lector-diff, lector-fs,
+                        lector-git, lector-lsp, lector-process, lector-review, lector-search,
+                        lector-syntax, lector-text
 L3 analysis
   lector-perf        -> lector-buffer, lector-diff, lector-search, lector-syntax, lector-text
-  lector-review      -> lector-buffer, lector-config, lector-diff, lector-fs, lector-git,
-                        lector-search, lector-syntax, lector-text
+  lector-review      -> lector-base, lector-buffer, lector-config, lector-diff, lector-fs,
+                        lector-git, lector-syntax, lector-text
 L2 service
   lector-buffer      -> lector-text
   lector-fs          -> lector-text
-  lector-git         -> lector-process
-  lector-lsp         -> lector-process, lector-text
+  lector-git         -> lector-base, lector-process
+  lector-lsp         -> lector-base, lector-process, lector-text
   lector-syntax      -> lector-text
 L1 leaf
   lector-archcheck   -> (none)
@@ -90,11 +92,13 @@ L1 leaf
   lector-diff        -> (none)
   lector-forge       -> (none)
   lector-icons       -> (none)
-  lector-process     -> (none)
-  lector-search      -> (none)
+  lector-process     -> lector-base
+  lector-search      -> lector-base
   lector-terminal    -> (none)
   lector-text        -> (none)
   lector-theme       -> (none)
+L0 base
+  lector-base        -> (none)
 ```
 <!-- arch-graph:end -->
 
@@ -139,6 +143,64 @@ can edit and save files. The rules:
 
 These are the public APIs other crates rely on. Implementations may add more,
 but must not change these signatures without updating this doc.
+
+### lector-base (ADR 0005; std only, `#![forbid(unsafe_code)]`)
+The bottom layer; every crate that needs one of these depends on it directly. Nothing else defines a cancel token,
+a fuzzy scorer or a way to start a named thread (`arch-check dupes`, `arch-check threads`).
+```rust
+// ---- lector_base::{CancelToken, Cancelled} ----
+pub struct CancelToken;             // Clone + Send + Sync + Default + Debug; clones share one flag
+impl CancelToken {
+    pub fn new() -> Self;
+    pub fn cancel(&self);           // idempotent; cancels children, then runs hooks, outside any lock; a panicking hook does not
+                                    // stop the others (the first panic is resumed on the caller afterwards)
+    pub fn is_cancelled(&self) -> bool;
+    pub fn check(&self) -> Result<(), Cancelled>;                  // `token.check()?` at loop heads
+    pub fn child(&self) -> CancelToken;                            // cancelled with the parent, cancellable alone; held weakly
+    pub fn on_cancel(&self, f: impl FnOnce() + Send + 'static);    // exactly once, on the cancelling thread; at once if cancelled
+}
+pub struct Cancelled;               // Error + Display "cancelled"; crates implement `From<Cancelled>` for their error
+                                    // (ProcessError, git::Error, review::Error, LspError each have a `Cancelled` variant)
+
+// ---- lector_base::fuzzy: the one scorer (completion, symbol / recent / command / ref / theme pickers) ----
+pub struct Options { pub max_chars: usize /* candidate chars matched, default 256 */ }
+pub struct Query;                   // Query::new(&str) drops whitespace and folds; is_empty(), len(), is_prefix_of(&Query)
+pub struct Match { pub score: i32, pub positions: Vec<usize> /* byte offsets of matched chars, strictly increasing */ }
+pub struct Ranked { pub index: usize, pub score: i32, pub positions: Vec<usize> }
+pub struct Matcher;                 // owns scratch buffers; keep one per thread; Matcher::new() / with_options(&Options)
+impl Matcher {
+    pub fn score(&mut self, q: &Query, text: &str) -> Option<i32>;            // allocation-free once warm; byte path for ASCII
+    pub fn matches(&mut self, q: &Query, text: &str) -> Option<Match>;        // score + positions
+    pub fn score_indexed(&mut self, index: &Index, slot: usize, q: &Query) -> Option<i32>;
+    pub fn rank<S: AsRef<str>>(&mut self, q: &Query, candidates: &[S], limit: usize) -> Vec<Ranked>;
+    pub fn rank_by<T>(&mut self, q: &Query, items: &[T], text: impl Fn(&T) -> &str, limit: usize) -> Vec<Ranked>;
+        // best `limit`: higher score, then fewer chars, then lower index; empty query keeps the first `limit` in input order
+}
+pub struct Index;                   // Index::new(&Options) / with_capacity; push(&str) -> slot: pre-folded texts for repeated queries
+pub fn score(query: &str, candidate: &str, options: &Options) -> Option<Match>;   // one-shot convenience
+pub fn fold(c: char) -> char;
+```
+Ranking (module docs of `fuzzy.rs` have the table): a subsequence match of the folded query; per matched char a boundary bonus
+(start / after `/` 900, after another separator 800, camelCase 700, after `.` or letter/digit change 600), +1000 when it follows the
+previous match, +50 for the query's own case; gaps cost 5 before the first match and 10 between matches, nothing after the last;
++1500 for a prefix, +500 more for an exact match. Hence prefix > word boundary / camelCase > scattered, and text after the last
+match is free (completion breaks ties by `sortText`, `rank` by length then input order). Folding: ASCII lowercased, other chars
+map to the first char of their Unicode lowercase (`İ`→`i`), `ς`→`σ`; no `ß`→`ss`, no normalisation, no accent stripping. The file
+picker keeps its own nucleo scoring and index (`lector-search`): per path this scorer is slower and ranks the top results differently,
+and the picker's score bound and property tests are defined by nucleo's scores.
+```rust
+// ---- lector_base::thread (ADR 0003, decision 3) ----
+pub enum ThreadKind { PtyReader, PtyWriter, PtyWaiter, PtyParser, PtyReaper, LspReader, LspWriter, LspWatchdog, LspLaunch,
+    AskpassListener, AskpassConnection, FileWatcher, WatchPoll, SchedulerWorker, SchedulerTimer, PipeReader, PipeWriter,
+    ProcessReaper, ShutdownHelper, AcpReader, AcpRequest, AgentTurn, PickerWorker, MockServer, StartupLoader }
+                                    // closed; `as_str()` = the `kind:` names of arch/threads.allow (a unit test keeps them equal); ThreadKind::ALL
+pub fn spawn_named<T, F>(kind: ThreadKind, name: impl Into<String>, f: F) -> io::Result<JoinHandle<T>>
+    where F: FnOnce() -> T + Send + 'static, T: Send + 'static;
+                                    // OS thread name `<kind>:<name>` (control chars replaced, <= 63 bytes, cut on a char boundary)
+pub fn threads() -> Vec<ThreadInfo>;   // { id, kind, name /* full */, started_at: SystemTime, alive }: running threads plus the last 64 finished
+```
+`spawn_named` registers the thread before it returns and clears `alive` through a drop guard when the closure returns or panics;
+the registry tolerates poisoning. There is no join-all or shutdown policy: whoever owns the resource stops and joins its threads.
 
 ### lector-text
 ```rust
@@ -327,11 +389,11 @@ v0.4 (additive): `pub mod moves` (moved-code detection) and `pub mod remap` (`Li
 
 ### lector-search
 ```rust
-pub struct CancelToken; // new(), cancel(), is_cancelled(); Clone
 pub struct WalkOptions { pub hidden: bool, pub git_ignore: bool, pub exclude: Vec<String>, pub max_depth: Option<usize> }
 pub fn walk_files(root: &Path, opts: &WalkOptions, cancel: &CancelToken,
                   sink: impl Fn(PathBuf) + Send + Sync);           // parallel, relative paths
-pub struct Picker<T: Send + Sync + 'static>;   // nucleo wrapper, streaming
+// All blocking functions here take `&lector_base::CancelToken`.
+pub struct Picker<T: Send + Sync + 'static>;   // nucleo wrapper, streaming; scores with nucleo (not lector_base::fuzzy), see ADR 0005
 impl<T> Picker<T> {
     pub fn new(notify: Arc<dyn Fn() + Send + Sync>) -> Self;
     pub fn injector(&self) -> PickerInjector<T>;    // push(item, haystack: &str); Clone + Send
@@ -529,8 +591,7 @@ code actions + resolve + commands → applyEdit, prepare/rename across files) an
 Product rules: completion comes **only from language servers** (no AI source); snippets are **off by default**; nothing is
 requested or written on open or focus: a request is the result of typing, a trigger character or Ctrl+Space, and the buffer
 changes only when the user accepts an item. `lector-lsp` stays UI-free and runtime-agnostic; the popup is built by `lector-ui` on
-the types below. `lector-lsp` has its own small fuzzy matcher (`fuzzy.rs`, fzy-style scoring) because `lector-search` sits above it
-in the layering and pulls in the walker and grep stack.
+the types below. Filtering uses `lector_base::fuzzy` (fzy-style scoring; `Index` + `Matcher::score_indexed` for the keystroke hot path, 128 chars per label).
 
 ```rust
 // ---- requests (lector_lsp::LspManager; futures are Send + 'static, nothing is sent until the document is synced) ----
@@ -544,7 +605,8 @@ impl LspManager {
     pub fn set_completion_snippets(&self, enabled: bool);   // advertised at `initialize`: servers started afterwards
 }
 pub enum RequestOutcome<T> { Done(T), Cancelled, Stale, Unavailable }   // done(), is_done()
-pub struct CancelToken;   // Clone; new(), cancel(), is_cancelled(). Cancelling sends $/cancelRequest and ends the future at once
+// `cancel: Option<&lector_base::CancelToken>`: the request runs on a `child()` of it; cancelling the child (the caller's token, or a newer
+// request superseding it) sends $/cancelRequest and ends the future at once (an `on_cancel` hook of the child)
 pub enum CompletionTrigger { Invoked /*typed identifier char, Ctrl+Space*/, TriggerCharacter(char), Incomplete }
 pub struct CompletionRequest { pub pos: PointUtf16 /* UTF-16 caret */, pub trigger: CompletionTrigger }
 pub struct CompletionResponse { pub items: Vec<CompletionItem>, pub is_incomplete: bool, pub request_pos: PointUtf16,
@@ -619,7 +681,7 @@ pub struct CompletionCommit { pub edits: Vec<ByteEdit { range: Range<usize>, new
 (Replace) and the text is `insertText` or the label. The server's UTF-16 range is **re-anchored** to what was typed since the
 request: on the caret's row, range ends and positions at or after the old caret move with the caret, range starts at the old caret
 stay, so an answer for `fo` still replaces `foo` after one more keystroke (and shrinks on backspace). **Filtering:** the typed text
-is fuzzy-matched (case-insensitive subsequence) against `filterText` or the label; items whose edit starts before the word (for
+is fuzzy-matched (`lector_base::fuzzy`, case-insensitive subsequence) against `filterText` or the label; items whose edit starts before the word (for
 example at a `.`) are matched against the text from their own start. Score: fzy-style boundary bonuses (start, after `_ - . / :`,
 camelCase), consecutive runs, +50 per exact-case char, +1500 for a prefix match (+500 more for an exact one), no penalty for text
 after the last match, deprecated items minus 3000. Rows are ordered by score, then `sortText` (or label), then `preselect`, then
@@ -978,7 +1040,7 @@ Notes on `review` (as implemented): every function has a `*_with(repo, ..)` vari
 versions use `settings.diff` (`diff_options(&DiffSettings)`: ignore_whitespace → `Whitespace::IgnoreAll`).
 `lector-review` writes nothing (checked by `arch-check purity`): the viewed marks come in as a read-only input,
 `viewed: &dyn ViewedMarks` (`is_viewed(changeset_key, path, content_hash)`; any `Fn(&str, &str, &str) -> bool` is one,
-`NoMarks` has none), and `load_changeset_cancellable` / `load_vs_workdir_cancellable` take a `lector_search::CancelToken`
+`NoMarks` has none), and `load_changeset_cancellable` / `load_vs_workdir_cancellable` take a `lector_base::CancelToken`
 (`Error::Cancelled`, checked between files).
 * Keys (`changeset_key`, inverse `parse_changeset_key`): `worktree`, `staged`, `unstaged`, `untracked`, `commit:<sha>`,
   `range:<from>..<to>`, `branch:<base>...<branch>`. Titles (`changeset_title`): "Working tree", "abc1234 Fix parser",
@@ -1421,7 +1483,7 @@ final newline, CRLF, autocrlf, deleted/added files), proptests in `lector_diff::
 The one way views, the CLI and agents get review data: `AppCore::review() -> ReviewService` (cheap to clone; holds the
 `ReviewStore` of the core's database and the process-wide `ContentCache`, which is the `DerivedCache` of every call;
 `ReviewService::{new(store), with_cache(store, cache), without_marks()}`). Every analysis method takes a
-`&CancelToken` (`lector_app::review_service::CancelToken` = `lector_search::CancelToken`) and returns
+`&lector_base::CancelToken` and returns
 `lector_review::Error::Cancelled` (`None` for `default_base`) once it is set; results are the plain `lector-review` types.
 ```rust
 impl ReviewService {
@@ -1611,7 +1673,7 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   see the token and their result is dropped → handle resolves `None`); `debounce` keeps only the last closure per key
   and runs it as a keyed job `delay` after the last call; `cancel_key`, `pending()`, `wait_idle(timeout)`; panics in
   jobs are caught (handle → `None`). `JobHandle::{cancel, token, is_finished, try_take, into_future, wait}` (`wait` blocks;
-  never from a worker). Workers stop when the last `Scheduler` clone drops. `CancelToken` = `lector_search::CancelToken`.
+  never from a worker). Workers stop when the last `Scheduler` clone drops. Job tokens are `lector_base::CancelToken`.
 * **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, undo, ui_action, ui_flow }` built with
   `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.with_ui_flow(..)`, `.destructive()`, `.undoable()`,
   `.not_undoable(reason)`, `.ui_only()` (`sources: Sources::{All, UiOnly}`: `CommandRegistry::invoke` refuses a
@@ -1825,7 +1887,7 @@ operation, plus round trips (binary, empty, symlink, exec bit, deleted, nested, 
 ### lector-process (v0.7) — as implemented
 One component supervises every child process (git network/branch operations and git CLI reads, language
 servers, later agents, terminals). `lector-lsp`'s client spawns its server through `Supervisor::global()` (kind
-`LanguageServer`; the child is a `ChildHandle`, its stdio is taken as before, and `Client::kill` kills the whole tree). No internal dependencies, no tokio, `#![forbid(unsafe_code)]`: process trees come from
+`LanguageServer`; the child is a `ChildHandle`, its stdio is taken as before, and `Client::kill` kills the whole tree). Depends only on `lector-base`, no tokio, `#![forbid(unsafe_code)]`: process trees come from
 `process-wrap` 8.2 (std feature): a new **session** (`setsid`; or only a new process group with `new_session(false)`)
 on Unix, a **Job Object** plus `CREATE_NO_WINDOW` on Windows.
 ```rust
@@ -1835,7 +1897,7 @@ pub struct ProcessCommand;   // new(program).arg/args/cwd/env/envs/env_remove/en
 pub enum StdinMode { Null /* default */, Piped, Bytes(Vec<u8>) /* written on a thread, then closed */ }
 pub enum OutputMode { Piped /* default */, Null, Inherit }
 pub enum ProcessKind { Git, LanguageServer, Agent, Terminal, Helper, Other }
-pub struct CancelToken;      // Arc<AtomicBool>, same shape as lector_search::CancelToken; from_flag(Arc<AtomicBool>) / flag()
+// RunOptions.cancel is a `lector_base::CancelToken`; `ProcessError: From<lector_base::Cancelled>`
 pub struct Supervisor;       // Clone; Supervisor::global() / new()
 impl Supervisor {
     pub fn spawn(&self, &ProcessCommand) -> Result<ChildHandle>;                         // long-lived (LSP, agents)

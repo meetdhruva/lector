@@ -9,7 +9,7 @@ use gpui::{
     FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task,
     Window,
 };
-use lector_app::review_service::CancelToken;
+use lector_base::CancelToken;
 use lector_git::{ChangeKind, Changeset, CommitDetail, Oid, RefKind};
 use lector_review::review::{self, changeset_key, ChangesetView};
 use lector_ui::actions::diff as diff_actions;

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::project::Project;
+use lector_base::CancelToken;
 use lector_buffer::TextEdit;
 use lector_config::Settings;
 use lector_lsp::{Diagnostic, DiagnosticSeverity, DocumentDiagnostics};
@@ -15,7 +16,7 @@ use lector_text::PointUtf16;
 use parking_lot::Mutex;
 
 use super::*;
-use crate::scheduler::{CancelToken, Scheduler};
+use crate::scheduler::Scheduler;
 
 struct Fx {
     _dir: tempfile::TempDir,

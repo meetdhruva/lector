@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use ignore::{WalkBuilder, WalkState};
 
 use crate::globs::build_set;
-use crate::CancelToken;
+use lector_base::CancelToken;
 
 /// Options for [`walk_files`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

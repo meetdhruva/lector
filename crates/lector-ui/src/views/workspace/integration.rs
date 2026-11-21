@@ -14,9 +14,9 @@ use gpui::{
     Window,
 };
 use lector_app::project::{FileList, GitStatusMap, Location, NavHistory, Project};
+use lector_base::CancelToken;
 use lector_config::{PaneState, Session, TabKind, TabState};
 use lector_lsp::ServerState;
-use lector_search::CancelToken;
 
 use super::Workspace;
 use super::WorkspaceEvent;

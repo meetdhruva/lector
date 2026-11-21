@@ -14,7 +14,7 @@
 //! * [`Supervisor::run`] / [`Supervisor::run_streaming`] run to completion: both pipes are
 //!   drained concurrently on their own threads, lines (`\n`, `\r\n` and `\r` progress
 //!   updates) are delivered as they arrive through a bounded channel, output is captured up
-//!   to a limit, and a [`CancelToken`] or timeout terminates the tree (`SIGTERM`, then
+//!   to a limit, and a [`CancelToken`](lector_base::CancelToken) or timeout terminates the tree (`SIGTERM`, then
 //!   `SIGKILL` of the whole group after a grace period; the job is terminated on Windows).
 //! * [`Supervisor::spawn`] returns a [`ChildHandle`] for long-lived processes (raw pipes or
 //!   line events). Dropping the handle kills the tree; [`Supervisor::shutdown`] kills every
@@ -28,7 +28,6 @@
 #![warn(missing_docs)]
 
 pub mod askpass;
-mod cancel;
 mod child;
 mod command;
 mod error;
@@ -36,7 +35,6 @@ mod lines;
 mod run;
 mod supervisor;
 
-pub use cancel::CancelToken;
 pub use child::{ChildHandle, Killer, ProcessInfo};
 pub use command::{OutputMode, ProcessCommand, ProcessKind, StdinMode};
 pub use error::{ProcessError, Result};

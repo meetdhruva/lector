@@ -14,7 +14,8 @@ use gpui::{Context, EventEmitter, Task};
 use lector_app::review_queue::{
     analyze, AnalysisOptions, ChangesetAnalysis, FileMoves, HunkFingerprint, QueueEntry, QueueGroup,
 };
-use lector_app::review_service::{CancelToken, ReviewService};
+use lector_app::review_service::ReviewService;
+use lector_base::CancelToken;
 use lector_diff::DiffOptions;
 use lector_git::{Changeset, FileChange, Repo, StatusEntry};
 use lector_review::review::FileDiff;

@@ -4,10 +4,10 @@
 use std::rc::Rc;
 
 use gpui::{prelude::*, AnyElement, App, DismissEvent, Entity, SharedString, Window};
+use lector_base::fuzzy::{Matcher, Query};
 use lector_git::Repo;
 use lector_ui::components::modal::toggle_modal;
 use lector_ui::components::picker::{Picker, PickerDelegate, PickerItem};
-use lector_ui::fuzzy::match_and_sort;
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::views::Workspace;
 
@@ -106,9 +106,15 @@ impl PickerDelegate for RefPickerDelegate {
         _window: &mut Window,
         _cx: &mut Context<Picker<Self>>,
     ) {
-        self.matches = match_and_sort(query, self.choices.iter().map(|c| c.label.as_str()))
+        self.matches = Matcher::new()
+            .rank_by(
+                &Query::new(query),
+                &self.choices,
+                |c| c.label.as_str(),
+                usize::MAX,
+            )
             .into_iter()
-            .map(|(ix, m)| (ix, m.positions))
+            .map(|r| (r.index, r.positions))
             .collect();
         // A typed revision that matches nothing can still be used verbatim.
         if self.matches.is_empty() && !query.trim().is_empty() {

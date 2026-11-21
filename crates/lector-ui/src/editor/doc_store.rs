@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use gpui::{App, BackgroundExecutor, Global};
 use lector_app::documents::{DocExecutor, DocJob, DocumentStore};
-use lector_app::scheduler::{CancelToken, JobKey, Priority};
+use lector_app::scheduler::{JobKey, Priority};
+use lector_base::CancelToken;
 use parking_lot::Mutex;
 
 /// The store used by this app's document models.
