@@ -20,13 +20,21 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{Builder, JoinHandle};
 use std::time::SystemTime;
 
+/// A short task handed to a [`TaskRunner`].
+pub type RunnerTask = Box<dyn FnOnce() + Send + 'static>;
+
 /// Where a short blocking task of a crate below `lector-app` runs. Those crates do not
 /// schedule (ADR 0003, decision 4): an owner thread that has short work to hand off (an askpass
-/// connection, a language-server launch, a terminal's kill escalation) calls the runner its
-/// caller supplied, e.g. one that submits a job to the `lector-app` scheduler. A runner must
-/// run each task exactly once, or drop it unrun when the work was cancelled; it may run it on
-/// the calling thread.
-pub type TaskRunner = std::sync::Arc<dyn Fn(Box<dyn FnOnce() + Send + 'static>) + Send + Sync>;
+/// connection, a language-server launch, a terminal's kill escalation, a request from an agent)
+/// calls the runner its caller supplied, e.g. one that submits a job to the `lector-app`
+/// scheduler.
+///
+/// **Contract: a task is never silently dropped.** A runner either takes the task (`Ok`: it
+/// will run it, or, if the work is cancelled later, drop it, which for cleanup work still runs
+/// it) or hands it back (`Err(task)`: it cannot take it, e.g. the scheduler has stopped), and the
+/// caller then runs it itself, on its own thread. Callers write
+/// `if let Err(task) = runner(task) { task() }`.
+pub type TaskRunner = std::sync::Arc<dyn Fn(RunnerTask) -> Result<(), RunnerTask> + Send + Sync>;
 
 /// The closed set of owner-thread kinds. [`as_str`](Self::as_str) spells each one exactly as
 /// `arch/threads.allow` does (`kind:<name>`).

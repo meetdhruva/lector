@@ -72,12 +72,12 @@ pub(crate) fn drain(pipe: Option<ChildStderr>) -> Drain {
     Drain(spawned.ok())
 }
 
-#[cfg(test)]
+// Both tests drive Unix tools (`cat`, `sh`).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
-    #[cfg(unix)]
     #[test]
     fn large_input_and_output_do_not_deadlock() {
         let input: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
@@ -91,7 +91,6 @@ mod tests {
         assert_eq!(out.stdout, input);
     }
 
-    #[cfg(unix)]
     #[test]
     fn drain_collects_stderr() {
         let mut child = Command::new("sh")

@@ -380,9 +380,15 @@ impl Slot {
     /// [launcher](LspOptions::launcher), or here.
     fn spawn_launch(self: &Arc<Self>, delay: Duration) {
         let slot = self.clone();
+        let task: lector_base::thread::RunnerTask = Box::new(move || slot.launch(delay));
         match &self.opts.launcher {
-            Some(run) => run(Box::new(move || slot.launch(delay))),
-            None => slot.launch(delay),
+            // Handed back (the app is stopping): launch here rather than lose it.
+            Some(run) => {
+                if let Err(task) = run(task) {
+                    task();
+                }
+            }
+            None => task(),
         }
     }
 

@@ -31,6 +31,12 @@ fn settings_with(configure: impl FnOnce(&mut lector_config::Settings)) -> lector
 
 fn init(cx: &mut TestAppContext, settings: lector_config::Settings) {
     cx.update(|cx: &mut App| {
+        // Every job a view starts must run on GPUI's test executor so `run_until_parked`
+        // drives it (needs lector-ui's `test-support` feature in this crate's dev-dependencies).
+        assert!(
+            lector_ui::background::is_test_dispatcher(cx),
+            "background work escapes the test executor: enable lector-ui/test-support"
+        );
         ThemeState::init(cx, ThemeRegistry::new(), ThemeMode::Dark, Appearance::Dark);
         cx.set_global(lector_ui::code_view::EditorSettings::default());
         cx.set_global(lector_ui::settings::AppSettings {
@@ -705,4 +711,22 @@ fn default_keymap_keeps_shell_keys_in_the_terminal() {
     ] {
         assert!(!blocked.iter().any(|b| b == k), "{k} must stay with Lector");
     }
+}
+
+/// Background work started by views runs on the test executor, not on real scheduler threads:
+/// `run_until_parked` returns only once it is done.
+#[gpui::test]
+fn background_work_of_views_runs_on_the_test_executor(cx: &mut TestAppContext) {
+    use lector_ui::background::{background, JobKey, JobKind, Priority, Subject};
+    let test_thread = std::thread::current().id();
+    let task = cx.update(|cx| {
+        background(
+            cx,
+            JobKey::new(JobKind::DocumentOpen, Subject::View(1)),
+            Priority::Visible,
+            |_| std::thread::current().id(),
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.executor().block_test(task), Ok(test_thread));
 }

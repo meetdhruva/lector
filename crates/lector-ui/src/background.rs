@@ -19,7 +19,9 @@
 //!   worker down.
 //!
 //! Under GPUI's test dispatcher the bridge uses a [`Scheduler::with_runner`] that runs jobs on
-//! GPUI's test executor, so `run_until_parked` and the fake clock still drive everything
+//! GPUI's test executor (detected only when lector-ui is built with `cfg(test)` or its
+//! `test-support` feature: every crate whose GPUI tests start background work must enable it in
+//! its dev-dependencies, and its test setup should assert [`is_test_dispatcher`]), so `run_until_parked` and the fake clock still drive everything
 //! deterministically; keys, subjects and cancellation are the scheduler's in both cases.
 //! Timers (`background_executor().timer(..)`) and pure UI animation stay on GPUI.
 
@@ -403,26 +405,65 @@ mod tests {
         assert_eq!(cx.executor().block_test(task), Ok(5));
     }
 
-    /// On the real scheduler (as in the app): a value produced after the job was replaced or
-    /// cancelled is never delivered, even when the job finished before the main thread looked.
+    /// On the real scheduler (as in the app): job A has finished and sent its value, then,
+    /// before the main thread delivers it, a newer job with the same key is submitted (the
+    /// detached definitions lookup case): A's consumer sees `Cancelled`, never the value.
     #[test]
-    fn a_stale_result_is_not_delivered() {
+    fn a_result_replaced_after_it_finished_is_not_delivered() {
         let s = Scheduler::new(1);
-        let handle = s.spawn(key(JobKind::GitLog, 1), Priority::Visible, |_| 42);
-        let token = handle.token().clone();
-        // Let the job finish and send its value.
-        while !handle.is_finished() {
+        let a = s.spawn(key(JobKind::LspDefinitions, 1), Priority::Visible, |_| {
+            "old"
+        });
+        wait_finished(&a);
+        let b = s.spawn(key(JobKind::LspDefinitions, 1), Priority::Visible, |_| {
+            "new"
+        });
+        assert_eq!(deliver(a), Err(JobError::Cancelled));
+        assert_eq!(deliver(b), Ok("new"));
+        assert_eq!(s.live_jobs(), 0);
+    }
+
+    #[test]
+    fn a_result_whose_subject_closed_after_it_finished_is_not_delivered() {
+        let s = Scheduler::new(1);
+        let a = s.spawn(key(JobKind::GitLog, 3), Priority::Visible, |_| 1);
+        wait_finished(&a);
+        assert_eq!(s.cancel_subject(&Subject::View(3)), 1);
+        assert_eq!(deliver(a), Err(JobError::Cancelled));
+        assert_eq!(s.live_jobs(), 0);
+    }
+
+    #[test]
+    fn delivered_dropped_and_detached_results_leave_no_registration() {
+        let s = Scheduler::new(1);
+        let a = s.spawn(key(JobKind::GitLog, 1), Priority::Visible, |_| 1);
+        assert_eq!(deliver(a), Ok(1));
+        let b = s.spawn(key(JobKind::GitLog, 2), Priority::Visible, |_| 2);
+        wait_finished(&b);
+        // A delivery that is dropped before it ran (the view went away).
+        drop(Delivery {
+            token: b.token().clone(),
+            outcome: Box::pin(b.outcome()),
+        });
+        // A detached job: nobody holds its handle.
+        drop(s.spawn(key(JobKind::Reindex, 3), Priority::Visible, |_| ()));
+        assert!(s.wait_idle(Duration::from_secs(5)));
+        assert_eq!(s.live_jobs(), 0);
+    }
+
+    fn wait_finished<T>(h: &lector_app::scheduler::JobHandle<T>) {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !h.is_finished() {
+            assert!(std::time::Instant::now() < end);
             std::thread::sleep(Duration::from_millis(1));
         }
-        // Then a newer job replaces it (on the main thread) before the delivery is polled.
-        token.cancel();
-        let delivery = Delivery {
-            token,
-            outcome: Box::pin(handle.outcome()),
-        };
-        assert_eq!(
-            futures::executor::block_on(delivery),
-            Err(JobError::Cancelled)
-        );
+    }
+
+    /// What the bridge's foreground delivery resolves to.
+    fn deliver<T: Send + 'static>(h: lector_app::scheduler::JobHandle<T>) -> Result<T, JobError> {
+        futures::executor::block_on(Delivery {
+            token: h.token().clone(),
+            outcome: Box::pin(h.outcome()),
+        })
     }
 }
