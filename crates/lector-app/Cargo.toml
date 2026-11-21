@@ -34,6 +34,10 @@ sha2 = "0.10"
 num_cpus = "1"
 dunce.workspace = true
 
+# The health probe asks whether a folder is writable without creating anything in it.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["std", "fs"] }
+
 [dev-dependencies]
 lector-config = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

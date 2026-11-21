@@ -302,5 +302,6 @@ fn idle_unauthenticated_connections_neither_take_prompt_slots_nor_linger() {
 fn threads() -> lector_base::thread::TaskRunner {
     std::sync::Arc::new(|task| {
         std::thread::spawn(task);
+        Ok(())
     })
 }

@@ -1,6 +1,10 @@
 use super::*;
 use crate::scheduler::{JobKey, Priority, Subject};
-use lector_process::{ProcessCommand, RunOptions, Supervisor};
+use lector_process::Supervisor;
+// Only the Unix-only git test uses these.
+#[cfg(unix)]
+use lector_process::{ProcessCommand, RunOptions};
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -12,6 +16,7 @@ fn key(kind: JobKind, n: u64) -> JobKey {
     JobKey::new(kind, Subject::View(n))
 }
 
+#[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(args)

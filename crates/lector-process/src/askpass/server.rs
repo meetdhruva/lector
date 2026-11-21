@@ -343,11 +343,15 @@ fn accept_loop(
         let token = token.clone();
         let handler = handler.clone();
         let slots2 = slots.clone();
-        runner(Box::new(move || {
+        let task: lector_base::thread::RunnerTask = Box::new(move || {
             if let Err(err) = handle(conn, &token, &handler, &slots2, handshake) {
                 tracing::debug!("askpass connection: {err}");
             }
-        }));
+        });
+        // Handed back (the app is stopping): serve it here rather than drop it.
+        if let Err(task) = runner(task) {
+            task();
+        }
     }
 }
 

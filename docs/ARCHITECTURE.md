@@ -384,16 +384,21 @@ enumerates the registry and round-trips each undoable one.
 4. The job runs with a `lector_base::CancelToken`; a panic is caught and becomes
    `JobError::Panicked`.
 5. The result is delivered on the main thread as a `BackgroundTask<T>` future of
-   `Result<T, JobError>`; the token is checked again there, so a stale result is never delivered.
-   Dropping the task cancels the job synchronously.
+   `Result<T, JobError>`. A job stays registered under its key and subject until its result is
+   taken or dropped, and delivery checks and unregisters in one step, so a job replaced or
+   cancelled after it finished still never delivers. Dropping the task cancels the job
+   synchronously.
 6. Below `lector-app`, crates do not schedule: they expose blocking, cancellable functions, and an
    owner thread with short work to hand off calls a `lector_base::thread::TaskRunner` its caller
-   supplies (`Scheduler::task_runner`).
+   supplies (`Scheduler::task_runner`). A runner takes the task or hands it back for the caller
+   to run inline; a task is never silently dropped.
 7. Quit (`lector_app::shutdown::shutdown` with `QuitBounds::default()`): cancel every non-write job
    and refuse new ones (`Scheduler::begin_quit`), drain writes (`Scheduler::drain`: 10 s, network
    writes 2 s) while child processes are alive, stop every supervised process tree
    (`Supervisor::shutdown`), stop the scheduler. Writes given up on are reported in the
-   `ShutdownReport` and the crash log.
+   `ShutdownReport` and the crash log. Terminals are killed by their own quit hook before this
+   (`lector_ui_terminal::kill_all`); each kill escalation is a `TerminalKill` job the drain waits
+   for.
 
 Lanes, kinds, priorities and the quit policy per kind are in the rustdoc of
 `lector_app::scheduler` and `lector_app::scheduler::key`; the decision is
@@ -475,7 +480,7 @@ UI-only capability into a command must not widen this ([ADR 0002](adr/0002-one-w
    first and never opened for writing. If the file cannot be opened for writing, the process runs
    with `StoreMode::ReadOnly`: an in-memory copy, never written back. That state stays visible: a
    status bar item (`StoreMode::indicator`), a startup toast, a line in `lector health`
-   (`Store::probe`), and one stderr line from headless commands at the first write
+   (`Store::probe`, which creates and changes nothing and answers what `Store::open` would do), and one stderr line from headless commands at the first write
    (`StoreMode::headless_warning`).
 4. **Recovery:** a file that stays corrupt over repeated opens is renamed aside to an owner-only
    `lector.redb.corrupt-<secs>` under a cross-process lock, and a fresh database is created
@@ -628,6 +633,8 @@ multi-line paste without bracketed paste asks first. Agents get no terminal acce
   `git` CLI with a hermetic config. Write commands need an undo round trip; read commands are
   covered by `tests/read_only.rs`. Fake servers (`tests/fixtures/*.py`, `fake_acp_agent.py`,
   `lector_forge::mock::MockServer`) stand in for language servers, agents and code hosts.
+  A crate whose GPUI tests start background work enables `lector-ui`'s `test-support` feature and
+  asserts `lector_ui::background::is_test_dispatcher`, so jobs run on the test executor.
 - **Performance.** Budgets below; instruction-count gates run in CI on Linux
   (`scripts/perf-gate.sh` against `perf/baseline.json`). Measurements and how to reproduce them:
   [`docs/PERFORMANCE.md`](PERFORMANCE.md).

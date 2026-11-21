@@ -49,7 +49,7 @@ use lector_base::CancelToken;
 pub use key::{AtQuit, JobKey, JobKind, Lane, Subject};
 pub use pool::{Body, DrainReport, Runner};
 
-use pool::{Inner, Job};
+use pool::{Inner, Job, Registration};
 
 /// Most threads the blocking lane runs at once; further blocking jobs queue by priority.
 pub const BLOCKING_MAX: usize = 16;
@@ -193,21 +193,43 @@ impl Scheduler {
         prio: Priority,
         f: impl FnOnce(&CancelToken) -> T + Send + 'static,
     ) -> JobHandle<T> {
+        self.try_spawn(key, prio, f).0
+    }
+
+    /// [`Scheduler::spawn`], also telling whether the job was accepted (`false`: refused after
+    /// shutdown, or a non-write while quitting; the handle then resolves to `Cancelled`).
+    fn try_spawn<T: Send + 'static>(
+        &self,
+        key: JobKey,
+        prio: Priority,
+        f: impl FnOnce(&CancelToken) -> T + Send + 'static,
+    ) -> (JobHandle<T>, bool) {
         let prio = prio.for_kind(key.kind);
         let token = CancelToken::new();
         let (tx, rx) = oneshot::channel();
         let finished = Arc::new(AtomicBool::new(false));
-        let body = guarded(key.kind, token.clone(), finished.clone(), f, tx);
         let id = self.inner().next_id();
-        self.inner()
+        let reg = Registration::new(self.inner(), key.clone(), id);
+        let body = guarded(
+            key.kind,
+            token.clone(),
+            finished.clone(),
+            f,
+            tx,
+            reg.clone(),
+        );
+        let accepted = self
+            .inner()
             .submit(prio, token.clone(), Job::new(id, key, body));
-        JobHandle {
+        let handle = JobHandle {
             id,
             token,
             finished,
             rx: Some(rx),
+            reg: Some(reg),
             inner: Arc::downgrade(self.inner()),
-        }
+        };
+        (handle, accepted)
     }
 
     /// Runs `f` once, `delay` after the *last* call with the same `key` (earlier closures for
@@ -223,24 +245,38 @@ impl Scheduler {
         let prio = prio.for_kind(key.kind);
         let token = CancelToken::new();
         let (tx, _rx) = oneshot::channel();
-        let body = guarded(
-            key.kind,
-            token.clone(),
-            Arc::new(AtomicBool::new(false)),
-            f,
-            tx,
-        );
-        self.inner().debounce(key, delay, prio, token, body);
+        let id = self.inner().next_id();
+        let reg = Registration::new(self.inner(), key.clone(), id);
+        let finished = Arc::new(AtomicBool::new(false));
+        let body = guarded(key.kind, token.clone(), finished, f, tx, reg);
+        self.inner().debounce(id, key, delay, prio, token, body);
     }
 
     /// A [`lector_base::thread::TaskRunner`] that runs each task as a job with `key` at `prio`:
     /// how crates below `lector-app` (which do not schedule, ADR 0003) get their short tasks
-    /// run here. A task that has not started when its job is cancelled (shutdown, its subject)
-    /// is dropped without running.
+    /// run here. It honours the runner contract: a task the scheduler refuses (after shutdown,
+    /// or a non-write kind while quitting) is handed back for the caller to run. A task taken
+    /// and then cancelled before it started (its subject, the quit) is dropped, except for kinds
+    /// drained at quit ([`AtQuit::Drain`], e.g. a terminal's kill escalation): cleanup that must
+    /// happen runs wherever the job is dropped.
     pub fn task_runner(&self, key: JobKey, prio: Priority) -> lector_base::thread::TaskRunner {
         let scheduler = self.clone();
+        let must_run = key.kind.at_quit() == AtQuit::Drain;
         Arc::new(move |task| {
-            let _ = scheduler.spawn(key.clone(), prio, move |_| task());
+            let pending = Arc::new(PendingTask {
+                task: parking_lot::Mutex::new(Some(task)),
+                must_run,
+            });
+            let job = pending.clone();
+            let (_, accepted) = scheduler.try_spawn(key.clone(), prio, move |_| job.run());
+            if accepted {
+                return Ok(());
+            }
+            let handed_back = pending.task.lock().take();
+            match handed_back {
+                Some(task) => Err(task),
+                None => Ok(()),
+            }
         })
     }
 
@@ -305,6 +341,33 @@ impl Scheduler {
     }
 }
 
+/// A task handed to [`Scheduler::task_runner`], shared by the job and the runner until one of
+/// them takes it.
+struct PendingTask {
+    task: parking_lot::Mutex<Option<lector_base::thread::RunnerTask>>,
+    /// Cleanup that must happen: run when dropped unrun (the job was cancelled before it ran).
+    must_run: bool,
+}
+
+impl PendingTask {
+    fn run(&self) {
+        let task = self.task.lock().take();
+        if let Some(task) = task {
+            task();
+        }
+    }
+}
+
+impl Drop for PendingTask {
+    fn drop(&mut self) {
+        if self.must_run {
+            if let Some(task) = self.task.get_mut().take() {
+                task();
+            }
+        }
+    }
+}
+
 /// Wraps `f`: skipped when cancelled before it starts, panics caught and reported, the result
 /// sent only if the token is still not cancelled once `f` returns.
 fn guarded<T: Send + 'static>(
@@ -313,8 +376,11 @@ fn guarded<T: Send + 'static>(
     finished: Arc<AtomicBool>,
     f: impl FnOnce(&CancelToken) -> T + Send + 'static,
     tx: oneshot::Sender<Result<T, JobError>>,
+    reg: Arc<Registration>,
 ) -> Body {
     Box::new(move || {
+        // Held until the body returns; the handle keeps the job registered after that.
+        let _reg = reg;
         let outcome = if token.is_cancelled() {
             Err(JobError::Cancelled)
         } else {
@@ -331,6 +397,14 @@ fn guarded<T: Send + 'static>(
         let _ = tx.send(outcome);
         finished.store(true, Ordering::Release);
     })
+}
+
+/// Whether a finished job's value may be handed to its waiter (see [`Registration::deliver`]).
+fn deliverable(reg: Option<&Registration>, token: &CancelToken) -> bool {
+    match reg {
+        Some(reg) => reg.deliver(token),
+        None => !token.is_cancelled(),
+    }
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -350,6 +424,8 @@ pub struct JobHandle<T> {
     token: CancelToken,
     finished: Arc<AtomicBool>,
     rx: Option<oneshot::Receiver<Result<T, JobError>>>,
+    /// Keeps the finished job registered until its value is taken (or this handle dropped).
+    reg: Option<Arc<Registration>>,
     inner: Weak<Inner>,
 }
 
@@ -384,7 +460,10 @@ impl<T> JobHandle<T> {
         match rx.try_recv() {
             Ok(Some(outcome)) => {
                 self.rx = None;
-                outcome.ok()
+                let reg = self.reg.take();
+                outcome
+                    .ok()
+                    .filter(|_| deliverable(reg.as_deref(), &self.token))
             }
             Ok(None) => None,
             Err(_) => {
@@ -410,12 +489,23 @@ impl<T> JobHandle<T> {
 
 impl<T: Send + 'static> JobHandle<T> {
     /// Resolves to the result, or the reason there is none.
+    ///
+    /// A value produced by a job that was replaced or cancelled before it is taken here (even
+    /// after the job finished) resolves to [`JobError::Cancelled`]: the job stays registered
+    /// under its key and subject until this point.
     pub fn outcome(mut self) -> impl Future<Output = Result<T, JobError>> + Send + 'static {
         let rx = self.rx.take();
+        let reg = self.reg.take();
+        let token = self.token.clone();
         async move {
-            match rx {
+            let outcome = match rx {
                 Some(rx) => rx.await.unwrap_or(Err(JobError::Cancelled)),
                 None => Err(JobError::Cancelled),
+            };
+            match outcome {
+                Ok(value) if deliverable(reg.as_deref(), &token) => Ok(value),
+                Ok(_) => Err(JobError::Cancelled),
+                Err(e) => Err(e),
             }
         }
     }

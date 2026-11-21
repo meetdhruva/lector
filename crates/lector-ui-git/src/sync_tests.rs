@@ -499,3 +499,22 @@ fn credential_prompts_default_safely_mask_and_queue(cx: &mut TestAppContext) {
         Some(PromptReply::Cancel)
     );
 }
+
+/// Background work started by views runs on GPUI's test executor (lector-ui's `test-support`
+/// feature is on for this crate's tests), so `run_until_parked` drives it to completion.
+#[gpui::test]
+fn background_work_of_views_runs_on_the_test_executor(cx: &mut gpui::TestAppContext) {
+    use lector_ui::background::{background, JobKey, JobKind, Priority, Subject};
+    assert!(cx.update(|cx| lector_ui::background::is_test_dispatcher(cx)));
+    let test_thread = std::thread::current().id();
+    let task = cx.update(|cx| {
+        background(
+            cx,
+            JobKey::new(JobKind::DocumentOpen, Subject::View(1)),
+            Priority::Visible,
+            |_| std::thread::current().id(),
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.executor().block_test(task), Ok(test_thread));
+}

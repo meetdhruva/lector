@@ -6,7 +6,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use lector_base::thread::{spawn_named, ThreadKind};
@@ -37,6 +37,53 @@ pub(super) fn on_worker() -> bool {
     ON_WORKER.with(Cell::get)
 }
 
+/// Keeps a job registered under its key (so a newer job with the key, or cancelling its
+/// subject, still reaches it) until its result has been delivered or nobody can take it any
+/// more. Shared by the job's body (until it has run) and its handle (until the result is taken
+/// or the handle dropped); the entry goes when the last holder drops it, or at delivery.
+pub(super) struct Registration {
+    inner: Weak<Inner>,
+    key: JobKey,
+    id: u64,
+}
+
+impl Registration {
+    pub(super) fn new(inner: &Arc<Inner>, key: JobKey, id: u64) -> Arc<Registration> {
+        Arc::new(Registration {
+            inner: Arc::downgrade(inner),
+            key,
+            id,
+        })
+    }
+
+    /// Whether a finished job's value may be delivered now: it is still registered and its
+    /// token not cancelled. Checks and unregisters under the scheduler lock, so a replacement
+    /// or subject cancellation either happened before (not delivered) or after (delivered).
+    pub(super) fn deliver(&self, token: &CancelToken) -> bool {
+        let Some(inner) = self.inner.upgrade() else {
+            return !token.is_cancelled();
+        };
+        let mut st = inner.state.lock();
+        let present = st
+            .live
+            .get(&self.key)
+            .is_some_and(|e| e.iter().any(|(i, _)| *i == self.id));
+        unregister(&mut st, &self.key, self.id);
+        present && !token.is_cancelled()
+    }
+}
+
+/// Never drop a job body (it holds a `Registration`) while holding the scheduler lock: this
+/// takes it.
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            let mut st = inner.state.lock();
+            unregister(&mut st, &self.key, self.id);
+        }
+    }
+}
+
 pub(super) struct Job {
     pub(super) id: u64,
     pub(super) key: JobKey,
@@ -59,6 +106,7 @@ impl Job {
 }
 
 struct Debounced {
+    id: u64,
     deadline: Instant,
     prio: Priority,
     token: CancelToken,
@@ -68,11 +116,48 @@ struct Debounced {
 type Queues = [VecDeque<Job>; 4];
 
 /// A lane whose threads start on demand: the blocking lane (bounded) and the guaranteed lane.
+///
+/// Capacity accounting (all under the scheduler lock): `waiters` workers sit in the lane's
+/// condvar; each is either unclaimed (`idle`) or claimed by a submitted job (`wakeups`), so
+/// `idle + wakeups == waiters` always. A submission claims an unclaimed waiter (`idle -= 1`,
+/// `wakeups += 1`, notify) or starts a new thread (up to the bound), so every queued job has a
+/// claimed waiter or a starting thread of its own, unless the bounded lane is at its bound.
+/// A waiter that leaves the condvar (woken, spuriously or by timeout) consumes a claim if
+/// there is one, else leaves `idle`; it then takes the next queued job, if any.
 #[derive(Default)]
 struct Elastic {
     queues: Queues,
     threads: usize,
+    /// Waiting workers not claimed by a job.
     idle: usize,
+    /// Waiting workers claimed by a submitted job and notified, not yet left the condvar.
+    wakeups: usize,
+}
+
+impl Elastic {
+    /// Takes capacity for one more queued job: `Some(true)` = start a thread, `Some(false)` = a
+    /// waiter was claimed (notify one), `None` = at the bound (the job waits for a worker).
+    fn claim(&mut self, bound: Option<usize>) -> Option<bool> {
+        if self.idle > 0 {
+            self.idle -= 1;
+            self.wakeups += 1;
+            Some(false)
+        } else if bound.is_none_or(|max| self.threads < max) {
+            self.threads += 1;
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// A waiter left the condvar.
+    fn leave_wait(&mut self) {
+        if self.wakeups > 0 {
+            self.wakeups -= 1;
+        } else {
+            self.idle -= 1;
+        }
+    }
 }
 
 /// Index of a lane in `State::elastic` / `Inner::elastic_cv`.
@@ -246,7 +331,9 @@ impl Inner {
     }
 
     /// Registers `job` under its key (cancelling what it replaces) and queues it on its lane.
-    pub(super) fn submit(self: &Arc<Self>, prio: Priority, token: CancelToken, job: Job) {
+    /// Returns `false` when it was refused (after shutdown, or a non-write while quitting): its
+    /// body has then run with a cancelled token.
+    pub(super) fn submit(self: &Arc<Self>, prio: Priority, token: CancelToken, job: Job) -> bool {
         let mut st = self.state.lock();
         let refused = st.shutdown || (st.quitting && job.key.kind.at_quit() == AtQuit::Cancel);
         if refused {
@@ -254,7 +341,7 @@ impl Inner {
             token.cancel();
             // The body sees the cancelled token and only reports `Cancelled` to its waiter.
             (job.body)();
-            return;
+            return false;
         }
         register(&mut st, &job.key, job.id, &token);
         if let Some(runner) = self.runner.clone() {
@@ -269,7 +356,7 @@ impl Inner {
                     me.finish(id, &key);
                 }),
             );
-            return;
+            return true;
         }
         let quitting = st.quitting;
         match job.key.kind.lane() {
@@ -290,26 +377,27 @@ impl Inner {
                 let bound = (ix == BLOCKING).then_some(self.blocking_max);
                 let e = &mut st.elastic[ix];
                 e.queues[prio as usize].push_back(job);
-                let grow = e.idle == 0 && bound.is_none_or(|max| e.threads < max);
-                if grow {
-                    e.threads += 1;
-                    if ix == GUARANTEED && e.threads > GUARANTEED_WARN {
-                        tracing::warn!("{} guaranteed-lane threads at once", e.threads);
-                    }
+                let claim = e.claim(bound);
+                if ix == GUARANTEED && e.threads > GUARANTEED_WARN && claim == Some(true) {
+                    tracing::warn!("{} guaranteed-lane threads at once", e.threads);
                 }
                 drop(st);
-                if grow {
-                    self.grow(ix);
-                } else {
-                    self.elastic_cv[ix].notify_one();
+                match claim {
+                    Some(true) => self.grow(ix),
+                    Some(false) => {
+                        self.elastic_cv[ix].notify_one();
+                    }
                     // A full blocking lane: the timer logs jobs that wait long for a slot.
-                    self.timer_cv.notify_all();
+                    None => {
+                        self.timer_cv.notify_all();
+                    }
                 }
             }
         }
         if quitting {
             self.drain_cv.notify_all();
         }
+        true
     }
 
     fn grow(self: &Arc<Self>, ix: usize) {
@@ -333,8 +421,10 @@ impl Inner {
     }
 
     /// Runs `body` once, `delay` after the last call with `key` (keyed like a job when it runs).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn debounce(
         self: &Arc<Self>,
+        id: u64,
         key: JobKey,
         delay: Duration,
         prio: Priority,
@@ -344,7 +434,6 @@ impl Inner {
         if let Some(runner) = self.runner.clone() {
             // Under a runner the delay is the runner's (GPUI's fake clock in tests): the job is
             // registered now, so a newer call cancels this one while it waits.
-            let id = self.next_id();
             let mut st = self.state.lock();
             if st.shutdown || st.quitting {
                 return;
@@ -366,26 +455,29 @@ impl Inner {
         if st.shutdown || st.quitting {
             return;
         }
-        if let Some(old) = st.debounced.insert(
+        let old = st.debounced.insert(
             key,
             Debounced {
+                id,
                 deadline: Instant::now() + delay,
                 prio,
                 token,
                 body,
             },
-        ) {
+        );
+        // Dropped after the lock: a body holds a `Registration`, whose drop takes the lock.
+        drop(st);
+        if let Some(old) = old {
             old.token.cancel();
         }
-        drop(st);
         self.timer_cv.notify_all();
     }
 
     /// Bookkeeping after a job ran (or was handed back by the runner).
-    fn finish(&self, id: u64, key: &JobKey) {
+    /// The job's registration under its key ends with its [`Registration`], not here.
+    fn finish(&self, id: u64, _key: &JobKey) {
         let mut st = self.state.lock();
         st.active.remove(&id);
-        unregister(&mut st, key, id);
         drop(st);
         self.progress_cv.notify_all();
     }
@@ -444,7 +536,7 @@ impl Inner {
                         .wait_for(&mut st, BLOCKING_IDLE)
                         .timed_out();
                     let e = &mut st.elastic[ix];
-                    e.idle -= 1;
+                    e.leave_wait();
                     if timed_out && e.queues.iter().all(VecDeque::is_empty) {
                         e.threads -= 1;
                         return;
@@ -475,8 +567,7 @@ impl Inner {
                     .collect();
                 drop(st);
                 for (key, d) in jobs {
-                    let id = self.next_id();
-                    self.submit(d.prio, d.token, Job::new(id, key, d.body));
+                    let _ = self.submit(d.prio, d.token, Job::new(d.id, key, d.body));
                 }
                 st = self.state.lock();
                 continue;
@@ -564,12 +655,10 @@ impl Inner {
             }
         });
         let keys: Vec<JobKey> = st.debounced.keys().filter(|k| hit(k)).cloned().collect();
-        for k in keys {
-            if let Some(d) = st.debounced.remove(&k) {
-                tokens.push(d.token);
-            }
-        }
+        let removed: Vec<Debounced> = keys.iter().filter_map(|k| st.debounced.remove(k)).collect();
+        // Bodies are dropped after the lock (their `Registration` takes it).
         drop(st);
+        tokens.extend(removed.into_iter().map(|d| d.token));
         for t in &tokens {
             t.cancel();
         }
@@ -741,13 +830,28 @@ impl Inner {
         for q in st.all_queues() {
             dropped.extend(q.drain(..));
         }
-        let mut tokens: Vec<CancelToken> = st
-            .live
-            .drain()
-            .flat_map(|(_, e)| e.into_iter().map(|(_, t)| t))
+        // Cancel what is queued or running. A job that already finished keeps its token and
+        // registration until its waiter takes the result (a write that completed during the
+        // quit drain still reports success).
+        let unfinished: std::collections::HashSet<u64> = dropped
+            .iter()
+            .map(|j| j.id)
+            .chain(st.active.keys().copied())
             .collect();
-        tokens.extend(st.debounced.drain().map(|(_, d)| d.token));
+        let mut tokens: Vec<CancelToken> = Vec::new();
+        st.live.retain(|_, entries| {
+            entries.retain(|(id, t)| {
+                let cancel = unfinished.contains(id);
+                if cancel {
+                    tokens.push(t.clone());
+                }
+                !cancel
+            });
+            !entries.is_empty()
+        });
+        let debounced: Vec<Debounced> = st.debounced.drain().map(|(_, d)| d).collect();
         drop(guard);
+        tokens.extend(debounced.into_iter().map(|d| d.token));
         for t in &tokens {
             t.cancel();
         }

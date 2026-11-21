@@ -725,3 +725,205 @@ fn a_compute_job_waits_for_a_blocking_job_instead_of_running_it_inline() {
     let ran_on = outer.wait().flatten().expect("thread name");
     assert!(ran_on.contains("blocking"), "{ran_on}");
 }
+
+/// One idle guaranteed-lane worker, then `n` jobs submitted in a tight loop that each block
+/// until all `n` have started: every one must get a thread of its own.
+fn burst_on_an_idle_lane(kind: JobKind, n: usize) -> Result<(), String> {
+    let s = Scheduler::new(1);
+    // Leave exactly one idle worker on the lane.
+    s.spawn(key(kind, 0), Priority::Visible, |_| ()).wait();
+    thread::sleep(Duration::from_millis(5));
+    let started = Arc::new(AtomicU64::new(0));
+    let (release_tx, release_rx) = crossbeam_like();
+    let handles: Vec<_> = (0..n)
+        .map(|i| {
+            let (started, rx) = (started.clone(), release_rx.clone());
+            s.spawn(key(kind, 1 + i as u64), Priority::Visible, move |_| {
+                started.fetch_add(1, Ordering::SeqCst);
+                let _ = rx.lock().recv_timeout(SECS5);
+            })
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while started.load(Ordering::SeqCst) < n as u64 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    let got = started.load(Ordering::SeqCst);
+    for _ in 0..n {
+        let _ = release_tx.send(());
+    }
+    for h in handles {
+        h.wait();
+    }
+    if got == n as u64 {
+        Ok(())
+    } else {
+        Err(format!("{got} of {n} {kind:?} jobs started"))
+    }
+}
+
+#[test]
+fn a_burst_of_guaranteed_jobs_all_start_while_one_worker_is_idle() {
+    burst_on_an_idle_lane(JobKind::AgentControl, 6).unwrap();
+}
+
+#[test]
+fn a_burst_on_the_blocking_lane_uses_its_bound() {
+    burst_on_an_idle_lane(JobKind::ForgeRead, 6).unwrap();
+}
+
+#[test]
+fn guaranteed_lane_bursts_never_strand_a_job_stress() {
+    for round in 0..200 {
+        if let Err(e) = burst_on_an_idle_lane(JobKind::AgentRequest, 4) {
+            panic!("round {round}: {e}");
+        }
+    }
+}
+
+/// Waits until the job has run (its value is sent, not yet taken).
+fn until_finished<T>(h: &JobHandle<T>) {
+    let end = Instant::now() + SECS5;
+    while !h.is_finished() {
+        assert!(Instant::now() < end, "job did not finish");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn a_finished_undelivered_result_is_replaced_by_a_newer_job_with_its_key() {
+    let s = Scheduler::new(1);
+    let a = s.spawn(key(JobKind::LspDefinitions, 1), Priority::Visible, |_| {
+        "old"
+    });
+    until_finished(&a);
+    // Before anyone takes A's value, a newer lookup with the same key starts.
+    let b = s.spawn(key(JobKind::LspDefinitions, 1), Priority::Visible, |_| {
+        "new"
+    });
+    assert_eq!(
+        a.wait_outcome(),
+        Err(JobError::Cancelled),
+        "A's value is stale"
+    );
+    assert_eq!(b.wait(), Some("new"));
+}
+
+#[test]
+fn a_finished_undelivered_result_is_cancelled_with_its_subject() {
+    let s = Scheduler::new(1);
+    let a = s.spawn(key(JobKind::GitLog, 7), Priority::Visible, |_| 1);
+    until_finished(&a);
+    assert_eq!(s.cancel_subject(&Subject::View(7)), 1);
+    assert_eq!(a.wait_outcome(), Err(JobError::Cancelled));
+}
+
+#[test]
+fn registrations_end_with_delivery_or_when_nobody_waits() {
+    let s = Scheduler::new(2);
+    // Delivered.
+    let a = s.spawn(key(JobKind::GitLog, 1), Priority::Visible, |_| 1);
+    assert_eq!(a.wait(), Some(1));
+    // Handle dropped before the job ran (nobody waits).
+    drop(s.spawn(key(JobKind::GitLog, 2), Priority::Visible, |_| 2));
+    // Handle dropped after the job finished, value never taken.
+    let c = s.spawn(key(JobKind::GitLog, 3), Priority::Visible, |_| 3);
+    until_finished(&c);
+    drop(c);
+    // Replaced while undelivered, then dropped.
+    let d = s.spawn(key(JobKind::GitLog, 4), Priority::Visible, |_| 4);
+    until_finished(&d);
+    let e = s.spawn(key(JobKind::GitLog, 4), Priority::Visible, |_| 5);
+    drop(d);
+    assert_eq!(e.wait(), Some(5));
+    // A debounced job and a task-runner task.
+    s.debounce(
+        key(JobKind::GitRefresh, 5),
+        Duration::from_millis(5),
+        Priority::Idle,
+        |_| (),
+    );
+    let run = s.task_runner(key(JobKind::AgentRequest, 6), Priority::Visible);
+    assert!(run(Box::new(|| ())).is_ok());
+    assert!(s.wait_idle(SECS5));
+    assert_eq!(s.live_jobs(), 0, "no registration left behind");
+}
+
+#[test]
+fn a_replaced_undelivered_job_does_not_cancel_its_running_successor() {
+    let s = Scheduler::new(2);
+    let a = s.spawn(key(JobKind::GitChangeset, 1), Priority::Visible, |_| 1);
+    until_finished(&a);
+    let (tx, rx) = mpsc::channel();
+    let b = s.spawn(
+        key(JobKind::GitChangeset, 1),
+        Priority::Visible,
+        move |tok| {
+            tx.send(()).ok();
+            thread::sleep(Duration::from_millis(30));
+            !tok.is_cancelled()
+        },
+    );
+    rx.recv_timeout(SECS5).unwrap();
+    // A's waiter goes away while B runs: B is untouched.
+    drop(a);
+    assert_eq!(b.wait(), Some(true));
+}
+
+#[test]
+fn a_task_runner_hands_back_what_the_scheduler_refuses() {
+    let s = Scheduler::new(1);
+    assert!(s.shutdown(SECS5));
+    for kind in [
+        JobKind::TerminalKill,
+        JobKind::AskpassPrompt,
+        JobKind::LspLaunch,
+    ] {
+        let run = s.task_runner(key(kind, 1), Priority::Visible);
+        let ran = Arc::new(AtomicBool::new(false));
+        let r = ran.clone();
+        let back = run(Box::new(move || r.store(true, Ordering::SeqCst)));
+        let task = back.expect_err("refused after shutdown: handed back");
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "{kind:?}: not run by the runner"
+        );
+        task();
+        assert!(ran.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn while_quitting_cleanup_tasks_are_still_taken_and_run() {
+    let s = Scheduler::new(1);
+    s.begin_quit();
+    let (tx, rx) = mpsc::channel();
+    let run = s.task_runner(key(JobKind::TerminalKill, 1), Priority::Background);
+    assert!(run(Box::new(move || tx.send(()).unwrap())).is_ok());
+    rx.recv_timeout(SECS5)
+        .expect("the kill escalation ran during the quit");
+    // A read-type task is refused while quitting and handed back.
+    let read = s.task_runner(key(JobKind::LspSync, 1), Priority::Background);
+    assert!(read(Box::new(|| ())).is_err());
+}
+
+#[test]
+fn a_cleanup_task_taken_but_dropped_unrun_still_runs() {
+    let held: Arc<Mutex<Vec<Body>>> = Arc::default();
+    let h = held.clone();
+    let s = Scheduler::with_runner(Arc::new(move |_, body| h.lock().push(body)));
+    let ran_kill = Arc::new(AtomicBool::new(false));
+    let ran_prompt = Arc::new(AtomicBool::new(false));
+    let (k, p) = (ran_kill.clone(), ran_prompt.clone());
+    let kill = s.task_runner(key(JobKind::TerminalKill, 1), Priority::Background);
+    let prompt = s.task_runner(key(JobKind::AskpassPrompt, 1), Priority::Visible);
+    assert!(kill(Box::new(move || k.store(true, Ordering::SeqCst))).is_ok());
+    assert!(prompt(Box::new(move || p.store(true, Ordering::SeqCst))).is_ok());
+    // The jobs are dropped without running (e.g. their executor went away).
+    held.lock().clear();
+    assert!(ran_kill.load(Ordering::SeqCst), "cleanup is never lost");
+    assert!(
+        !ran_prompt.load(Ordering::SeqCst),
+        "a cancelled prompt is just closed"
+    );
+}

@@ -22,6 +22,9 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The background bridge runs view jobs on GPUI's test executor only with this feature; without
+# it they run on real scheduler threads and `run_until_parked` does not wait for them.
+lector-ui = { workspace = true, features = ["test-support"] }
 dunce.workspace = true
 lector-config = { workspace = true, features = ["test-support"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
