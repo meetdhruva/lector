@@ -95,17 +95,21 @@ impl SourceFile {
     }
 }
 
-/// Test-only by path: `tests/`, `benches/`, `examples/`, `*_tests.rs`, `tests.rs`, `test_support*`.
+/// Test-only by path, which is deliberately narrow (fail closed: a file that is merely *named*
+/// like a test file is production unless a `#[cfg(test)] mod x;` declaration or an inner
+/// `#![cfg(test)]` says otherwise). Only Cargo's own non-shipping targets qualify:
+/// `crates/<name>/tests/`, `crates/<name>/benches/` and `crates/<name>/examples/`.
 pub fn is_test_path(path: &str) -> bool {
-    let mut parts: Vec<&str> = path.split('/').collect();
-    let file = parts.pop().unwrap_or("");
-    if parts
-        .iter()
-        .any(|d| matches!(*d, "tests" | "benches" | "examples") || d.starts_with("test_support"))
-    {
-        return true;
-    }
-    file == "tests.rs" || file.ends_with("_tests.rs") || file.starts_with("test_support")
+    let mut parts = path.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (
+            Some("crates"),
+            Some(_),
+            Some("tests" | "benches" | "examples"),
+            Some(_)
+        )
+    )
 }
 
 /// Mark files that a `#[cfg(test)] mod name;` declaration points at (and everything below them).
@@ -198,22 +202,27 @@ mod tests {
     fn test_paths() {
         for p in [
             "crates/a/tests/x.rs",
+            "crates/a/tests/common/mod.rs",
             "crates/a/benches/b.rs",
             "crates/a/examples/e.rs",
+        ] {
+            assert!(is_test_path(p), "{p}");
+        }
+        // Named like tests but not Cargo test targets: production unless declared otherwise.
+        for p in [
+            "crates/a/src/lib.rs",
             "crates/a/src/foo_tests.rs",
             "crates/a/src/tests.rs",
             "crates/a/src/test_support.rs",
             "crates/a/src/test_support/mod.rs",
             "crates/a/src/health/tests.rs",
-        ] {
-            assert!(is_test_path(p), "{p}");
-        }
-        for p in [
-            "crates/a/src/lib.rs",
+            "crates/a/src/tests/x.rs",
+            "crates/a/src/examples/x.rs",
             "crates/a/src/testing.rs",
-            "crates/a/src/contests.rs",
-            "crates/attests/src/lib.rs",
             "crates/a/build.rs",
+            "crates/a/tests",
+            "tests/x.rs",
+            "other/a/tests/x.rs",
         ] {
             assert!(!is_test_path(p), "{p}");
         }

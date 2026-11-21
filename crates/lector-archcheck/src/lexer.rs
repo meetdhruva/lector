@@ -3,17 +3,37 @@
 //! [`scan`] turns source text into tokens with comments removed (line comments, nested block
 //! comments) and string, byte-string, raw-string and char literals kept as single opaque tokens,
 //! so a rule that looks for `thread::spawn` can never be fooled by a comment or a string that
-//! mentions it. It also marks which tokens sit inside test-only items:
+//! mentions it. It also marks which tokens sit inside test-only regions:
 //!
-//! * an item following `#[cfg(test)]` (also `cfg(all(test, ...))`), by brace matching,
-//! * a function carrying `#[test]`, `#[gpui::test]`, `#[tokio::test]`, `#[bench]` and the like,
-//! * a whole file that has `#![cfg(test)]` at its root; inside an inline module or block the
+//! * the construct after `#[cfg(test)]` (also `cfg(all(test, ...))`; `cfg_attr(test, ...)` and
+//!   `cfg(any(test, ...))` are not test-only), wherever an attribute may stand: item, field,
+//!   enum variant, statement, block, match arm, parameter, generic parameter, expression
+//!   element, impl/trait/extern member, macro invocation. The region covers the attribute and
+//!   the construct it decorates and ends at the FIRST of, at the attribute's own nesting depth: the
+//!   close of its body block (inclusive), a `;` (inclusive), a `,` (inclusive) or the closing
+//!   delimiter of the enclosing group (exclusive). Commas inside `(..)`, `[..]` and the generic
+//!   arguments of a type never end it,
+//! * a function carrying `#[test]`, `#[gpui::test]`, `#[tokio::test]`, `#[bench]` and the like
+//!   (same end rule),
+//! * a whole file that has `#![cfg(test)]` before its first item; inside an inline module the
 //!   inner attribute marks only that module's braces,
 //! * `#[cfg(test)] mod name;` declarations, reported in [`Scanned::test_mod_decls`] so the
-//!   caller can mark the file they point at as test-only.
+//!   caller can mark the file they point at as test-only (not when `#[path]` is present).
+//!
+//! # Fail-closed invariant
+//!
+//! A wrongly "test-only" token silently disables every guardrail for it, while a wrongly
+//! "production" token only produces a violation a reviewer can read. So whenever this module is
+//! unsure where a test-only region ends (unbalanced or mis-nested brackets, end of input before
+//! a terminator, an inner attribute in an unexpected place, a `#[path]` redirect), the code in
+//! question is classified as PRODUCTION: the region is dropped, never extended. Where the end
+//! rule is ambiguous (a comma that may or may not sit in generic arguments, a `>` that may be a
+//! comparison) it errs towards ending early. The same holds for [`crate::source`], which only
+//! trusts Cargo's `tests/`, `benches/` and `examples/` target directories by path.
 //!
 //! Limits: macro bodies are tokens like any other (no expansion); `#[path = "..."]` is not
-//! followed; `{` inside const-generic arguments of a signature ends an item early.
+//! followed; `{` inside const-generic arguments of a signature ends an item early; `#[derive]`
+//! style attributes that precede the `#[cfg(test)]` one stay production.
 
 /// What a [`Token`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,9 +106,11 @@ impl Scanned {
 /// Lex `src` and classify test-only regions.
 pub fn scan(src: &str) -> Scanned {
     let (tokens, comments) = lex(src);
+    let matching = match_brackets(src, &tokens);
     let mut c = Classifier {
         src,
         toks: &tokens,
+        matching,
         in_test: vec![false; tokens.len()],
         test_mods: Vec::new(),
         whole: false,
@@ -369,9 +391,40 @@ fn prefixed_literal(src: &str, i: usize, line: &mut u32) -> Option<(TokKind, usi
     }
 }
 
+/// Keywords that start an item whose header may contain depth-0 commas (generics, `where`
+/// clauses), so a comma never ends such an item.
+const COMMA_TOLERANT_ITEMS: [&str; 8] = [
+    "fn",
+    "struct",
+    "enum",
+    "union",
+    "trait",
+    "impl",
+    "mod",
+    "macro_rules",
+];
+
+/// Keywords whose items are one statement ending at `;` and may contain braces and commas
+/// (`use a::{b, c};`, `let x: Map<A, B> = Foo { .. };`).
+const STATEMENT_ITEMS: [&str; 5] = ["use", "type", "static", "let", "const"];
+
+/// Tokens that may appear inside the generic arguments of a type.
+fn is_type_token(kind: TokKind, text: &str) -> bool {
+    match kind {
+        TokKind::Ident | TokKind::Lifetime | TokKind::Num | TokKind::Str | TokKind::Char => true,
+        TokKind::Punct => matches!(
+            text,
+            "::" | "," | "<" | ">" | "&" | "*" | "+" | "?" | "!" | "->" | "=" | "-" | ":"
+        ),
+    }
+}
+
 struct Classifier<'a> {
     src: &'a str,
     toks: &'a [Token],
+    /// `matching[i]` is the index of the closer of the `(`, `[` or `{` at `i`, only when the
+    /// whole bracket structure around it is balanced and properly nested.
+    matching: Vec<Option<usize>>,
     in_test: Vec<bool>,
     test_mods: Vec<String>,
     whole: bool,
@@ -384,6 +437,42 @@ enum Attr {
     Other,
 }
 
+/// How the extent of an attributed construct is decided.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Shape {
+    /// `fn`, `struct`, `impl`, `mod`...: ends at its body block or `;`; commas are ignored.
+    Item,
+    /// `use`, `let`, `const`, `type`, `static`: ends at `;`; braces and commas are ignored.
+    Statement,
+    /// Field, variant, parameter, argument, match arm, expression statement, macro call:
+    /// ends at a body block, `;` or `,`.
+    Element,
+}
+
+/// Pair every `(`, `[` and `{` with its closer. An opener whose structure is unbalanced or
+/// mis-nested gets `None`, so nothing derived from it can reach past an unknown boundary.
+fn match_brackets(src: &str, toks: &[Token]) -> Vec<Option<usize>> {
+    let mut out = vec![None; toks.len()];
+    let mut stack: Vec<(usize, u8)> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Punct {
+            continue;
+        }
+        match src.as_bytes().get(t.start).copied() {
+            Some(b'(') if t.end - t.start == 1 => stack.push((i, b')')),
+            Some(b'[') if t.end - t.start == 1 => stack.push((i, b']')),
+            Some(b'{') if t.end - t.start == 1 => stack.push((i, b'}')),
+            Some(c @ (b')' | b']' | b'}')) if t.end - t.start == 1 => match stack.pop() {
+                Some((open, want)) if want == c => out[open] = Some(i),
+                // Mis-nested: forget every open bracket, their extents are unknown.
+                _ => stack.clear(),
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
 impl Classifier<'_> {
     fn t(&self, i: usize) -> &str {
         match self.toks.get(i) {
@@ -392,77 +481,89 @@ impl Classifier<'_> {
         }
     }
 
-    /// Index of the bracket closing the one at `open` (the last token when unbalanced).
-    fn close_of(&self, open: usize) -> usize {
-        let (o, c) = match self.t(open) {
-            "(" => ("(", ")"),
-            "[" => ("[", "]"),
-            _ => ("{", "}"),
-        };
-        let mut depth = 0usize;
-        let mut k = open;
-        while k < self.toks.len() {
-            let s = self.t(k);
-            if s == o {
-                depth += 1;
-            } else if s == c {
-                depth -= 1;
-                if depth == 0 {
-                    return k;
-                }
+    /// Index of the bracket closing the one at `open`; `None` when the structure is unbalanced.
+    fn matching(&self, open: usize) -> Option<usize> {
+        self.matching.get(open).copied().flatten()
+    }
+
+    fn mark(&mut self, from: usize, to: usize) {
+        let to = to.min(self.in_test.len());
+        if from < to {
+            for flag in &mut self.in_test[from..to] {
+                *flag = true;
             }
-            k += 1;
         }
-        self.toks.len().saturating_sub(1)
     }
 
     fn run(&mut self) {
         let n = self.toks.len();
         let mut i = 0;
-        // Indices of the `{` tokens that are still open: an inner attribute applies to the
-        // innermost one (or to the whole file when there is none).
-        let mut open_braces: Vec<usize> = Vec::new();
+        // The `{` tokens that are still open, each with "only inner attributes seen so far":
+        // an inner attribute counts only before the first item of its scope, and applies to
+        // the innermost open brace (or to the whole file when there is none).
+        let mut open_braces: Vec<(usize, bool)> = Vec::new();
+        let mut file_leading = true;
         while i < n {
             if self.t(i) != "#" {
-                match self.t(i) {
-                    "{" => open_braces.push(i),
-                    "}" => {
-                        open_braces.pop();
-                    }
-                    _ => {}
+                let is_open = self.t(i) == "{";
+                if self.t(i) == "}" {
+                    open_braces.pop();
+                }
+                // Any other token is the start of an item: inner attributes are over.
+                match open_braces.last_mut() {
+                    Some(scope) => scope.1 = false,
+                    None => file_leading = false,
+                }
+                if is_open {
+                    open_braces.push((i, true));
                 }
                 i += 1;
                 continue;
             }
             let inner = self.t(i + 1) == "!";
             let open = if inner { i + 2 } else { i + 1 };
-            if self.t(open) != "[" {
-                i += 1;
-                continue;
-            }
-            let close = self.close_of(open);
+            let close = match (self.t(open) == "[", self.matching(open)) {
+                (true, Some(close)) => close,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
             let verdict = self.attr(open + 1, close);
-            if verdict == Attr::Other || inner {
-                if inner && verdict == Attr::CfgTest {
+            if inner {
+                if verdict == Attr::CfgTest {
                     match open_braces.last() {
-                        None => self.whole = true,
-                        Some(&open) => {
-                            let close = self.close_of(open);
-                            for flag in &mut self.in_test[open..=close.min(n - 1)] {
-                                *flag = true;
+                        None if file_leading => self.whole = true,
+                        Some(&(brace, true)) => {
+                            if let Some(end) = self.matching(brace) {
+                                self.mark(brace, end + 1);
                             }
                         }
+                        // Not before the first item of its scope: unexpected, so production.
+                        _ => {}
                     }
                 }
                 i = close + 1;
                 continue;
             }
-            let at_root = open_braces.is_empty();
-            let end = self.item_end(close + 1, verdict == Attr::CfgTest && at_root);
-            for flag in &mut self.in_test[i..=end.min(n - 1)] {
-                *flag = true;
+            // An outer attribute is the start of an item (or field, statement...) in its scope.
+            match open_braces.last_mut() {
+                Some(scope) => scope.1 = false,
+                None => file_leading = false,
             }
-            i = end + 1;
+            if verdict == Attr::Other {
+                i = close + 1;
+                continue;
+            }
+            let at_root = open_braces.is_empty();
+            match self.region_end(close + 1, verdict == Attr::CfgTest && at_root) {
+                Some(end) => {
+                    self.mark(i, end);
+                    i = end.max(close + 1);
+                }
+                // Unknown extent: fail closed, everything after the attribute is production.
+                None => i = close + 1,
+            }
         }
     }
 
@@ -529,19 +630,29 @@ impl Classifier<'_> {
         }
     }
 
-    /// Index of the last token of the item that starts at `start` (attributes may precede it).
-    /// `record_mod` is true for a `#[cfg(test)]` item at file level, whose `mod x;` declaration
-    /// then names a test-only file (declarations inside inline modules resolve to other paths
-    /// and are not followed).
-    fn item_end(&mut self, start: usize, record_mod: bool) -> usize {
+    /// The one rule for where an attributed region ends. `start` is the first token after the
+    /// attribute; the result is the exclusive end of the region, or `None` when the extent is
+    /// unknown (the caller then marks nothing: fail closed).
+    ///
+    /// The region is the construct the attribute decorates, and it ends at the FIRST of, at the
+    /// attribute's own nesting depth: the close of its body brace block (inclusive), a `;`
+    /// (inclusive), a `,` (inclusive) or the closing delimiter of the enclosing group
+    /// (exclusive). Commas inside `(..)`, `[..]` and generic arguments `<..>` never count, and
+    /// stacked attributes are skipped. `record_mod` is true for a `#[cfg(test)]` item at file
+    /// level, whose `mod x;` declaration then names a test-only file.
+    fn region_end(&mut self, start: usize, record_mod: bool) -> Option<usize> {
         let n = self.toks.len();
         let mut k = start;
+        let mut has_path_attr = false;
+        // Stacked attributes belong to the same construct.
         while self.t(k) == "#" {
             let open = if self.t(k + 1) == "!" { k + 2 } else { k + 1 };
             if self.t(open) != "[" {
                 break;
             }
-            k = self.close_of(open) + 1;
+            let close = self.matching(open)?;
+            has_path_attr |= self.t(open + 1) == "path";
+            k = close + 1;
         }
         let mut m = k;
         loop {
@@ -549,7 +660,7 @@ impl Classifier<'_> {
                 "pub" => {
                     m += 1;
                     if self.t(m) == "(" {
-                        m = self.close_of(m) + 1;
+                        m = self.matching(m)? + 1;
                     }
                 }
                 "async" | "unsafe" | "default" => m += 1,
@@ -565,318 +676,99 @@ impl Classifier<'_> {
         }
         let kw = self.t(m).to_string();
         if kw == "mod" && self.t(m + 2) == ";" {
-            if record_mod {
+            // `#[path = "..."]` redirects the file: we cannot name it, so do not record it.
+            if record_mod && !has_path_attr {
                 let name = self.t(m + 1).to_string();
                 self.test_mods.push(name);
             }
-            return m + 2;
+            return Some(m + 3);
         }
-        let statement_like = matches!(kw.as_str(), "use" | "type" | "static" | "let" | "const");
+        let shape = if STATEMENT_ITEMS.contains(&kw.as_str()) {
+            Shape::Statement
+        } else if COMMA_TOLERANT_ITEMS.contains(&kw.as_str()) {
+            Shape::Item
+        } else {
+            Shape::Element
+        };
         let mut p = k;
         while p < n {
             match self.t(p) {
-                "(" | "[" => p = self.close_of(p) + 1,
+                "(" | "[" => p = self.matching(p)? + 1,
                 "{" => {
-                    let close = self.close_of(p);
-                    if !statement_like {
-                        return close;
+                    let close = self.matching(p)?;
+                    if shape == Shape::Statement {
+                        p = close + 1;
+                        continue;
                     }
-                    p = close + 1;
+                    let next = self.t(close + 1);
+                    // A pattern or `if` expression continues after its block.
+                    if shape == Shape::Element && matches!(next, "=>" | "else") {
+                        p = close + 1;
+                        continue;
+                    }
+                    let mut end = close + 1;
+                    if shape == Shape::Element && next == "," {
+                        end += 1;
+                    }
+                    return Some(end);
                 }
-                ";" => return p,
+                ";" => return Some(p + 1),
+                "," if shape == Shape::Element => return Some(p + 1),
+                // A closer of the enclosing group; a lone `>` closes generic parameters
+                // (`<A, #[cfg(test)] B>`) or is a comparison, where ending is still safe.
+                ")" | "]" | "}" => return Some(p),
+                ">" if shape == Shape::Element => return Some(p),
+                "<" if shape == Shape::Element => p = self.generic_args_end(p).unwrap_or(p + 1),
                 _ => p += 1,
             }
         }
-        n.saturating_sub(1)
+        // End of input without a terminator: unknown extent.
+        None
+    }
+
+    /// If the `<` at `open` starts generic arguments of a type (`Map<K, V>`), the index just
+    /// past the matching `>`. Anything doubtful (a comparison, a stray `<`) gives `None`, which
+    /// makes the caller treat the `<` as an ordinary token: commas after it then end the region
+    /// early, which only ever classifies more code as production.
+    fn generic_args_end(&self, open: usize) -> Option<usize> {
+        let prev = self.toks.get(open.checked_sub(1)?)?;
+        if prev.kind != TokKind::Ident && self.t(open - 1) != "::" {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut k = open;
+        while k < self.toks.len() {
+            match self.t(k) {
+                "<" => depth += 1,
+                ">" => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                "(" | "[" => {
+                    k = self.matching(k)?;
+                }
+                _ => {
+                    let tok = self.toks.get(k)?;
+                    if !is_type_token(tok.kind, self.t(k)) {
+                        return None;
+                    }
+                }
+            }
+            k += 1;
+        }
+        if k >= self.toks.len() {
+            return None;
+        }
+        // What follows a type: a separator, a closer, a bound, a path, or a `where` clause.
+        let follows_a_type = matches!(
+            self.t(k + 1),
+            "," | ";" | "=" | ")" | "]" | "}" | ">" | "+" | "::" | "where"
+        );
+        follows_a_type.then_some(k + 1)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn kinds(src: &str) -> Vec<(TokKind, String)> {
-        let s = scan(src);
-        s.tokens
-            .iter()
-            .map(|t| (t.kind, src[t.start..t.end].to_string()))
-            .collect()
-    }
-
-    fn texts(src: &str) -> Vec<String> {
-        kinds(src).into_iter().map(|(_, t)| t).collect()
-    }
-
-    /// Texts of the idents that are outside test regions.
-    fn prod_idents(src: &str) -> Vec<String> {
-        let s = scan(src);
-        (0..s.tokens.len())
-            .filter(|i| !s.in_test[*i] && s.tokens[*i].kind == TokKind::Ident)
-            .map(|i| s.text(src, i).to_string())
-            .collect()
-    }
-
-    #[test]
-    fn line_comments_are_dropped() {
-        let t = texts("a // thread::spawn(\nb /// doc thread::spawn\nc //! x\n");
-        assert_eq!(t, ["a", "b", "c"]);
-    }
-
-    #[test]
-    fn nested_block_comments_are_dropped() {
-        let t = texts("x /* a /* b */ still comment thread::spawn */ y /**/ z");
-        assert_eq!(t, ["x", "y", "z"]);
-        let s = scan("/* /* */ */ end");
-        assert_eq!(s.comments.len(), 1);
-        assert_eq!(s.tokens.len(), 1);
-    }
-
-    #[test]
-    fn block_comment_counts_lines() {
-        let s = scan("a\n/* one\ntwo\nthree */\nb");
-        assert_eq!(s.tokens[1].line, 5);
-        assert_eq!((s.comments[0].start_line, s.comments[0].end_line), (2, 4));
-    }
-
-    #[test]
-    fn slashes_inside_strings_are_not_comments() {
-        let k = kinds(r#"let u = "http://x /* y */"; z"#);
-        assert!(k
-            .iter()
-            .any(|(kind, t)| *kind == TokKind::Str && t.contains("http://x")));
-        assert_eq!(k.last().map(|(_, t)| t.as_str()), Some("z"));
-    }
-
-    #[test]
-    fn escaped_quote_does_not_end_string() {
-        let k = kinds(r#"f("a\"b // c") g"#);
-        assert_eq!(k.len(), 5, "{k:?}");
-        assert_eq!(k[2].0, TokKind::Str);
-        assert_eq!(k[4].1, "g");
-    }
-
-    #[test]
-    fn raw_strings_with_comment_markers_and_quotes() {
-        let src = "let a = r#\"x // y \" z\"#; let b = r##\"p \"# q\"##; end";
-        let k = kinds(src);
-        let strs: Vec<&String> = k
-            .iter()
-            .filter(|(kind, _)| *kind == TokKind::Str)
-            .map(|(_, t)| t)
-            .collect();
-        assert_eq!(strs.len(), 2, "{k:?}");
-        assert_eq!(strs[0], "r#\"x // y \" z\"#");
-        assert_eq!(strs[1], "r##\"p \"# q\"##");
-        assert_eq!(k.last().map(|(_, t)| t.as_str()), Some("end"));
-    }
-
-    #[test]
-    fn byte_and_c_strings() {
-        let k = kinds(r##"b"a\"b" br#"x"y"# c"z" cr"w" b'a' b'\'' tail"##);
-        let got: Vec<TokKind> = k.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(
-            got,
-            [
-                TokKind::Str,
-                TokKind::Str,
-                TokKind::Str,
-                TokKind::Str,
-                TokKind::Char,
-                TokKind::Char,
-                TokKind::Ident
-            ],
-            "{k:?}"
-        );
-    }
-
-    #[test]
-    fn multi_line_raw_string_keeps_line_numbers() {
-        let s = scan("a r\"l1\nl2\nl3\" b");
-        assert_eq!(s.tokens[2].line, 3);
-    }
-
-    #[test]
-    fn lifetimes_versus_char_literals() {
-        let k = kinds("fn f<'a, 'static_>(x: &'a str) -> char { 'x' }");
-        let lifetimes: Vec<&str> = k
-            .iter()
-            .filter(|(kind, _)| *kind == TokKind::Lifetime)
-            .map(|(_, t)| t.as_str())
-            .collect();
-        assert_eq!(lifetimes, ["'a", "'static_", "'a"]);
-        assert!(k.contains(&(TokKind::Char, "'x'".to_string())));
-    }
-
-    #[test]
-    fn tricky_char_literals() {
-        let k = kinds(r#"'"' '\'' '\\' '\u{1F600}' '_' 'é' x"#);
-        let chars: Vec<&str> = k
-            .iter()
-            .filter(|(kind, _)| *kind == TokKind::Char)
-            .map(|(_, t)| t.as_str())
-            .collect();
-        assert_eq!(
-            chars,
-            [r#"'"'"#, r"'\''", r"'\\'", r"'\u{1F600}'", "'_'", "'é'"]
-        );
-        assert_eq!(k.last().map(|(_, t)| t.as_str()), Some("x"));
-    }
-
-    #[test]
-    fn quote_char_literal_does_not_open_a_string() {
-        let t = prod_idents("let q = '\"'; thread::spawn(f);");
-        assert!(t.contains(&"spawn".to_string()));
-    }
-
-    #[test]
-    fn raw_identifiers_and_numbers() {
-        assert_eq!(texts("r#type"), ["r#type"]);
-        assert_eq!(texts("1..2"), ["1", ".", ".", "2"]);
-        assert_eq!(texts("1.5e-3 + x"), ["1.5e-3", "+", "x"]);
-        assert_eq!(texts("0xE+1"), ["0xE", "+", "1"]);
-        assert_eq!(texts("v.0.len()"), ["v", ".", "0", ".", "len", "(", ")"]);
-    }
-
-    #[test]
-    fn merged_punctuation() {
-        assert_eq!(
-            texts("a::b -> c => d"),
-            ["a", "::", "b", "->", "c", "=>", "d"]
-        );
-    }
-
-    #[test]
-    fn cfg_test_mod_is_a_region_and_strings_do_not_confuse_braces() {
-        let src = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { let s = \"}\"; let c = '}'; /* } */ }\n    fn thread_spawn() {}\n}\nfn after() {}\n";
-        let idents = prod_idents(src);
-        assert!(idents.contains(&"a".to_string()));
-        assert!(idents.contains(&"after".to_string()));
-        assert!(!idents.contains(&"thread_spawn".to_string()));
-        assert!(!idents.contains(&"tests".to_string()));
-    }
-
-    #[test]
-    fn test_fn_attributes() {
-        let src = "#[test]\nfn one() {}\n#[gpui::test]\nasync fn two() {}\n#[tokio::test(flavor = \"x\")]\nfn three() {}\n#[should_panic]\n#[test]\nfn four() {}\nfn real() {}";
-        let idents = prod_idents(src);
-        for hidden in ["one", "two", "three", "four"] {
-            assert!(!idents.contains(&hidden.to_string()), "{hidden}");
-        }
-        assert!(idents.contains(&"real".to_string()));
-    }
-
-    #[test]
-    fn cfg_predicates() {
-        for (attr, is_test) in [
-            ("#[cfg(test)]", true),
-            ("#[cfg(all(test, feature = \"x\"))]", true),
-            ("#[cfg(any(test, unix))]", false),
-            ("#[cfg(any(test, all(test, unix)))]", true),
-            ("#[cfg(not(test))]", false),
-            ("#[cfg(feature = \"test\")]", false),
-            ("#[cfg_attr(test, derive(Debug))]", false),
-        ] {
-            let src = format!("{attr}\nfn marker() {{}}\n");
-            let in_test = !prod_idents(&src).contains(&"marker".to_string());
-            assert_eq!(in_test, is_test, "{attr}");
-        }
-    }
-
-    #[test]
-    fn stacked_attributes_before_the_item() {
-        let src = "#[cfg(test)]\n#[allow(dead_code)]\n#[derive(Debug)]\nstruct Hidden { a: u8 }\nstruct Shown;";
-        assert_eq!(prod_idents(src), ["struct", "Shown"]);
-    }
-
-    #[test]
-    fn out_of_line_test_module_is_reported() {
-        let s =
-            scan("#[cfg(test)]\nmod tests;\nmod real;\n#[cfg(test)]\npub(crate) mod support;\n");
-        assert_eq!(s.test_mod_decls, ["tests", "support"]);
-        let idents = prod_idents("#[cfg(test)]\nmod tests;\nmod real;\n");
-        assert_eq!(idents, ["mod", "real"]);
-    }
-
-    #[test]
-    fn nested_inner_cfg_test_marks_only_its_module() {
-        let src = "fn production() { std::thread::spawn(|| {}); }\nmod checks {\n    #![cfg(test)]\n    fn helper() {}\n}\nfn after() {}";
-        let s = scan(src);
-        assert!(!s.whole_file_test);
-        let idents = prod_idents(src);
-        assert!(idents.contains(&"production".to_string()));
-        assert!(idents.contains(&"spawn".to_string()));
-        assert!(idents.contains(&"after".to_string()));
-        assert!(!idents.contains(&"helper".to_string()));
-        // A file-level attribute after other inner attributes still marks the whole file.
-        assert!(scan("#![allow(dead_code)]\n#![cfg(test)]\nmod a { fn x() {} }").whole_file_test);
-    }
-
-    #[test]
-    fn test_mod_declarations_inside_inline_modules_are_not_resolved_at_file_level() {
-        let s =
-            scan("mod inner {\n    #[cfg(test)]\n    mod fixtures;\n}\n#[cfg(test)]\nmod tests;");
-        assert_eq!(s.test_mod_decls, ["tests"]);
-    }
-
-    #[test]
-    fn whole_file_test_marker() {
-        assert!(scan("#![cfg(test)]\nfn x() {}").whole_file_test);
-        assert!(!scan("#![forbid(unsafe_code)]\nfn x() {}").whole_file_test);
-    }
-
-    #[test]
-    fn statement_like_items_end_at_the_semicolon() {
-        let src = "#[cfg(test)]\nuse foo::{a, b};\n#[cfg(test)]\nconst T: [u8; 3] = [1, 2, 3];\n#[cfg(test)]\nstatic S: Foo = Foo { x: 1 };\nfn live() {}";
-        assert_eq!(prod_idents(src), ["fn", "live"]);
-    }
-
-    #[test]
-    fn test_items_inside_impl_blocks() {
-        let src = "impl X {\n fn keep(&self) {}\n #[cfg(test)]\n fn hide(&self) { let _ = 1; }\n fn keep2(&self) {}\n}";
-        let idents = prod_idents(src);
-        assert!(idents.contains(&"keep".to_string()));
-        assert!(idents.contains(&"keep2".to_string()));
-        assert!(!idents.contains(&"hide".to_string()));
-    }
-
-    #[test]
-    fn where_clauses_and_generics_in_test_items() {
-        let src =
-            "#[cfg(test)]\nfn f<T>(x: [T; 2]) -> Result<(), E> where T: Fn() { body() }\nfn g() {}";
-        assert_eq!(prod_idents(src), ["fn", "g"]);
-    }
-
-    #[test]
-    fn unterminated_input_never_panics_and_spans_stay_in_bounds() {
-        let sample = "#[cfg(test)] mod t { fn f() { let s = r#\"a\"#; 'a' 'b b\"c /* /* \\ } ";
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let mut inputs: Vec<String> = (0..=sample.len())
-            .filter(|i| sample.is_char_boundary(*i))
-            .map(|i| sample[..i].to_string())
-            .collect();
-        for _ in 0..300 {
-            let mut bytes = sample.as_bytes().to_vec();
-            for _ in 0..4 {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                let pos = (seed as usize) % bytes.len();
-                let alphabet = b"\"'#r/*{}()[]\\ \n;#!bc";
-                bytes[pos] = alphabet[(seed >> 20) as usize % alphabet.len()];
-            }
-            inputs.push(String::from_utf8_lossy(&bytes).into_owned());
-        }
-        for src in inputs {
-            let s = scan(&src);
-            let mut prev = 0;
-            for t in &s.tokens {
-                assert!(
-                    t.start >= prev && t.start < t.end && t.end <= src.len(),
-                    "{src:?}"
-                );
-                prev = t.end;
-            }
-            assert_eq!(s.in_test.len(), s.tokens.len());
-        }
-    }
-}
+mod tests;

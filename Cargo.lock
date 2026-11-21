@@ -4558,6 +4558,7 @@ dependencies = [
 name = "lector-archcheck"
 version = "0.7.1"
 dependencies = [
+ "proptest",
  "serde_json",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
