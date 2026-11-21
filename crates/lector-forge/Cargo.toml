@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Code host adapters for Lector (GitHub, GitLab): pull requests, review threads, reviews."
 
 [dependencies]
+lector-base.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

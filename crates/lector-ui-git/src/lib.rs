@@ -26,15 +26,16 @@ pub mod store;
 pub mod sync;
 pub mod sync_dialogs;
 pub mod sync_model;
+pub mod sync_support;
 pub mod util;
 
 #[cfg(test)]
 mod sync_tests;
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::rc::Rc;
 
 use gpui::{actions, App, AppContext, ClipboardItem, Entity, SharedString, Window};
-use lector_base::CancelToken;
 use lector_git::Oid;
 use lector_ui::actions::{editor, git as git_actions, workspace as ws_actions};
 use lector_ui::code_view::{CodeSource, CodeView};
@@ -312,7 +313,7 @@ pub fn init(cx: &mut App) {
             let s = s.clone();
             window.defer(cx, move |window, cx| {
                 let s2 = s.clone();
-                changes_panel::pick_from_repo(
+                ref_picker::pick_from_repo(
                     &s,
                     "Compare file with…",
                     window,
@@ -336,19 +337,23 @@ pub fn init(cx: &mut App) {
             else {
                 return;
             };
+            // Finding the base runs git: off the UI thread, then the review opens.
             let service = lector_ui::commands_bridge::core(cx).review();
-            let Some(base) = service.default_base(repo, &branch, &CancelToken::new()) else {
-                return;
-            };
-            let s = s.clone();
-            window.defer(cx, move |window, cx| {
-                review_tab::open_review(
-                    &s,
-                    lector_git::Changeset::BranchVsBase { branch, base },
-                    window,
-                    cx,
-                )
+            let (repo, b) = (repo.clone(), branch.clone());
+            let key = view_key(JobKind::GitLookup, s.entity_id());
+            let base = background(cx, key, Priority::Visible, move |cancel| {
+                service.default_base(&repo, &b, cancel)
             });
+            let s = s.clone();
+            window
+                .spawn(cx, async move |cx| {
+                    let Ok(Some(base)) = base.await else { return };
+                    let _ = cx.update(|window, cx| {
+                        let cs = lector_git::Changeset::BranchVsBase { branch, base };
+                        review_tab::open_review(&s, cs, window, cx)
+                    });
+                })
+                .detach();
         });
     })
     .detach();
@@ -520,9 +525,12 @@ fn copy_permalink(
         };
         a.row..end
     });
-    let task = cx.background_spawn(async move { repo.permalink(&rel, lines, None) });
+    let key = view_key(JobKind::GitLookup, cx.entity_id());
+    let task = background(cx, key, Priority::Visible, move |_| {
+        repo.permalink(&rel, lines, None)
+    });
     cx.spawn(async move |ws, cx| {
-        let result = task.await;
+        let Ok(result) = task.await else { return };
         let _ = ws.update(cx, |ws, cx| match result {
             Ok(Some(link)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(link));
@@ -612,7 +620,8 @@ pub fn open_file_at_revision(
     let Some(ws) = store.read(cx).workspace.upgrade() else {
         return;
     };
-    let task = cx.background_spawn(async move {
+    let key = view_key(JobKind::GitLookup, store.entity_id());
+    let task = background(cx, key, Priority::Visible, move |_| {
         let repo = project
             .repo()
             .ok_or_else(|| "not a repository".to_string())?;
@@ -634,7 +643,7 @@ pub fn open_file_at_revision(
     });
     window
         .spawn(cx, async move |cx| {
-            let result = task.await;
+            let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = cx.update(|window, cx| {
                 let (side, short, rel) = match result {
                     Ok(v) => v,

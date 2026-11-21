@@ -8,12 +8,13 @@
 //! will be lost, and show an "Undo" toast instead of asking first; only when the backup
 //! cannot be taken does a confirmation come up.
 
-use gpui::{App, AppContext, Entity, SharedString, Task};
+use gpui::{App, Entity, SharedString, Task};
 use lector_app::commands::git_write::BackupUnavailable;
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_git::{Changeset, FileChange, OperationKind};
 use lector_review::review::{self, HunkAction, LineSelection};
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use serde_json::{json, Value};
 
 use crate::activity;
@@ -221,9 +222,11 @@ fn run_op_with(
     };
     let core = lector_ui::commands_bridge::core(cx);
     let (id, args) = op.command(allow_without_backup);
+    // A write the user asked for: never replaced, survives the panel closing.
+    let key = view_key(JobKind::GitWrite, store.entity_id());
     let work = {
         let core = core.clone();
-        cx.background_spawn(async move {
+        background(cx, key, Priority::Visible, move |_| {
             // The journal records every write command; idempotent.
             Journal::install(&core);
             let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
@@ -232,7 +235,10 @@ fn run_op_with(
     };
     let store = store.clone();
     cx.spawn(async move |cx| {
-        let result = work.await;
+        let result = match work.await {
+            Ok(result) => result,
+            Err(e) => return Err(format!("{} failed:\n{e}", op.verb())),
+        };
         let _ = cx.update(|cx| notify_repo_changed(&store, cx));
         match result {
             Ok(outcome) => {

@@ -1,5 +1,6 @@
 //! JSON-RPC transport over a child process's stdio.
 
+use lector_base::thread::{spawn_named, ThreadKind};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
@@ -177,49 +178,45 @@ impl Client {
             handler,
         });
 
-        let name = label.to_string();
-        std::thread::Builder::new()
-            .name(format!("lsp-write-{name}"))
-            .spawn(move || {
-                let mut stdin = stdin;
-                while let Ok(frame) = rx.recv() {
-                    if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
-                        break;
-                    }
+        // Owner threads of this server's pipes (ADR 0003); they end with the process.
+        let io_err = |e: std::io::Error| LspError::Io(e.to_string());
+        spawn_named(ThreadKind::LspWriter, label, move || {
+            let mut stdin = stdin;
+            while let Ok(frame) = rx.recv() {
+                if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
+                    break;
                 }
-            })
-            .map_err(|e| LspError::Io(e.to_string()))?;
+            }
+        })
+        .map_err(io_err)?;
 
         let name = label.to_string();
-        std::thread::Builder::new()
-            .name(format!("lsp-err-{name}"))
-            .spawn(move || {
+        spawn_named(
+            ThreadKind::PipeReader,
+            format!("{label} stderr"),
+            move || {
                 for line in BufReader::new(stderr).lines() {
                     match line {
                         Ok(l) => tracing::debug!(target: "lector_lsp::stderr", "[{name}] {l}"),
                         Err(_) => break,
                     }
                 }
-            })
-            .map_err(|e| LspError::Io(e.to_string()))?;
+            },
+        )
+        .map_err(io_err)?;
 
         let reader_shared = shared.clone();
         let name = label.to_string();
-        std::thread::Builder::new()
-            .name(format!("lsp-read-{name}"))
-            .spawn(move || {
-                read_loop(BufReader::new(stdout), &reader_shared, &name);
-                reader_shared.closed.store(true, Ordering::SeqCst);
-                reader_shared.fail_all(|_| LspError::ServerExited);
-                on_exit();
-            })
-            .map_err(|e| LspError::Io(e.to_string()))?;
+        spawn_named(ThreadKind::LspReader, label, move || {
+            read_loop(BufReader::new(stdout), &reader_shared, &name);
+            reader_shared.closed.store(true, Ordering::SeqCst);
+            reader_shared.fail_all(|_| LspError::ServerExited);
+            on_exit();
+        })
+        .map_err(io_err)?;
 
         let weak: Weak<Shared> = Arc::downgrade(&shared);
-        std::thread::Builder::new()
-            .name(format!("lsp-timeout-{label}"))
-            .spawn(move || watchdog(weak))
-            .map_err(|e| LspError::Io(e.to_string()))?;
+        spawn_named(ThreadKind::LspWatchdog, label, move || watchdog(weak)).map_err(io_err)?;
 
         Ok(Client {
             shared,

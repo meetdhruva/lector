@@ -1,6 +1,7 @@
 //! Changeset review tab (file list with "viewed" checkboxes + the current
 //! file's diff) and the commit tab (metadata above the same component).
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,7 +10,6 @@ use gpui::{
     FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task,
     Window,
 };
-use lector_base::CancelToken;
 use lector_git::{ChangeKind, Changeset, CommitDetail, Oid, RefKind};
 use lector_review::review::{self, changeset_key, ChangesetView};
 use lector_ui::actions::diff as diff_actions;
@@ -197,25 +197,25 @@ impl ReviewView {
         let review_service = lector_ui::commands_bridge::core(cx).review();
         let opts = settings_diff_options(store, cx);
         let cs = self.changeset.clone();
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::GitChangeset, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |cancel| {
             let commit = match (&cs, with_commit) {
                 (Changeset::Commit(oid), true) => {
                     Some(Arc::new(repo.commit(*oid).map_err(|e| e.to_string())?))
                 }
                 _ => None,
             };
-            let cancel = CancelToken::new();
             let view = match &cs {
                 Changeset::Range { from, to } if to == review::WORKDIR_REV => {
-                    review_service.changeset_vs_workdir(&repo, from, &opts, &cancel)
+                    review_service.changeset_vs_workdir(&repo, from, &opts, cancel)
                 }
-                _ => review_service.changeset(&repo, &cs, &opts, &cancel),
+                _ => review_service.changeset(&repo, &cs, &opts, cancel),
             }
             .map_err(|e| e.to_string())?;
             Ok::<_, String>((commit, view))
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 match result {

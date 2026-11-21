@@ -14,7 +14,7 @@ use std::time::Duration;
 use lector_process::{OutputMode, ProcessCommand, ProcessKind, RunOptions, StdinMode};
 
 use crate::core::AppCore;
-use crate::scheduler::Priority;
+use crate::scheduler::{JobKey, JobKind, Priority, Subject};
 
 /// Menu label for [`reveal_in_file_manager`] on this platform.
 pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
@@ -55,13 +55,14 @@ fn reveal_command(path: &Path) -> ProcessCommand {
 pub fn reveal_in_file_manager(core: &AppCore, path: &Path) {
     let cmd = reveal_command(path);
     let shown = path.display().to_string();
-    core.scheduler()
-        .spawn(Priority::Interactive, None, move |_| {
-            // Explorer exits non-zero even when it worked, so only a failure to start counts.
-            if let Err(err) = lector_process::run(&cmd, &RunOptions::default()) {
-                tracing::warn!("cannot reveal {shown}: {err}");
-            }
-        });
+    // Waits on another program: the blocking lane, never the compute workers.
+    let key = JobKey::new(JobKind::ExternalProgram, Subject::App);
+    let _ = core.scheduler().spawn(key, Priority::Visible, move |_| {
+        // Explorer exits non-zero even when it worked, so only a failure to start counts.
+        if let Err(err) = lector_process::run(&cmd, &RunOptions::default()) {
+            tracing::warn!("cannot reveal {shown}: {err}");
+        }
+    });
 }
 
 /// Reads the operating system's "reduce motion" preference. Blocking (runs a tiny CLI with a

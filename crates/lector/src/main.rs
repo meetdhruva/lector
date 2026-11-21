@@ -222,16 +222,20 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // `build_request`: a bad path is a plain error exit, not a crash.
     let session = lector_app::health::SessionHealth::begin();
     let quit_session = session.clone();
-    // Settings, the project (git discovery, LSP config) and themes load on a
-    // background thread while GPUI starts up.
+    // Settings, the project (git discovery, LSP config) and themes load on the scheduler's
+    // blocking lane (git discovery runs git) while GPUI starts up.
     let root = request.as_ref().map(|r| r.root.clone());
-    let loader = std::thread::spawn(move || {
-        let (settings, warnings) = lector_config::load_settings_for(root.as_deref());
-        let project = root
-            .as_ref()
-            .map(|root| lector_app::Project::open(root, settings.clone()));
-        (settings, warnings, project)
-    });
+    let loader = lector_app::Scheduler::global().spawn(
+        lector_app::JobKey::new(lector_app::JobKind::StartupLoad, lector_app::Subject::App),
+        lector_app::Priority::Visible,
+        move |_| {
+            let (settings, warnings) = lector_config::load_settings_for(root.as_deref());
+            let project = root
+                .as_ref()
+                .map(|root| lector_app::Project::open(root, settings.clone()));
+            (settings, warnings, project)
+        },
+    );
     let (registry, mode) = load_themes(&cli);
     lector_ui::startup::log("themes loaded");
 
@@ -258,11 +262,14 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         // On macOS `quit` ends in `[NSApp terminate:]`, which exits the process without
         // returning from `run`, so the clean shutdown is also recorded here (idempotent).
         // Order: the other quit hooks first (sessions saved, terminals killed, askpass server
-        // removed), then every child process tree is stopped (TERM, KILL after the grace
-        // period; returns as soon as they are gone, see lector-process), and the clean-exit
-        // marker last: a hang or crash before it still counts as an abnormal session.
+        // removed), then `lector_app::shutdown`: reads cancelled, writes drained (bounded), every
+        // child process tree stopped (TERM, KILL after the grace period), the scheduler stopped
+        // (bounded wait), and the clean-exit marker last: a hang or crash before it still counts as an abnormal session.
         lector_ui::startup::on_quit_last(cx, move || {
-            lector_process::Supervisor::global().shutdown(std::time::Duration::from_millis(1500));
+            // Child process trees, then the scheduler (cancel all, bounded wait).
+            // Reads cancelled, writes drained (10 s; network writes 2 s), then child process
+            // trees and the scheduler.
+            let _ = lector_app::shutdown::shutdown(lector_app::shutdown::QuitBounds::default());
             quit_session.end_clean();
         });
         cx.spawn(async move |cx| {
@@ -277,7 +284,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             }
         })
         .detach();
-        let Ok((settings, warnings, project)) = loader.join() else {
+        let Ok((settings, warnings, project)) = loader.wait_outcome() else {
             eprintln!("lector: startup failed");
             cx.quit();
             return;

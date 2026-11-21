@@ -2,6 +2,7 @@
 //! ..." label), the optional structural diff, reviewed hunks (persisted per changeset) and the
 //! "why did this line change?" hover.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -671,14 +672,13 @@ impl DiffView {
         let core = lector_ui::commands_bridge::core(cx);
         let position = target.position;
         self.review.hover_task = Some(cx.spawn(async move |this, cx| {
-            let md = cx
-                .background_executor()
-                .spawn(async move {
-                    let items = core.provenance().explain_all(&query);
-                    let md = explanation_markdown(&items);
-                    (!md.is_empty()).then(|| Arc::new(markdown::parse(&md)))
-                })
-                .await;
+            let key = view_key(JobKind::ProvenanceExplain, this.entity_id());
+            let md = background(cx, key, Priority::Visible, move |_| {
+                let items = core.provenance().explain_all(&query);
+                let md = explanation_markdown(&items);
+                (!md.is_empty()).then(|| Arc::new(markdown::parse(&md)))
+            });
+            let Ok(md) = md.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.review.hover = md.map(|blocks| ProvenanceHover {
                     column,

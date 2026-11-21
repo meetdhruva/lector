@@ -1,6 +1,7 @@
 //! Blame for the active code view: a left gutter column with author, age and
 //! summary per block of lines; clicking a block opens its commit.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,10 +213,11 @@ impl BlameSession {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let mapped = cx
-                .background_executor()
-                .spawn(async move { blame_for_text(&hunks, &base, &unix_lines(text.to_string())) })
-                .await;
+            let key = view_key(JobKind::DocumentBlame, this.entity_id());
+            let mapped = background(cx, key, Priority::Visible, move |_| {
+                blame_for_text(&hunks, &base, &unix_lines(text.to_string()))
+            });
+            let Ok(mapped) = mapped.await else { return };
             let _ = this.update(cx, |this, cx| this.show(&mapped, cx));
         }));
     }
@@ -236,14 +238,13 @@ impl BlameSession {
         let rel = self.rel.clone();
         let path = self.model.read(cx).path().to_path_buf();
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let hunks = project.blame(&rel).map_err(|e| e.to_string())?;
-                    let base = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                    Ok::<_, String>((hunks, base))
-                })
-                .await;
+            let key = view_key(JobKind::GitBlame, this.entity_id());
+            let result = background(cx, key, Priority::Visible, move |_| {
+                let hunks = project.blame(&rel).map_err(|e| e.to_string())?;
+                let base = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                Ok::<_, String>((hunks, base))
+            });
+            let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| match result {
                 Ok((hunks, base)) => {
                     this.hunks = hunks;
@@ -294,7 +295,8 @@ pub fn toggle_blame(
     let disk = path.clone();
     let blamed = project.clone();
     let blamed_rel = rel.clone();
-    let task = cx.background_spawn(async move {
+    let key = view_key(JobKind::GitBlame, view.entity_id());
+    let task = background(cx, key, Priority::Visible, move |_| {
         let hunks = blamed.blame(&blamed_rel).map_err(|e| e.to_string())?;
         let text = std::fs::read_to_string(&disk).unwrap_or_default();
         Ok::<_, String>((hunks, text))
@@ -302,7 +304,7 @@ pub fn toggle_blame(
     let store = store.clone();
     let view = view.downgrade();
     cx.spawn(async move |ws, cx| {
-        let result = task.await;
+        let Ok(result) = task.await else { return };
         let _ = ws.update(cx, |ws, cx| {
             let (hunks, base) = match result {
                 Ok(blamed) => blamed,

@@ -20,12 +20,18 @@ use crate::types::{
     WorkspaceSymbol,
 };
 use crate::PointUtf16;
+use lector_base::thread::TaskRunner;
 
 mod completion_api;
 
 /// Tunables; the defaults suit real servers, tests shorten them.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LspOptions {
+    /// Runs server launches and restarts (a launch waits for the server's `initialize`, a
+    /// restart first waits its back-off delay). This crate does not schedule (ADR 0003): the app
+    /// passes its scheduler's blocking lane. `None` runs them on the calling thread: the thread
+    /// that opens the first document, or the reader thread of the server that exited.
+    pub launcher: Option<TaskRunner>,
     /// Per-request timeout.
     pub request_timeout: Duration,
     /// Timeout for the `initialize` handshake.
@@ -38,9 +44,23 @@ pub struct LspOptions {
     pub shutdown_grace: Duration,
 }
 
+impl std::fmt::Debug for LspOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LspOptions")
+            .field("launcher", &self.launcher.is_some())
+            .field("request_timeout", &self.request_timeout)
+            .field("init_timeout", &self.init_timeout)
+            .field("restart_base_delay", &self.restart_base_delay)
+            .field("max_restarts", &self.max_restarts)
+            .field("shutdown_grace", &self.shutdown_grace)
+            .finish()
+    }
+}
+
 impl Default for LspOptions {
     fn default() -> Self {
         Self {
+            launcher: None,
             request_timeout: Duration::from_secs(10),
             init_timeout: Duration::from_secs(30),
             restart_base_delay: Duration::from_millis(500),
@@ -356,14 +376,13 @@ impl Slot {
         })
     }
 
-    /// Begin launching (caller holds the lock and has set `phase`).
+    /// Begin launching (the caller has set `phase` and released the lock): on the
+    /// [launcher](LspOptions::launcher), or here.
     fn spawn_launch(self: &Arc<Self>, delay: Duration) {
         let slot = self.clone();
-        let spawned = std::thread::Builder::new()
-            .name(format!("lsp-launch-{}", self.config.name))
-            .spawn(move || slot.launch(delay));
-        if let Err(e) = spawned {
-            tracing::error!("cannot spawn launch thread: {e}");
+        match &self.opts.launcher {
+            Some(run) => run(Box::new(move || slot.launch(delay))),
+            None => slot.launch(delay),
         }
     }
 
@@ -1191,12 +1210,11 @@ impl LspManager {
             .iter()
             .filter_map(|s| s.shutdown_take())
             .collect();
-        let handles: Vec<_> = clients
-            .into_iter()
-            .map(|c| std::thread::spawn(move || c.shutdown(grace)))
-            .collect();
-        for h in handles {
-            let _ = h.join();
-        }
+        // In parallel, joined before returning (scoped: bounded by the grace period).
+        std::thread::scope(|scope| {
+            for c in &clients {
+                scope.spawn(move || c.shutdown(grace));
+            }
+        });
     }
 }

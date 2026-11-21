@@ -12,6 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use lector_base::thread::{spawn_named, TaskRunner, ThreadKind};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
@@ -120,6 +121,19 @@ impl PendingReply {
     }
 }
 
+/// A request from the agent counted in `in_flight` until it is answered. If the runner drops
+/// the task without running it, the request is answered with an error and the slot released.
+struct InFlight(Option<(Connection, Value)>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some((conn, id)) = self.0.take() {
+            conn.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
+            conn.respond(id, Err(RpcError::remote(INTERNAL_ERROR, "cancelled")));
+        }
+    }
+}
+
 impl Drop for PendingReply {
     fn drop(&mut self) {
         self.conn.inner.pending.lock().remove(&self.id);
@@ -133,11 +147,14 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Starts the reader thread. `handler` is held weakly (the owner keeps it alive).
+    /// Starts the reader thread. `handler` is held weakly (the owner keeps it alive). Each
+    /// request from the agent (which may wait for the user's permission) is handed to
+    /// `requests`, so the reader keeps reading meanwhile.
     pub fn new(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         handler: Weak<dyn Handler>,
+        requests: TaskRunner,
     ) -> Connection {
         let inner = Arc::new(Inner {
             writer: Mutex::new(Box::new(writer)),
@@ -149,9 +166,9 @@ impl Connection {
         });
         let conn = Connection { inner };
         let reader_conn = conn.clone();
-        let spawned = std::thread::Builder::new()
-            .name("acp-reader".into())
-            .spawn(move || reader_conn.read_loop(reader, handler));
+        let spawned = spawn_named(ThreadKind::AcpReader, "acp", move || {
+            reader_conn.read_loop(reader, handler, &requests)
+        });
         if let Err(err) = spawned {
             conn.mark_closed(format!("cannot start the reader thread: {err}"));
         }
@@ -264,7 +281,7 @@ impl Connection {
         }
     }
 
-    fn read_loop(self, reader: impl Read, handler: Weak<dyn Handler>) {
+    fn read_loop(self, reader: impl Read, handler: Weak<dyn Handler>, requests: &TaskRunner) {
         let mut reader = BufReader::new(reader);
         let mut line = Vec::new();
         let reason = loop {
@@ -294,7 +311,7 @@ impl Connection {
                     continue;
                 }
             };
-            self.dispatch(msg, &handler);
+            self.dispatch(msg, &handler, requests);
         };
         self.mark_closed(reason.clone());
         if let Some(h) = handler.upgrade() {
@@ -302,7 +319,7 @@ impl Connection {
         }
     }
 
-    fn dispatch(&self, mut msg: Value, handler: &Weak<dyn Handler>) {
+    fn dispatch(&self, mut msg: Value, handler: &Weak<dyn Handler>, requests: &TaskRunner) {
         let method = msg.get("method").and_then(Value::as_str).map(str::to_owned);
         let id = msg.get("id").cloned().filter(|v| !v.is_null());
         let params = msg
@@ -328,17 +345,17 @@ impl Connection {
                     return;
                 }
                 let conn = self.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("acp-request".into())
-                    .spawn(move || {
+                // Released even if the runner drops the task unrun (cancelled at shutdown):
+                // then the request is answered as cancelled.
+                let slot = InFlight(Some((conn, id)));
+                requests(Box::new(move || {
+                    let mut slot = slot;
+                    if let Some((conn, id)) = slot.0.take() {
                         let result = h.on_request(&method, params);
                         conn.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
                         conn.respond(id, result);
-                    });
-                if let Err(err) = spawned {
-                    self.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
-                    tracing::warn!("cannot handle an agent request: {err}");
-                }
+                    }
+                }));
             }
             (Some(method), None) => {
                 if let Some(h) = handler.upgrade() {
@@ -414,7 +431,8 @@ mod tests {
         let input = b"not json\n{\"jsonrpc\":\"2.0\",\"method\":\"a\"}\n[1,2]\n\n{\"jsonrpc\":\"2.0\",\"method\":\"b\",\"params\":{}}\n".to_vec();
         let rec = Arc::new(Recorder(Mutex::new(Vec::new())));
         let weak: Weak<dyn Handler> = Arc::downgrade(&(rec.clone() as Arc<dyn Handler>));
-        let conn = Connection::new(Cursor::new(input), std::io::sink(), weak);
+        let runner: TaskRunner = Arc::new(|task| task());
+        let conn = Connection::new(Cursor::new(input), std::io::sink(), weak, runner);
         for _ in 0..200 {
             if conn.is_closed() {
                 break;

@@ -2,13 +2,13 @@
 //!
 //! Every derived query and background step (reparse, highlights, outline,
 //! gutter, blame mapping, LSP sync) runs through a [`DocExecutor`]. The
-//! production implementation is the shared [`Scheduler`]; the GPUI front-end
-//! plugs in its own deterministic executor in tests so `run_until_parked` and
-//! fake clocks keep working.
+//! production implementation is the shared [`Scheduler`]; under GPUI's test
+//! dispatcher the front-end passes a [`Scheduler::with_runner`] on GPUI's test
+//! executor so `run_until_parked` and fake clocks keep working.
 
 use std::time::Duration;
 
-use crate::scheduler::{JobKey, Priority, Scheduler};
+use crate::scheduler::{JobKey, Priority, Scheduler, Subject};
 use lector_base::CancelToken;
 
 /// A unit of background work. It receives a [`CancelToken`] that is set when
@@ -17,26 +17,33 @@ pub type DocJob = Box<dyn FnOnce(&CancelToken) + Send + 'static>;
 
 /// Where the document store runs its background work.
 pub trait DocExecutor: Send + Sync + 'static {
-    /// Runs `job` soon. With a `key`, an older unfinished job with the same
-    /// key is cancelled ("latest wins").
-    fn spawn(&self, prio: Priority, key: Option<JobKey>, job: DocJob);
+    /// Runs `job` soon. An older unfinished job with the same key is cancelled
+    /// when the key's kind replaces ("latest wins").
+    fn spawn(&self, prio: Priority, key: JobKey, job: DocJob);
     /// Runs `job` once, `delay` after the last call with the same `key`
     /// (earlier jobs for that key are dropped).
     fn debounce(&self, key: JobKey, delay: Duration, prio: Priority, job: DocJob);
+    /// Cancels every job of `subject` (a document that closed). Executors without
+    /// keys have nothing to cancel.
+    fn cancel_subject(&self, _subject: &Subject) {}
 }
 
 impl DocExecutor for Scheduler {
-    fn spawn(&self, prio: Priority, key: Option<JobKey>, job: DocJob) {
+    fn spawn(&self, prio: Priority, key: JobKey, job: DocJob) {
         // The handle is dropped: results are delivered through the store.
-        let _ = Scheduler::spawn(self, prio, key, job);
+        let _ = Scheduler::spawn(self, key, prio, job);
     }
 
     fn debounce(&self, key: JobKey, delay: Duration, prio: Priority, job: DocJob) {
         if delay.is_zero() {
-            let _ = Scheduler::spawn(self, prio, Some(key), job);
+            let _ = Scheduler::spawn(self, key, prio, job);
         } else {
             Scheduler::debounce(self, key, delay, prio, job);
         }
+    }
+
+    fn cancel_subject(&self, subject: &Subject) {
+        Scheduler::cancel_subject(self, subject);
     }
 }
 
@@ -46,7 +53,7 @@ impl DocExecutor for Scheduler {
 pub struct InlineExecutor;
 
 impl DocExecutor for InlineExecutor {
-    fn spawn(&self, _prio: Priority, _key: Option<JobKey>, job: DocJob) {
+    fn spawn(&self, _prio: Priority, _key: JobKey, job: DocJob) {
         job(&CancelToken::new());
     }
 

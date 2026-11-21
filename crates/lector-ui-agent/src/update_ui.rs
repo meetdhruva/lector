@@ -7,6 +7,7 @@
 //! user turned that on), and it never downloads, installs or runs anything. Nothing about the user
 //! or the code is sent. Crash reports and session records stay in Lector's data directory.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::path::PathBuf;
 
 use gpui::{
@@ -139,13 +140,19 @@ impl UpdateHub {
             self.checking = false;
             return;
         };
-        let work = cx.background_spawn(async move {
+        // Network: the blocking lane.
+        let key = view_key(JobKind::UpdateCheck, cx.entity_id());
+        let work = background(cx, key, Priority::Background, move |_| {
             run_check(CURRENT_VERSION, channel, &UpdateOptions::default(), &state)
         });
         cx.spawn(async move |this, cx| {
             let status = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.checking = false;
+                let Ok(status) = status else {
+                    cx.notify();
+                    return;
+                };
                 match &status {
                     UpdateStatus::Available { .. } => {
                         this.persist(|n| n.pending_update = Some(status.clone()));

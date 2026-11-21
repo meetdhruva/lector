@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lector-base.workspace = true
 dunce.workspace = true
 lector-text.workspace = true
 thiserror.workspace = true

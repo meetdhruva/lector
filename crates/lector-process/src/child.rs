@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::Receiver;
+use lector_base::thread::{spawn_named, ThreadKind};
 use process_wrap::std::{StdChildWrapper, StdCommandWrap};
 
 use crate::command::{OutputMode, ProcessCommand, ProcessKind, StdinMode};
@@ -17,8 +18,8 @@ use crate::supervisor::SupInner;
 #[cfg(unix)]
 const SIGTERM: i32 = 15;
 
-/// How long a hard-killed process may take to be reaped before a background thread
-/// takes over (a process in uninterruptible sleep cannot die at once).
+/// How long a hard-killed process may take to be reaped before it is left to a later sweep
+/// (a process in uninterruptible sleep cannot die at once).
 const REAP_WAIT: Duration = Duration::from_secs(2);
 
 /// A snapshot of a supervised process for listings.
@@ -47,7 +48,7 @@ struct State {
     sweep_on_exit: bool,
 }
 
-/// State shared by a [`ChildHandle`], the supervisor's registry (weakly) and reaper threads.
+/// State shared by a [`ChildHandle`], the supervisor's registry (weakly) and the lingering list.
 pub(crate) struct Shared {
     pub(crate) id: u64,
     pub(crate) pid: u32,
@@ -149,26 +150,32 @@ impl Shared {
         self.reap()
     }
 
-    /// Waits a little for a killed process; hands it to a reaper thread if it lingers,
-    /// so no zombie is left behind.
+    /// Waits a little for a killed process. One that lingers (a process in uninterruptible
+    /// sleep cannot die at once) is remembered and reaped by a later sweep (the next spawn or
+    /// reap in this process), so no zombie is left behind and no thread waits for it.
     fn reap(self: &Arc<Self>) -> Option<ExitStatus> {
+        sweep_lingering();
         match self.wait_for(REAP_WAIT) {
             Ok(Some(status)) => Some(status),
-            _ => {
-                let me = self.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("lector-reaper".into())
-                    .spawn(move || {
-                        while !matches!(me.wait_for(Duration::from_secs(1)), Ok(Some(_)) | Err(_)) {
-                        }
-                    });
-                if let Err(err) = spawned {
-                    tracing::warn!("cannot start a reaper thread: {err}");
-                }
+            Err(_) => None,
+            Ok(None) => {
+                lingering().push(self.clone());
                 None
             }
         }
     }
+}
+
+/// Killed processes not reaped yet, see [`Shared::reap`].
+static LINGERING: Mutex<Vec<Arc<Shared>>> = Mutex::new(Vec::new());
+
+fn lingering() -> MutexGuard<'static, Vec<Arc<Shared>>> {
+    LINGERING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Reaps the lingering processes that have exited meanwhile (non-blocking).
+pub(crate) fn sweep_lingering() {
+    lingering().retain(|s| matches!(s.try_wait(), Ok(None)));
 }
 
 /// A running (or exited) supervised process tree.
@@ -348,6 +355,7 @@ pub(crate) fn spawn(
     id: u64,
     registry: &Arc<SupInner>,
 ) -> Result<(ChildHandle, Arc<Shared>)> {
+    sweep_lingering();
     let mut std_cmd = cmd.to_std();
     std_cmd.stdin(match cmd.stdin {
         StdinMode::Null => Stdio::null(),
@@ -415,13 +423,12 @@ pub(crate) fn spawn(
     if let StdinMode::Bytes(bytes) = &cmd.stdin {
         if let Some(mut pipe) = handle.stdin.take() {
             let bytes = bytes.clone();
-            // A helper thread, so large input cannot deadlock against full output pipes.
-            // A broken pipe means the child exited early; its status explains why.
-            let spawned = std::thread::Builder::new()
-                .name("lector-stdin".into())
-                .spawn(move || {
-                    let _ = pipe.write_all(&bytes);
-                });
+            // The child's stdin pump (an owner of the pipe until the input is written), so
+            // large input cannot deadlock against full output pipes. A broken pipe means the
+            // child exited early; its status explains why.
+            let spawned = spawn_named(ThreadKind::PipeWriter, cmd.label.clone(), move || {
+                let _ = pipe.write_all(&bytes);
+            });
             if let Err(err) = spawned {
                 return Err(ProcessError::Io(err));
             }
@@ -475,43 +482,42 @@ pub(crate) fn spawn_reader<R: Read + Send + 'static>(
     capture: Option<Arc<Mutex<Capture>>>,
     mut deliver: impl FnMut(Line) -> bool + Send + 'static,
 ) {
-    let spawned = std::thread::Builder::new()
-        .name(match stream {
-            Stream::Stdout => "lector-stdout".into(),
-            Stream::Stderr => "lector-stderr".into(),
-        })
-        .spawn(move || {
-            let mut splitter = LineSplitter::default();
-            let mut buf = vec![0u8; 16 * 1024];
-            let mut delivering = true;
-            loop {
-                let n = match pipe.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                };
-                if let Some(cap) = &capture {
-                    cap.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(&buf[..n]);
-                }
-                if delivering {
-                    splitter.feed(&buf[..n], &mut |bytes, end| {
-                        if delivering {
-                            delivering = deliver(Line { stream, bytes, end });
-                        }
-                    });
-                }
+    let name = match stream {
+        Stream::Stdout => "stdout",
+        Stream::Stderr => "stderr",
+    };
+    let spawned = spawn_named(ThreadKind::PipeReader, name, move || {
+        let mut splitter = LineSplitter::default();
+        let mut buf = vec![0u8; 16 * 1024];
+        let mut delivering = true;
+        loop {
+            let n = match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if let Some(cap) = &capture {
+                cap.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(&buf[..n]);
             }
             if delivering {
-                splitter.finish(&mut |bytes, end| {
+                splitter.feed(&buf[..n], &mut |bytes, end| {
                     if delivering {
                         delivering = deliver(Line { stream, bytes, end });
                     }
                 });
             }
-        });
+        }
+        if delivering {
+            splitter.finish(&mut |bytes, end| {
+                if delivering {
+                    delivering = deliver(Line { stream, bytes, end });
+                }
+            });
+        }
+    });
     if let Err(err) = spawned {
         tracing::warn!("cannot start an output reader thread: {err}");
     }

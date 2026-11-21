@@ -166,8 +166,13 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Options for spawning a terminal session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SpawnOptions {
+    /// Runs the grace-period escalation after a kill (wait for the tree to go, then kill
+    /// survivors). This crate does not schedule (ADR 0003): the app passes its scheduler's
+    /// blocking lane. `None` runs it on the thread that kills or drops the session (it then
+    /// blocks for up to the grace period).
+    pub kill_runner: Option<lector_base::thread::TaskRunner>,
     /// What to run.
     pub profile: ShellProfile,
     /// Starting directory (default: the current directory of Lector).
@@ -186,10 +191,27 @@ pub struct SpawnOptions {
     pub scroll_to_bottom_on_input: bool,
 }
 
+impl std::fmt::Debug for SpawnOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnOptions")
+            .field("kill_runner", &self.kill_runner.is_some())
+            .field("profile", &self.profile)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env)
+            .field("size", &self.size)
+            .field("scrollback", &self.scrollback)
+            .field("shell_integration", &self.shell_integration)
+            .field("env_scrub", &self.env_scrub)
+            .field("scroll_to_bottom_on_input", &self.scroll_to_bottom_on_input)
+            .finish()
+    }
+}
+
 impl SpawnOptions {
     /// Options for `profile` with defaults for everything else.
     pub fn new(profile: ShellProfile) -> Self {
         Self {
+            kill_runner: None,
             profile,
             cwd: None,
             env: Vec::new(),

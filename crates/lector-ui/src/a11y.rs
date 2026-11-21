@@ -17,6 +17,7 @@
 //! [`start_os_detection`]), else `false`. Every animation in the UI (caret blink, smooth
 //! scrolling, toast slide-in, spinner rotation) asks it.
 
+use crate::background::{JobKey, JobKind, Priority, Subject};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use gpui::{div, prelude::*, App, Div, Hsla, Pixels, StyleRefinement};
@@ -64,13 +65,13 @@ pub fn detect_os_reduce_motion() -> Option<bool> {
     lector_app::os::detect_os_reduce_motion()
 }
 
-/// Detects the OS preference on a background thread (never blocks startup) and stores it
-/// for [`reduce_motion`].
-pub fn start_os_detection() {
-    std::thread::Builder::new()
-        .name("lector-os-motion".into())
-        .spawn(|| set_os_reduce_motion(detect_os_reduce_motion()))
-        .ok();
+/// Detects the OS preference in the background (it runs a helper program: the scheduler's
+/// blocking lane; never blocks startup) and stores it for [`reduce_motion`].
+pub fn start_os_detection(cx: &App) {
+    let key = JobKey::new(JobKind::ExternalProgram, Subject::App);
+    crate::background::detach(cx, key, Priority::Idle, |_| {
+        set_os_reduce_motion(detect_os_reduce_motion());
+    });
 }
 
 /// Thickness of the focus ring: 2 px, 3 px once the UI is scaled to 160 % or more.

@@ -1,8 +1,8 @@
-# Where threads may be created (ADR 0003): the named-thread helper in lector-base (ADR 0005) and
-# the scheduler's own workers. Nothing else may call
-# thread::spawn / thread::Builder / spawn_scoped, so every current use is baselined.
+# Where threads may be created (ADR 0003): only the named-thread helper in lector-base (ADR 0005).
+# Everything else, the scheduler's own workers included, starts threads through
+# lector_base::thread::spawn_named with a kind from the list below. Nothing else may call
+# thread::spawn / thread::Builder / spawn_scoped (std::thread::scope inside one call is fine).
 crates/lector-base/src/thread.rs
-crates/lector-app/src/scheduler.rs
 
 # Closed list of owner-thread kinds for lector_base::thread::spawn_named (ADR 0003, decision 3):
 # a thread that is itself a long-lived resource. One entry per `ThreadKind` variant of
@@ -12,24 +12,16 @@ kind:pty-reader   # terminal: reads the PTY master
 kind:pty-writer   # terminal: writes input to the PTY master
 kind:pty-waiter   # terminal: waits for the shell to exit
 kind:pty-parser   # terminal: parses PTY output into the grid
-kind:pty-reaper   # terminal: reaps a killed shell
 kind:lsp-reader   # language server stdout reader
 kind:lsp-writer   # language server stdin writer
 kind:lsp-watchdog   # language server request-timeout watchdog
-kind:lsp-launch   # language server delayed launch / restart
 kind:askpass-listener   # askpass credential socket accept loop
-kind:askpass-connection   # one askpass credential connection
-kind:file-watcher   # file watcher debounce loop and watch registration
+kind:file-watcher   # file watcher debounce loop
 kind:watch-poll   # fallback polling when no watcher could be registered
-kind:scheduler-worker   # a lector-app scheduler worker
+kind:scheduler-worker   # a lector-app scheduler worker (compute, reserved interactive, blocking lane)
 kind:scheduler-timer   # the scheduler's debounce timer
 kind:pipe-reader   # pumps a child's stdout/stderr
-kind:pipe-writer   # feeds a child's stdin without deadlocking against full pipes
-kind:process-reaper   # reaps a killed child process
-kind:shutdown-helper   # short helper that terminates one child/server at shutdown, joined at once
+kind:pipe-writer   # pumps a child's stdin (outlives the spawn call) without deadlocking against full pipes
 kind:acp-reader   # agent client: ACP connection reader
-kind:acp-request   # agent client: one blocking ACP request from the agent
-kind:agent-turn   # agent client: one agent turn
 kind:picker-worker   # the file picker's matching thread
 kind:mock-server   # mock forge server used by tests
-kind:startup-loader   # settings/project/theme load while the GUI starts

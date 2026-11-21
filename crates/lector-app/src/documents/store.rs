@@ -29,7 +29,7 @@ use parking_lot::{Mutex, RwLock};
 use super::derive::{self, DocDiagnostic};
 use super::exec::{DocExecutor, DocJob};
 use super::policy;
-use crate::scheduler::{JobKey, Priority};
+use crate::scheduler::{JobKey, JobKind, Priority, Subject};
 
 /// Rows per highlight chunk (request and cache granularity).
 pub const HIGHLIGHT_CHUNK: u32 = 128;
@@ -510,15 +510,15 @@ impl Subscribers {
 #[derive(Default)]
 struct Fx {
     events: Vec<DocEvent>,
-    jobs: Vec<(Priority, Option<JobKey>, Option<Duration>, DocJob)>,
+    jobs: Vec<(Priority, JobKey, Option<Duration>, DocJob)>,
 }
 
 impl Fx {
-    fn spawn(&mut self, prio: Priority, key: Option<JobKey>, job: DocJob) {
+    fn spawn(&mut self, prio: Priority, key: JobKey, job: DocJob) {
         self.jobs.push((prio, key, None, job));
     }
     fn debounce(&mut self, key: JobKey, delay: Duration, prio: Priority, job: DocJob) {
-        self.jobs.push((prio, Some(key), Some(delay), job));
+        self.jobs.push((prio, key, Some(delay), job));
     }
 }
 
@@ -637,7 +637,7 @@ impl Drop for DocShared {
                 None => {}
             }
         }
-        // A newer document of the same path keeps the server's copy open.
+        self.executor.cancel_subject(&Subject::Document(self.id.0));
         if let (Some(lsp), false) = (st.project.lsp(), replaced) {
             if st.lsp_synced.is_some() {
                 lsp.close_document(&st.path);
@@ -1348,15 +1348,15 @@ impl DocHandle {
             .unwrap_or_default()
     }
 
-    fn key(&self, what: &str) -> JobKey {
-        JobKey(format!("doc:{}:{what}", self.shared.id.0))
+    fn key(&self, kind: JobKind) -> JobKey {
+        JobKey::new(kind, Subject::Document(self.shared.id.0))
     }
 
     fn run(&self, fx: Fx) {
         for (prio, key, delay, job) in fx.jobs {
-            match (delay, key) {
-                (Some(delay), Some(key)) => self.shared.executor.debounce(key, delay, prio, job),
-                (_, key) => self.shared.executor.spawn(prio, key, job),
+            match delay {
+                Some(delay) => self.shared.executor.debounce(key, delay, prio, job),
+                None => self.shared.executor.spawn(prio, key, job),
             }
         }
         self.shared.subs.emit(fx.events);
@@ -1390,7 +1390,7 @@ impl DocHandle {
         let weak = self.shared.me.clone();
         fx.spawn(
             Priority::Interactive,
-            None,
+            self.key(JobKind::DocumentParse),
             Box::new(move |_| {
                 let started = std::time::Instant::now();
                 let parsed = old
@@ -1500,7 +1500,7 @@ impl DocHandle {
         st.structure.scheduled = Some(version);
         let weak = self.shared.me.clone();
         fx.debounce(
-            self.key("structure"),
+            self.key(JobKind::DocumentStructure),
             delay,
             Priority::Visible,
             Box::new(move |cancel| {
@@ -1607,7 +1607,7 @@ impl DocHandle {
         st.gutter.scheduled = Some(version);
         let weak = self.shared.me.clone();
         fx.debounce(
-            self.key("gutter"),
+            self.key(JobKind::DocumentGutter),
             delay,
             Priority::Background,
             Box::new(move |cancel| {
@@ -1664,7 +1664,7 @@ impl DocHandle {
                 st.blame.scheduled = Some(version);
                 let weak = self.shared.me.clone();
                 fx.debounce(
-                    self.key("blame"),
+                    self.key(JobKind::DocumentBlame),
                     self.delays().blame,
                     Priority::Background,
                     Box::new(move |cancel| {
@@ -1792,7 +1792,7 @@ impl DocHandle {
                     let weak = self.shared.me.clone();
                     fx.spawn(
                         Priority::Visible,
-                        None,
+                        self.key(JobKind::DocumentHighlight),
                         Box::new(move |_| {
                             let computed: Vec<(u32, Arc<Vec<LineHighlights>>)> = work
                                 .into_iter()
@@ -1915,7 +1915,7 @@ impl DocHandle {
         }
         let weak = self.shared.me.clone();
         fx.debounce(
-            self.key("lsp"),
+            self.key(JobKind::DocumentLsp),
             delay,
             Priority::Background,
             Box::new(move |_| {

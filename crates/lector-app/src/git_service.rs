@@ -16,11 +16,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use lector_base::thread::{spawn_named, ThreadKind};
 use lector_git::{HeadInfo, Repo, StatusEntry};
 use lector_review::conflicts::ConflictState;
 use parking_lot::{Mutex, RwLock};
 
-use crate::scheduler::{JobKey, Priority, Scheduler};
+use crate::scheduler::{JobKey, JobKind, Priority, Scheduler, Subject};
 
 /// Delay that coalesces refresh requests.
 pub const REFRESH_DEBOUNCE: Duration = Duration::from_millis(40);
@@ -98,6 +99,14 @@ impl std::fmt::Debug for Subscription {
     }
 }
 
+impl Drop for RepoState {
+    /// The repository closed (its last holder dropped it): its queued, running and debounced
+    /// jobs are cancelled.
+    fn drop(&mut self) {
+        self.scheduler.cancel_subject(&self.subject());
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         if let Some(state) = self.state.upgrade() {
@@ -130,16 +139,17 @@ impl RepoState {
             // Registering recursive watches walks the tree: never on the caller's
             // (possibly UI) thread.
             let weak = Arc::downgrade(&state);
-            let spawned = std::thread::Builder::new()
-                .name("lector-git-watch".into())
-                .spawn(move || {
+            let _ = state.scheduler.spawn(
+                JobKey::new(JobKind::WatchRegister, state.subject()),
+                Priority::Background,
+                move |cancel| {
                     if let Some(state) = weak.upgrade() {
-                        state.start_watching();
+                        if !cancel.is_cancelled() {
+                            state.start_watching();
+                        }
                     }
-                });
-            if let Err(err) = spawned {
-                tracing::error!("cannot start git watcher thread: {err}");
-            }
+                },
+            );
         }
         state.refresh();
         state
@@ -172,15 +182,17 @@ impl RepoState {
                     FALLBACK_POLL
                 );
                 let weak = self.me.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("lector-git-poll".into())
-                    .spawn(move || loop {
+                let spawned = spawn_named(
+                    ThreadKind::WatchPoll,
+                    self.repo.workdir().display().to_string(),
+                    move || loop {
                         std::thread::sleep(FALLBACK_POLL);
                         match weak.upgrade() {
                             Some(state) => state.refresh(),
                             None => return,
                         }
-                    });
+                    },
+                );
                 if let Err(err) = spawned {
                     tracing::error!("cannot start git poll thread: {err}");
                 }
@@ -229,8 +241,13 @@ impl RepoState {
         }
     }
 
+    /// The scheduler subject of this repository: its jobs are cancelled when it closes.
+    pub fn subject(&self) -> Subject {
+        Subject::repo(self.repo.workdir())
+    }
+
     fn job_key(&self) -> JobKey {
-        JobKey(format!("git-refresh:{}", self.repo.workdir().display()))
+        JobKey::new(JobKind::GitRefresh, self.subject())
     }
 
     /// Requests a re-read of HEAD, status and conflicts (coalesced with other

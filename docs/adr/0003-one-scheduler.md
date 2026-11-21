@@ -31,3 +31,39 @@ an indexing job, and cancelling "everything for this document/repo" is not possi
 `arch-check threads`: `thread::spawn`/`Builder::spawn` only in `lector-base` and the scheduler;
 `spawn_named` kinds ⊆ allowlist. `arch-check background`: `background_spawn` /
 `background_executor()` only inside the bridge module.
+
+## Clarifications at implementation
+Recorded by the architect when reviewing the implementation, before merge.
+
+- **Job keys are closed.** `JobKey { kind: JobKind, subject: Subject }`; `JobKind` is one enum
+  in `lector_app::scheduler::key` and declares, per kind: its lane, whether a newer job
+  replaces an older one, whether closing its subject cancels it, whether it may run at
+  Interactive, and what happens to it at quit.
+- **Three lanes.** *Compute*: `max(cpus - 1, 2)` workers plus one worker reserved for
+  Interactive kinds (DocumentParse, PickerRank, FindInFile only; any other kind asking for
+  Interactive runs at Visible). *Blocking*: waits whose duration someone else controls
+  (network, language servers, external programs), at most 16 threads, queued by priority.
+  *Guaranteed*: kinds that other jobs or a person wait on (askpass prompts, agent requests and
+  controls, terminal kill, agent turns) start at once and never queue behind a bound. A job on
+  one lane never runs inline on another; a compute worker waiting on a compute job runs it
+  inline.
+- **The bridge returns `BackgroundTask<T>`**, a future of `Result<T, JobError>` (cancelled,
+  panicked), not GPUI's `Task<T>`. Dropping it cancels the job synchronously; the token is
+  checked again on the main thread before delivery, so a stale result is never delivered.
+  `detach()` lets a job finish unobserved.
+- **Subjects close with their owner.** Dropping a document, a repository state or a view
+  cancels its subject. Kinds that write are never replaced and are not cancelled by closing a
+  subject.
+- **Quit drains writes.** Order: cancel every job whose kind is not a write and refuse new
+  ones; let writes finish while child processes are alive (10 s; network writes 2 s); stop
+  child process trees; stop the scheduler. Writes abandoned at the bound are named in the log
+  and the crash log. Before 0.8, quit stopped child processes at once and waited for nothing.
+- **Below `lector-app`**, an owner thread that has short work to hand off calls a
+  caller-supplied `lector_base::thread::TaskRunner` (askpass connections, language-server
+  launches, terminal kill escalation, agent requests); helpers that live inside one call use
+  `std::thread::scope`.
+- **Panics** in a job are caught, the waiter gets `JobError::Panicked`, the worker survives,
+  and the process panic hook writes the crash report once.
+- **Not UI-thread work:** a git or file-system call that starts a process or reads more than a
+  few small files does not run in render, menu building or an action handler; it goes through
+  the bridge and the view reads a cached value.

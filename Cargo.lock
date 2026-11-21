@@ -4635,6 +4635,7 @@ version = "0.7.1"
 dependencies = [
  "blake2",
  "keyring",
+ "lector-base",
  "minisign-verify",
  "ring",
  "semver",
@@ -4652,6 +4653,7 @@ version = "0.7.1"
 dependencies = [
  "dunce",
  "encoding_rs",
+ "lector-base",
  "lector-text",
  "notify",
  "tempfile",
@@ -4821,6 +4823,7 @@ dependencies = [
  "alacritty_terminal",
  "crossbeam-channel",
  "insta",
+ "lector-base",
  "lector-process",
  "memchr",
  "parking_lot",
