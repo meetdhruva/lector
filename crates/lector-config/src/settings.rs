@@ -546,11 +546,11 @@ pub struct Settings {
     pub show_indent_guides: bool,
     /// Pin enclosing scopes at the top while scrolling.
     pub sticky_scroll: bool,
-    /// Whitespace rendering.
+    /// Whitespace rendering. Parsed but not applied by the UI yet.
     pub show_whitespace: ShowWhitespace,
     /// Blink the cursor.
     pub cursor_blink: bool,
-    /// Allow scrolling past the last line.
+    /// Allow scrolling past the last line. Parsed but not applied by the UI yet.
     pub scroll_beyond_last_line: bool,
     /// Diff options.
     pub diff: DiffSettings,
@@ -914,10 +914,13 @@ fn read_layer(path: &Path, warnings: &mut Vec<String>) -> Option<toml::Table> {
 }
 
 /// Removes from a project layer what only the user's own settings may set: code hosts
-/// (`[forge]`: tokens could be sent elsewhere), agent commands (`agent.servers`) and
-/// language-server commands (`lsp.servers.*.command` / `args`, and `enabled = true`, which
-/// turns on servers that write into the project). Opening a project must never run a
-/// program the project chose.
+/// (`[forge]`: tokens could be sent elsewhere), network requests (`[updates]`,
+/// `git.auto_fetch`), the terminal's user-only keys (`USER_ONLY_TERMINAL_KEYS`: shell,
+/// profiles, environment and the safety and memory settings), agent commands
+/// (`agent.servers`) and language-server commands (`lsp.servers.*.command` / `args`, and
+/// `enabled = true`, which turns on servers that write into the project). Each dropped key
+/// is reported as a warning. Opening a project must never run a program the project chose or
+/// make Lector talk to the network.
 fn strip_user_only(layer: &mut toml::Table, file: &Path, warnings: &mut Vec<String>) {
     let mut dropped = Vec::new();
     if layer.remove("forge").is_some() {

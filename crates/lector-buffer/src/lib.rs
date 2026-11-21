@@ -1,4 +1,4 @@
-//! UI-free text editing model for Lector (see `docs/ARCHITECTURE.md`, "lector-buffer").
+//! UI-free text editing model for Lector.
 //!
 //! A [`Buffer`] owns a [`Rope`](lector_text::Rope), a set of multi-cursor
 //! [`Selection`]s and an undo history. Every mutating call returns a
@@ -11,6 +11,39 @@
 //!   so a step costs `O(edit size + log n)` regardless of file size.
 //!
 //! Nothing here touches the file system or a window system.
+//!
+//! # Behaviour notes
+//!
+//! * **Deltas.** A mutating call lists its deltas back to front (descending `start_byte`), with
+//!   `start` / `old_end` in the text before the call, so the list is a valid sequential
+//!   tree-sitter `InputEdit` / LSP `contentChanges` sequence. `undo` returns the inverse of the
+//!   step's deltas, `redo` the recorded ones. A call that replaces every selection by identical
+//!   text is not an edit: no deltas, no undo step, dirty flag untouched.
+//! * **Version and dirty.** [`Buffer::version`] is the rope's content version: it changes on
+//!   every edit and returns to the old value when undo restores that snapshot, so undoing back
+//!   to the saved state is clean. Selection moves never change it.
+//! * **History.** At most 10,000 steps and a cost budget of 1,000,000 units (a selection
+//!   counts 1, a delta 4), whichever is hit first, oldest dropped; a coalesced run stops growing
+//!   at 20,000 units. Consecutive single-line typing, backspace or delete of the same kind
+//!   within the coalescing window (1 s by default, [`Buffer::set_coalesce_window`]) join one
+//!   step; anything else breaks the run. Transactions nest; a new edit clears redo.
+//! * **Typing.** Auto-close only for one typed character with `auto_close_brackets`: `([{`
+//!   close before the end of text, whitespace or one of `)]};:.,=>`; quotes also need a
+//!   non-word character before them. A closer is typed over only when Lector inserted it and
+//!   the caret stayed inside that insertion. With a selection, openers and quotes surround it.
+//!   `newline` copies the indent, adds a level after `{ ( [` (and `:` with
+//!   `indent_after_colon`) and splits `{|}` into three lines, using the document's line ending.
+//!   Backspace in leading whitespace deletes back to the previous indent stop; typing a closer
+//!   on a blank line re-indents to the matching opener's line (scanning back at most 200,000
+//!   characters).
+//! * **Words** are UAX #29 segments, additionally split at punctuation (`a.b`, `can't`).
+//!   Occurrence selection from a caret matches whole words case-sensitively; from a
+//!   selection, plain substrings.
+//! * **External edits** ([`Buffer::apply_edits`]) are clipped, sorted, stripped of overlaps and
+//!   shrunk to their minimal differing part; carets map through them. `replace_all` keeps
+//!   carets at their row and column where possible.
+//! * **Saving** ([`save::encode`]): UTF-16 output carries a BOM, a lone `'\r'` is content, and
+//!   `ensure_final_newline` never adds a line break to empty text.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

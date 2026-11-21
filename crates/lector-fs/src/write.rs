@@ -73,6 +73,12 @@ fn temp_path(target: &Path) -> PathBuf {
 /// * A symlink is written through: its target is replaced, the link stays.
 /// * A new file is created with the default permissions.
 /// * The temporary file is removed on failure.
+///
+/// The temporary file is `.<name>.lector-<pid>-<n>.tmp` beside the target (file watchers may
+/// briefly report it); after the rename the parent directory is fsynced (Unix). Symlinks,
+/// including dangling ones and chains of up to 40 links, are resolved so the final target is
+/// replaced. On Windows the rename is retried briefly on `PermissionDenied` (another process
+/// holding the file open without share-delete).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let target = resolve_target(path)?;
     let existing = match fs::metadata(&target) {

@@ -9,6 +9,13 @@
 //! Linux reads `/proc`; other Unix systems ask `ps` for the descendants of the
 //! shell and their process groups. The list must be collected while the shell
 //! is still alive (children are re-parented when it exits).
+//!
+//! Stopping a terminal (`Terminal::kill`, or dropping the session) sends `SIGHUP` and
+//! `SIGCONT` to those processes and their groups, then `SIGKILL`s survivors after 300 ms
+//! (`kill`) or 500 ms (drop). The escalation runs on the session's
+//! `SpawnOptions::kill_runner` (the UI passes the scheduler's guaranteed lane, so dropping a
+//! view never blocks), or on the calling thread without one. Windows uses `taskkill /T /F`
+//! on the same runner.
 
 use rustix::process::{kill_process, kill_process_group, test_kill_process, Pid, Signal};
 

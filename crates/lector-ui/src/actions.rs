@@ -1,4 +1,6 @@
-//! Every user command is a GPUI action (see `docs/ARCHITECTURE.md`, "Actions").
+//! Every user command is a GPUI action, named `namespace::Name`; the default key map
+//! ([`crate::keymap::default_keymap`] merged with `lector_config::default_keymap`) and the menus
+//! ([`crate::menus::menu_model`]) refer to them by these names.
 //! Keybindings, the command palette, menus and context menus all dispatch
 //! these same actions.
 
@@ -40,7 +42,7 @@ pub mod workspace {
             ZoomReset,
             ToggleAppearance,
             SelectTheme,
-            // Lector-UI additions (documented in ARCHITECTURE.md).
+            // Lector-UI additions (UI plumbing, also bindable).
             CloseOtherTabs,
             CloseTabsToRight,
             ToggleColorblindDiff,
@@ -132,7 +134,7 @@ pub mod editor {
             SelectDown,
             SelectLeft,
             SelectRight,
-            // Lector-UI additions (documented in ARCHITECTURE.md).
+            // Lector-UI additions (UI plumbing, also bindable).
             MoveToLineStart,
             MoveToLineEnd,
             MoveWordLeft,

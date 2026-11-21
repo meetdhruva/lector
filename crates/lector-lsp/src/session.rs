@@ -7,6 +7,42 @@
 //!
 //! Coordinates: the text is a `lector_text::Rope`, offsets are byte offsets,
 //! the server speaks UTF-16 and is converted with the rope's converters.
+//!
+//! # Rules
+//!
+//! * **Replace range.** An item's `textEdit` wins (its insert or replace range per
+//!   [`InsertMode`]); without one the range is the word before the caret (Insert) or the
+//!   whole word around it (Replace) and the text is `insertText` or the label. The server's
+//!   range is re-anchored to what was typed since the request, so an answer for `fo` still
+//!   replaces `foo` after one more keystroke (and shrinks on backspace).
+//! * **Filtering** fuzzy-matches the typed text (`lector_base::fuzzy`) against `filterText` or
+//!   the label; items whose edit starts before the word (at a `.`, say) are matched from their
+//!   own start. Deprecated items lose 3000 points. Rows are ordered by score, then `sortText`
+//!   (or label), then `preselect`, then server order; the default selection is the first
+//!   preselected item among the best-scoring rows, and an explicit selection survives
+//!   narrowing. Extending the query only searches the previous survivors; only an
+//!   `isIncomplete` list makes a change of the typed text return [`Update::Requery`].
+//! * **Closing** ([`CloseReason`]): the caret leaves the word's row or goes before its start
+//!   (`CaretMoved`), a non-word character is typed (`LeftWord`), the text before the word
+//!   changed (`TextChanged`), or nothing matches a complete list (`NoMatches`); Escape and
+//!   accepting are the caller's `Dismissed` / `Committed`.
+//! * **Commit characters**: the item's own, else the list defaults, else the server's
+//!   `allCommitCharacters` ([`CompletionSession::is_commit_character`]).
+//! * **Additional edits** (auto-imports) from the list or from resolve are placed relative to
+//!   the caret of the document version they were computed for: the session remembers the caret
+//!   for the last 64 rope versions, so documents must be tagged with the rope version. Edits
+//!   that overlap the main edit or whose version is unknown are dropped and counted in
+//!   [`CompletionCommit::skipped_additional_edits`].
+//! * **Multi-line text**: `AdjustIndentation` (the default) re-indents lines after the first
+//!   to the caret line's indentation, `AsIs` does not; line breaks follow the document's (CRLF
+//!   if its first line break is CRLF).
+//! * **Multi-caret**: the main edit applies at the primary caret; another caret gets the same
+//!   text only when the text before it (and, in Replace mode, after it) equals the primary's
+//!   over the main range, otherwise it is left alone ([`CompletionCommit::skipped_carets`]).
+//!   Additional edits are for the primary only.
+//! * **Snippets**: off, a snippet is flattened to its plain text; on, [`crate::Snippet::parse`]
+//!   yields tab stops as byte ranges of the final text (`$0` last) and the primary caret goes to
+//!   the first one. There is no tab-stop session; the UI may ignore the other stops.
 
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;

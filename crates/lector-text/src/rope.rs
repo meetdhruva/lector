@@ -869,6 +869,12 @@ impl Rope {
     /// previous one is moved to start there, so malformed input cannot panic
     /// (but is not meaningful). An empty list leaves the rope (and its
     /// version) unchanged.
+    ///
+    /// With at least 8 edits and at least one edit per 256 KiB of text, only the
+    /// chunks the edits touch are rebuilt (with their known summaries) and every
+    /// other leaf is reused; sparser batches are spliced with the forward
+    /// cursor. Both produce a balanced tree and are checked against sequential
+    /// `replace` by property tests.
     pub fn apply_edits<S: AsRef<str>>(&mut self, edits: &[(Range<usize>, S)]) {
         if edits.is_empty() {
             return;

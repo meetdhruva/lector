@@ -1,4 +1,5 @@
-//! Headless application core of Lector (v0.4+). See `docs/ARCHITECTURE.md`, "lector-app".
+//! Headless application core of Lector: the only stateful layer (ADR 0001). `docs/ARCHITECTURE.md`
+//! describes how it fits with the other crates and the flows through it.
 //!
 //! Everything a user (or an agent, the CLI, an MCP client, a test) can do lives here,
 //! UI-free. `lector-ui` renders snapshots and dispatches commands.

@@ -3,7 +3,7 @@
 //!
 //! Notify only: nothing is downloaded or run here except two tiny text files (`SHA256SUMS.txt`
 //! and its `.minisig`) when an update exists. The UI shows "Lector X is available" and opens the
-//! release page or the asset URL in the browser. See docs/ARCHITECTURE.md, "Updates and signing".
+//! release page or the asset URL in the browser. Lector never updates itself.
 //!
 //! * [`check_for_update`] / [`check_for_update_with`] ask the GitHub Releases API (unauthenticated,
 //!   no user data, `User-Agent: lector/<version>`), compare versions with semver rules and return an
@@ -17,6 +17,30 @@
 //! * [`verify_checksums`] verifies `SHA256SUMS.txt` against the project's embedded minisign public key
 //!   ([`UPDATE_PUBLIC_KEY`], file `packaging/update-key.pub`). While that file is the placeholder, nothing
 //!   is ever reported as verified.
+//!
+//! # Trust model
+//!
+//! Three independent layers: HTTPS to GitHub (rustls with the platform verifier); the operating
+//! systems' signatures (macOS Developer ID and notarization, Windows Authenticode, GPG `.asc`
+//! files on Linux; optional, the release notes say what was signed, see `docs/RELEASING.md`);
+//! and the project's own minisign signature of `SHA256SUMS.txt`, which is what
+//! `UpdateStatus::Available::verified` means. `verified` is true only when a real key is
+//! compiled in and [`verify_checksums`] accepts the file for this release's tag; legacy
+//! non-prehashed signatures are refused, and there is no "unknown" middle state: an unverified
+//! checksum may be shown only as an unsigned checksum. Key rotation means shipping a Lector with
+//! the new public key first. Not covered: a stolen signing key, or a compromised build pipeline
+//! that holds it.
+//!
+//! # Request and selection
+//!
+//! `GET {api}/repos/meetdhruva/lector/releases?per_page=30` without credentials or cookies,
+//! 20 s timeout, at most 8 MiB. `403`/`429` with an exhausted rate limit or `Retry-After` is
+//! [`CheckFailure::RateLimited`]; a connection failure leaves `last_checked` untouched while
+//! rate limits and HTTP errors count as a check. Drafts, non-semver tags and build metadata are
+//! ignored; [`Channel::Stable`] takes only non-prereleases; the candidate must be strictly
+//! greater than the running version, so a downgrade is never offered. The checksum file
+//! (at most 256 KiB) and its signature (at most 8 KiB) are fetched only when an update exists,
+//! and only from `https://github.com` or the configured API origin.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;

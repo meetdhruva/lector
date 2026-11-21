@@ -336,7 +336,8 @@ This manifest is for sideloading and as a starting point. The update check detec
 
 Lector's opt-in update check (`[updates]` in `settings.toml`, `lector_forge::releases`) reads the GitHub Releases API,
 and verifies `SHA256SUMS.txt` with `packaging/update-key.pub`; the contract and trust model are in
-`docs/ARCHITECTURE.md` ("Updates and signing (v0.7)"). It depends on this pipeline's file names
+the rustdoc of `lector_forge::releases` (summary in `docs/ARCHITECTURE.md`, "What leaves the machine"). It
+depends on this pipeline's file names
 (`Lector-<v>-macos-universal.dmg`, `…-windows-<arch>-setup.exe`, `lector_<v>_<arch>.deb`, ...,
 `SHA256SUMS.txt`, `SHA256SUMS.txt.minisig`): renaming artifacts means updating `select_asset` in
 `crates/lector-forge/src/releases.rs` and its tests.

@@ -26,7 +26,7 @@
 //! **Several processes, locks, corruption.** See [`open`]: two Lector processes share the
 //! database; a process that cannot open it for writing runs with read-only state
 //! ([`StoreMode::ReadOnly`]: in memory, never written anywhere) and says so; a corrupt file
-//! is copied aside and replaced by a fresh one.
+//! is renamed aside (owner-only) and replaced by a fresh one.
 //!
 //! **Import.** The JSON files of 0.3 to 0.7.1 are imported once and renamed to
 //! `*.imported` ([`Store::import_legacy`], [`legacy`]).
@@ -313,7 +313,8 @@ impl Store {
         }
     }
 
-    /// The copy of a damaged database that was set aside when this store started fresh.
+    /// Where a damaged database was moved aside (renamed, or copied when the rename failed)
+    /// when this store started fresh.
     pub fn recovered_from(&self) -> Option<&Path> {
         self.info.recovered_from.as_deref()
     }

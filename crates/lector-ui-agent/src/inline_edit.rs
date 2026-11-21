@@ -15,9 +15,16 @@
 //! * Undoing a hunk is one buffer edit (one undo step) that leaves the file unsaved; keeping one
 //!   writes nothing (the text is already on disk).
 //!
-//! Why the agent's write lands first and the editor shows a diff against the baseline (instead of
-//! holding the proposal back as an overlay) is documented in `docs/ARCHITECTURE.md`, "Inline agent
-//! edit and turn summaries (v0.7)".
+//! The agent's write lands on disk first and the tab shows a diff against the baseline (the text
+//! when the box was submitted); nothing holds the write back. So the turn's checkpoint, its journal
+//! entry and what the agent reads back stay the truth about the turn, and "Undo turn" and the
+//! review tab work as for any turn. While hunks are pending the tab is read-only (rows no longer
+//! match the buffer) and returns to its previous state when the last hunk is decided; every old
+//! row carries `-` and every new row `+` in the gutter, so no meaning rests on color.
+//!
+//! `TurnId`s restart at 1 in every `AgentSession`, so everything that outlives a frame holds the
+//! session handle next to the id (the review tab's summary header, the panel's buttons, the
+//! inline edit); the panel's summary cache is keyed by `(SessionId, TurnId)`.
 
 use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;

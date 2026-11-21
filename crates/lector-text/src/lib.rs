@@ -12,6 +12,19 @@
 //! Conventions: byte offsets are `usize`; rows are 0-based `u32`; rows are
 //! separated by `'\n'` and line ranges exclude `"\n"` / `"\r\n"`.
 //!
+//! Line semantics (the same for [`Rope`] and [`MappedText`]): `"a\nb"` and
+//! `"a\n"` have 2 lines, `""` has 1. [`Point`] columns are raw bytes, so a
+//! `'\r'` before the `'\n'` is addressable even though line ranges exclude it.
+//! Out-of-range columns clip to the row's `'\n'`, rows past the end clip to
+//! `len()`, and offsets or points inside a multi-byte char clip to the char
+//! start ([`Bias::Left`]). Strings returned by [`Text::Mapped`] are decoded
+//! lossily, so their byte length can differ from the requested range when the
+//! file is not valid UTF-8.
+//!
+//! [`Text::version`] is unique per distinct content snapshot (a process-wide
+//! counter): clones keep it, every edit assigns a new one. Caches and
+//! background results are keyed by it.
+//!
 //! This is the only Lector crate that uses `unsafe` (to memory-map files);
 //! see the [`MappedText`] module docs for why that is acceptable.
 

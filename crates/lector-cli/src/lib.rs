@@ -9,8 +9,62 @@
 //!   ship as `lector-cli.exe` and `lector.com`: the GUI-subsystem `lector.exe` has no console, and
 //!   `cmd.exe` does not wait for it. See `docs/RELEASING.md`.
 //!
-//! Human output is compact; `--json` output is stable (see "CLI and MCP" in
-//! `docs/ARCHITECTURE.md`): fields are only ever added. Exit codes: 0 ok, 1 error, 2 usage.
+//! Human output is compact; `--json` output is stable: fields are only ever added. Exit codes:
+//! 0 ok, 1 error (`lector: error: ...` on stderr), 2 usage. A closed stdout (`| head`) exits 0.
+//! Diagnostics go to stderr only when `RUST_LOG` is set.
+//!
+//! # Invocation
+//!
+//! [`is_cli_invocation`]: the first argument (after an optional leading `--color <when>`) is a
+//! subcommand name; everything else starts the GUI (`lector ./status` opens a folder named
+//! `status`). Subcommands: `status [PATH]` (gix only, no core or database), `changes
+//! [--staged | --unstaged | --branch BASE | --range A..B] [--no-risk] [-C DIR]`, `diff
+//! <changeset> [--file P] [--moved] [-U N]`, `commands [--category C]`, `run <id> [--args JSON |
+//! @file | -] [--allow-writes]`, `activity [-n N] [--all]`, `undo <id> [--force]`, `mcp [PATH]
+//! [--allow-writes]`, `health [-n N]`. Global `--color auto|always|never` (auto: stdout is a
+//! terminal, `NO_COLOR` empty or unset, `TERM` not `dumb`); every subcommand except `mcp` has
+//! `--json`. Changesets are review keys (`worktree`, `staged`, `unstaged`, `untracked`,
+//! `commit:<rev>`, `range:<a>..<b>`, `branch:<base>...<branch>`), `A...B` (merge base), `A..B`,
+//! or one revision (that commit against its first parent). `run` refuses a command with
+//! `writes` unless `--allow-writes` (nothing runs, nothing is journaled); `undo` is itself the
+//! explicit action. The journal records `Source::Cli` / `Source::Mcp`. The headless registry is
+//! assembled in `session::open_core` (language servers disabled); commands of other crates that
+//! should exist without a window are registered there.
+//!
+//! # `--json` formats (schema 1)
+//!
+//! Every document is an object with `"schema": 1` ([`JSON_SCHEMA_VERSION`], bumped only for a
+//! breaking change). Paths are repository-relative, lines 0-based, ranges `[start, end)`; floats
+//! are rounded to 3 decimals.
+//!
+//! ```text
+//! status    {root, branch|null, detached, head|null, head_short|null, upstream|null, ahead, behind,
+//!            operation: null | {kind: merge|rebase|cherry-pick|revert|am, description, interactive,
+//!                               step: [n, total]|null},
+//!            counts: {staged, unstaged, untracked, conflicted}, clean}
+//! changes   {changeset, title, files: [{path, old_path?, kind: added|modified|deleted|renamed|copied|typechange,
+//!             added?, removed?, binary?, viewed?, risk?: {score, level: low|medium|high,
+//!             reasons: [{kind, weight, message, line?, dampening?}]}}],   // riskiest first; by path with --no-risk
+//!            totals: {files, added, removed, high, medium, low}, risk_skipped?}  // > MAX_RISK_FILES or --no-risk
+//! diff      {changeset, title, files: [<git.show_diff file object: path, kind, added, removed,
+//!             hunks: [{header, old, new, lines: [" ctx" | "-old" | "+new"]}] | binary | image | too_large>,
+//!             moved?: [{old, new, reindented}]],
+//!            moves?: [{from: {path, lines}, to: {path, lines}, reindented}]}  // only with --moved
+//! commands  {commands: [CommandSpec::to_json(): id, title, category, args (JSON Schema), writes?,
+//!            destructive?, undoable?, ui_action?]}
+//! run       {ok, command, summary, data, paths, journal_id?, undoable?}
+//! activity  {entries: [{id, time (RFC 3339 UTC), command, source: ui|cli|mcp|agent|internal, summary,
+//!             repo, paths, args, undoable, undone, undo_of?, undone_by?}]}  // newest first; current repo unless --all
+//! undo      {undone: <id>, entry: <the entry the undo recorded>}
+//! health    {sessions, running, clean, abnormal, panics, crash_free_rate: 0..1|null,
+//!            by_version: [{version, sessions, clean, abnormal, panics}], crash_reports, crash_dir,
+//!            last_crashes: [{file, path, time, version, os, thread, location, message}],
+//!            state: null|"<line>"}                                   // the state store's problem, if any
+//! ```
+//!
+//! `risk.reasons[].kind` is the snake_case `lector_review::risk::RiskKind`. Moved blocks come from
+//! `lector_diff::moves` (within a file and across the changeset, the latter computed over the
+//! whole changeset even with `--file`); in human diffs moved lines start with `<` / `>`.
 
 #![forbid(unsafe_code)]
 
