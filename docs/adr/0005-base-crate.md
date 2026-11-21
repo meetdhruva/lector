@@ -22,3 +22,24 @@ shared table test of query → expected order.
 ## Checked by
 `arch-check dupes`: exactly one `struct CancelToken`; no `fn fuzzy`/matcher module outside
 `lector-base` and the picker.
+
+## Clarifications at implementation (step 5)
+Recorded by the architect when reviewing the implementation, before merge.
+
+- **The file picker keeps nucleo** as its scorer. Measured on 1M paths, the base scorer was
+  1.4–5.8× slower per path and produced a different top-10 for 7 of 10 queries; the picker's
+  pruning bounds and its property tests are built on nucleo's scores. The picker exposes no
+  general fuzzy function, so there is still exactly one scorer other code can call.
+- **Queries are whitespace-separated atoms, matched in any order** (every atom must match;
+  scores add; positions are the union). A one-atom query scores exactly as before. The
+  nucleo operator syntax (`^ $ ! '`), which only one picker had and no document described, is
+  not carried over.
+- **No ranking of large lists on the UI thread.** Lists up to 5,000 candidates rank inline
+  (measured under 1 ms); larger lists rank on the `lector-app` scheduler under one job key per
+  picker, cancellable (`rank_cancellable`), newest query wins (`lector-ui` `ListRanker`).
+- **`CancelToken`** has `child()` (weakly held by the parent) and `on_cancel` hooks that run
+  exactly once on the cancelling thread, never under the internal lock. Crates import
+  `lector_base::CancelToken` directly; there are no aliases or re-exports.
+- **`ThreadKind` lists 25 kinds today**, 16 owner threads and 9 short tasks that currently
+  use a thread. Step 3 (ADR 0003) moves the short tasks to the scheduler and removes their
+  kinds; only owner kinds remain.

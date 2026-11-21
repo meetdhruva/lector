@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lector-base.workspace = true
 ignore = "0.4"
 globset.workspace = true
 nucleo = "0.5"

@@ -19,14 +19,13 @@ pub mod apply;
 
 use std::path::Path;
 
+use lector_base::CancelToken;
 use lector_config::ReviewStore;
 use lector_diff::{DiffOptions, DiffStats};
 use lector_git::{Changeset, FileChange, Repo};
 use lector_review::review::{self, ChangesetView, FileDiff, ReviewFile};
 use lector_review::Result;
 use lector_syntax::LanguageRegistry;
-
-pub use lector_search::CancelToken;
 
 use crate::content_cache::ContentCache;
 

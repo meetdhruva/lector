@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Headless application core of Lector: documents, git state, commands, scheduler, activity journal, storage."
 
 [dependencies]
+lector-base.workspace = true
 lector-text = { workspace = true, features = ["serde"] }
 lector-buffer.workspace = true
 lector-fs.workspace = true

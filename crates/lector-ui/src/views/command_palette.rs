@@ -11,12 +11,13 @@ use gpui::{
     Window,
 };
 
+use lector_base::fuzzy::{Matcher, Query};
+
 use crate::actions::{humanize_action_name, is_palette_hidden};
 use crate::commands_bridge::PaletteEntry;
 use crate::components::binding_text_for_action;
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
 use crate::components::tooltip::Tooltip;
-use crate::fuzzy::NucleoList;
 use crate::theme::{ActiveTheme, ColorExt};
 use crate::views::Workspace;
 
@@ -39,10 +40,13 @@ pub struct Command {
     pub confirm: bool,
 }
 
+/// Most rows the palette shows for a query.
+const MAX_MATCHES: usize = 500;
+
 /// Palette delegate.
 pub struct CommandPaletteDelegate {
     commands: Vec<Command>,
-    list: NucleoList<usize>,
+    matcher: Matcher,
     matches: Vec<(usize, Vec<usize>)>,
     selected: usize,
     previous_focus: Option<FocusHandle>,
@@ -113,13 +117,9 @@ impl CommandPaletteDelegate {
         previous_focus: Option<FocusHandle>,
         workspace: Option<WeakEntity<Workspace>>,
     ) -> Self {
-        let list = NucleoList::new(false);
-        for (ix, c) in commands.iter().enumerate() {
-            list.push(ix, &c.label);
-        }
         CommandPaletteDelegate {
             commands,
-            list,
+            matcher: Matcher::new(),
             matches: Vec::new(),
             selected: 0,
             previous_focus,
@@ -177,12 +177,15 @@ impl PickerDelegate for CommandPaletteDelegate {
                 .map(|ix| (ix, Vec::new()))
                 .collect()
         } else {
-            self.list.set_query(query.trim());
-            self.list.settle(200);
-            self.list
-                .top(500)
+            self.matcher
+                .rank_by(
+                    &Query::new(query),
+                    &self.commands,
+                    |c| &*c.label,
+                    MAX_MATCHES,
+                )
                 .into_iter()
-                .map(|m| (m.item, m.positions))
+                .map(|r| (r.index, r.positions))
                 .collect()
         };
         self.selected = 0;

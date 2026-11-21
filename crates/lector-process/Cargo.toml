@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Child process supervision for Lector: spawn, stream, cancel and kill whole process trees; askpass prompts."
 
 [dependencies]
+lector-base.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true

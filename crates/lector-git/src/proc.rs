@@ -4,9 +4,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::time::Duration;
 
+use lector_base::CancelToken;
 use lector_process::{
-    CancelToken, Line, ProcessCommand, ProcessError, ProcessKind, RunOptions, RunOutput, StdinMode,
-    Supervisor,
+    Line, ProcessCommand, ProcessError, ProcessKind, RunOptions, RunOutput, StdinMode, Supervisor,
 };
 
 use crate::error::{Error, Result};

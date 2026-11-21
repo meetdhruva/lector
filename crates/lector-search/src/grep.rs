@@ -10,7 +10,8 @@ use ignore::WalkState;
 
 use crate::globs::build_set;
 use crate::walk::{build_walker, WalkOptions};
-use crate::{CancelToken, Result};
+use crate::Result;
+use lector_base::CancelToken;
 
 /// Files larger than this are skipped by project search.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;

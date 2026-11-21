@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{select, Either};
-use lector_search::{search_project, CancelToken, CaseMode, SearchEvent, SearchQuery, WalkOptions};
+use lector_base::CancelToken;
+use lector_search::{search_project, CaseMode, SearchEvent, SearchQuery, WalkOptions};
 use lector_syntax::SymbolLocation;
 use lector_text::{Point, Text};
 use parking_lot::{Condvar, Mutex};

@@ -1,15 +1,35 @@
-# Where threads may be created (ADR 0003). Both files are future homes: the named-thread helper
-# in lector-base (ADR 0005) and the scheduler's own workers. Nothing else may call
+# Where threads may be created (ADR 0003): the named-thread helper in lector-base (ADR 0005) and
+# the scheduler's own workers. Nothing else may call
 # thread::spawn / thread::Builder / spawn_scoped, so every current use is baselined.
 crates/lector-base/src/thread.rs
 crates/lector-app/src/scheduler.rs
 
 # Closed list of owner-thread kinds for lector_base::thread::spawn_named (ADR 0003, decision 3):
-# a thread that is itself a long-lived resource. Provisional spellings until spawn_named exists;
-# comparison ignores case, `-` and `_`. Adding a kind needs an ADR.
-kind:pty-reader
-kind:pty-writer
-kind:lsp-reader
-kind:askpass-listener
-kind:file-watcher
-kind:scheduler-worker
+# a thread that is itself a long-lived resource. One entry per `ThreadKind` variant of
+# crates/lector-base/src/thread.rs (a unit test there keeps the two lists equal; the spelling is the
+# variant's kebab-case name; comparison here ignores case, `-` and `_`). Adding a kind needs an ADR.
+kind:pty-reader   # terminal: reads the PTY master
+kind:pty-writer   # terminal: writes input to the PTY master
+kind:pty-waiter   # terminal: waits for the shell to exit
+kind:pty-parser   # terminal: parses PTY output into the grid
+kind:pty-reaper   # terminal: reaps a killed shell
+kind:lsp-reader   # language server stdout reader
+kind:lsp-writer   # language server stdin writer
+kind:lsp-watchdog   # language server request-timeout watchdog
+kind:lsp-launch   # language server delayed launch / restart
+kind:askpass-listener   # askpass credential socket accept loop
+kind:askpass-connection   # one askpass credential connection
+kind:file-watcher   # file watcher debounce loop and watch registration
+kind:watch-poll   # fallback polling when no watcher could be registered
+kind:scheduler-worker   # a lector-app scheduler worker
+kind:scheduler-timer   # the scheduler's debounce timer
+kind:pipe-reader   # pumps a child's stdout/stderr
+kind:pipe-writer   # feeds a child's stdin without deadlocking against full pipes
+kind:process-reaper   # reaps a killed child process
+kind:shutdown-helper   # short helper that terminates one child/server at shutdown, joined at once
+kind:acp-reader   # agent client: ACP connection reader
+kind:acp-request   # agent client: one blocking ACP request from the agent
+kind:agent-turn   # agent client: one agent turn
+kind:picker-worker   # the file picker's matching thread
+kind:mock-server   # mock forge server used by tests
+kind:startup-loader   # settings/project/theme load while the GUI starts

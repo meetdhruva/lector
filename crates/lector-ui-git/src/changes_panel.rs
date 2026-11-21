@@ -11,7 +11,7 @@ use gpui::{
     MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
 };
 use lector_app::review_queue::QueueGroup;
-use lector_app::review_service::CancelToken;
+use lector_base::CancelToken;
 use lector_diff::DiffStats;
 use lector_git::{ChangeKind, Changeset};
 use lector_review::review::{ChangesetView, ReviewFile};

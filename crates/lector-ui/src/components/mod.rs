@@ -8,6 +8,7 @@ pub mod modal;
 pub mod picker;
 pub mod popover;
 pub mod prompt;
+pub mod ranker;
 pub mod scrollbar;
 pub mod split;
 pub mod tabs;

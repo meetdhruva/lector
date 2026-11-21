@@ -28,7 +28,7 @@ pub enum Error {
     /// Git error.
     #[error("git error: {0}")]
     Git(#[from] lector_git::Error),
-    /// The caller's [`CancelToken`](lector_search::CancelToken) was set.
+    /// The caller's [`CancelToken`](lector_base::CancelToken) was set.
     #[error("cancelled")]
     Cancelled,
     /// Anything else.
@@ -36,13 +36,15 @@ pub enum Error {
     Other(String),
 }
 
-/// `Err(Cancelled)` once `cancel` is set.
-pub(crate) fn check_cancel(cancel: &lector_search::CancelToken) -> Result<()> {
-    if cancel.is_cancelled() {
-        Err(Error::Cancelled)
-    } else {
-        Ok(())
+impl From<lector_base::Cancelled> for Error {
+    fn from(_: lector_base::Cancelled) -> Self {
+        Error::Cancelled
     }
+}
+
+/// `Err(Cancelled)` once `cancel` is set.
+pub(crate) fn check_cancel(cancel: &lector_base::CancelToken) -> Result<()> {
+    Ok(cancel.check()?)
 }
 
 /// `Result` alias for the review analysis.

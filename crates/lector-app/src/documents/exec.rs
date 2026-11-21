@@ -8,7 +8,8 @@
 
 use std::time::Duration;
 
-use crate::scheduler::{CancelToken, JobKey, Priority, Scheduler};
+use crate::scheduler::{JobKey, Priority, Scheduler};
+use lector_base::CancelToken;
 
 /// A unit of background work. It receives a [`CancelToken`] that is set when
 /// a newer job with the same key superseded it.

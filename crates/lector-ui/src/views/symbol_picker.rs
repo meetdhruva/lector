@@ -1,19 +1,19 @@
 //! Symbol pickers: file outline (`workspace::ToggleOutline`), project
 //! symbols (`workspace::ToggleSymbolFinder`) and multiple go-to-definition
-//! targets. Fuzzy matching runs on nucleo.
+//! targets. Matching uses `lector_base::fuzzy`: inline for small lists, on the scheduler for large
+//! ones (`components::ranker`), so a project with 300k symbols never ranks on the UI thread.
 
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::scale::px;
 use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Task, Window};
 use lector_syntax::SymbolKind;
 
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
+use crate::components::ranker::{ListRanker, Ranking};
 use crate::editor::symbol_badge;
-use crate::fuzzy::NucleoList;
 use crate::icons::FileIcon;
 
 /// One pickable symbol / location.
@@ -35,17 +35,20 @@ pub struct SymbolEntry {
     pub cols: std::ops::Range<usize>,
 }
 
+/// Most rows shown for a query.
+const MAX_MATCHES: usize = 500;
+
 type ConfirmCallback = Rc<dyn Fn(SymbolEntry, &mut Window, &mut App)>;
 
 /// Delegate for symbol pickers.
 pub struct SymbolPickerDelegate {
     placeholder: SharedString,
     entries: Arc<Vec<SymbolEntry>>,
-    list: NucleoList<usize>,
+    ranker: ListRanker<SymbolEntry>,
+    rank_task: Option<Task<()>>,
     rows: Vec<(usize, Vec<usize>)>,
     selected: usize,
     on_confirm: ConfirmCallback,
-    tick_task: Option<Task<()>>,
     empty: SharedString,
     loading: bool,
     keep_order: bool,
@@ -61,28 +64,14 @@ impl SymbolPickerDelegate {
         on_confirm: impl Fn(SymbolEntry, &mut Window, &mut App) + 'static,
     ) -> Self {
         let entries = Arc::new(entries);
-        let list = NucleoList::new(false);
-        let injector = list.injector();
-        let feed = entries.clone();
-        if feed.len() > 2000 {
-            std::thread::spawn(move || {
-                for (ix, e) in feed.iter().enumerate() {
-                    injector.push(ix, &e.name);
-                }
-            });
-        } else {
-            for (ix, e) in feed.iter().enumerate() {
-                injector.push(ix, &e.name);
-            }
-        }
         SymbolPickerDelegate {
             placeholder: placeholder.into(),
+            ranker: ListRanker::new(entries.clone(), |e| &*e.name, MAX_MATCHES),
             entries,
-            list,
+            rank_task: None,
             rows: Vec::new(),
             selected: 0,
             on_confirm: Rc::new(on_confirm),
-            tick_task: None,
             empty: "No symbols".into(),
             loading: false,
             keep_order,
@@ -110,15 +99,6 @@ impl SymbolPickerDelegate {
         {
             self.selected = ix;
         }
-    }
-
-    fn refresh(&mut self) {
-        self.rows = self
-            .list
-            .top(500)
-            .into_iter()
-            .map(|m| (m.item, m.positions))
-            .collect();
     }
 }
 
@@ -148,34 +128,38 @@ impl PickerDelegate for SymbolPickerDelegate {
         self.selected = 0;
         let query = query.trim();
         if query.is_empty() {
-            self.tick_task = None;
-            let limit = if self.keep_order { usize::MAX } else { 500 };
+            self.ranker.cancel();
+            self.rank_task = None;
+            let limit = if self.keep_order {
+                usize::MAX
+            } else {
+                MAX_MATCHES
+            };
             self.rows = (0..self.entries.len().min(limit))
                 .map(|ix| (ix, Vec::new()))
                 .collect();
             return;
         }
-        self.list.set_query(query);
-        let running = self.list.tick(8);
-        self.refresh();
-        if running || (self.list.counts().1 as usize) < self.entries.len() {
-            self.tick_task = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let Ok(done) = this.update(cx, |picker, cx| {
-                    let d = &mut picker.delegate;
-                    let running = d.list.tick(5);
-                    d.refresh();
-                    cx.notify();
-                    !running && d.list.counts().1 as usize >= d.entries.len()
-                }) else {
-                    break;
-                };
-                if done {
-                    break;
-                }
-            }));
+        match self.ranker.set_query(query) {
+            Ranking::Ready(rows) => {
+                self.rank_task = None;
+                self.rows = rows;
+            }
+            // A large list: rows of the previous query stay until the new ones arrive in one piece.
+            Ranking::Pending(pending) => {
+                self.rank_task = Some(cx.spawn(async move |this, cx| {
+                    let (generation, rows) = pending.wait().await;
+                    let Some(rows) = rows else { return };
+                    let _ = this.update(cx, |picker, cx| {
+                        let d = &mut picker.delegate;
+                        if d.ranker.is_current(generation) {
+                            d.rows = rows;
+                            d.selected = 0;
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
         }
     }
 

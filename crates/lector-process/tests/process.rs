@@ -5,7 +5,8 @@
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use lector_process::{CancelToken, LineEnd, ProcessKind, StdinMode, Stream};
+use lector_base::CancelToken;
+use lector_process::{LineEnd, ProcessKind, StdinMode, Stream};
 use lector_process::{ProcessCommand, ProcessError, RunOptions, Supervisor};
 
 #[cfg(unix)]

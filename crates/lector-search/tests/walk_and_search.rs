@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use lector_base::CancelToken;
 use lector_search::*;
 use tempfile::TempDir;
 
