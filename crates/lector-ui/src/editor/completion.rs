@@ -2,8 +2,8 @@
 //!
 //! One [`CompletionController`] per file tab (created for every `FileView` by
 //! [`init`], found again with [`controller_for`]) owns a
-//! [`lector_lsp::CompletionSession`] and drives it as `docs/ARCHITECTURE.md`
-//! ("Completion and signature help") describes. It is also the popup's view:
+//! [`lector_lsp::CompletionSession`] and drives it by the rules in that type's module
+//! documentation. It is also the popup's view:
 //! the code view hosts it through `CodeView::set_popup` and places it at the
 //! start of the word being completed (below the line, above when there is no
 //! room, clamped to the window; `code_view::popup`).

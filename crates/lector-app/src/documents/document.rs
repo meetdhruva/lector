@@ -370,7 +370,7 @@ impl Document {
             .clone()
     }
 
-    /// Foldable row ranges (see ARCHITECTURE.md "Fold ranges"); empty without syntax.
+    /// Foldable row ranges (see `lector_syntax::Syntax::fold_ranges`); empty without syntax.
     pub fn fold_ranges(&self) -> Arc<Vec<Range<u32>>> {
         self.inner
             .folds

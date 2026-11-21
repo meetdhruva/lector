@@ -1,9 +1,12 @@
 //! Minimal JSON-RPC 2.0 over a byte stream (newline-delimited JSON, as ACP uses on stdio).
 //!
 //! Runtime-agnostic: one reader thread per connection; requests block the calling thread
-//! (with an optional timeout); incoming requests are answered from their own thread so a
-//! slow one (a permission prompt) never stalls the stream; notifications are delivered in
-//! order on the reader thread. Malformed lines are logged and skipped.
+//! (with an optional timeout); each incoming request runs as a task of the `TaskRunner`
+//! given to [`Connection::new`] (the session passes the scheduler's guaranteed lane, kind
+//! `AgentRequest`), so a slow one (a permission prompt) never stalls the stream, and a task
+//! dropped unrun is answered with an error; notifications are delivered in order on the
+//! reader thread. Malformed lines are counted and skipped, answers to unknown ids ignored,
+//! unknown methods answered `-32601` ([`METHOD_NOT_FOUND`]).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};

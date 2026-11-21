@@ -15,7 +15,25 @@
 //!
 //! The priority of each kind is chosen by the caller; only the kinds listed in
 //! [`JobKind::may_be_interactive`] may use [`Priority::Interactive`](super::Priority), the
-//! others are run as `Visible` (see `docs/ARCHITECTURE.md`, "Background work").
+//! others are run as `Visible`. The priorities call sites use today ("C" compute lane, "B"
+//! blocking lane, "G" guaranteed lane):
+//!
+//! | Priority | Kinds | Why |
+//! |---|---|---|
+//! | Interactive (C, reserved worker) | DocumentParse, PickerRank, FindInFile | answer a keystroke; short; newest wins |
+//! | Visible (C) | DocumentHighlight, DocumentStructure, DocumentOpen, DocumentReload, DocumentSave, FileRead, ImageDecode, MarkdownRender, ReplaceInFile, ProjectSearch, ProjectSymbols, PickerFeed, GitChangeset, GitFileSummary, GitBlame, GitLog, GitRefs, GitIdentity, GitCommitMessage, GitLookup, GitConfigRead, ConflictParse, GitWrite, JournalList, JournalPreview, ProvenanceExplain, ReviewAnalysis (review queue), AgentContext (attach a diff), TerminalSpawn, TerminalLink, TerminalSessions (restore) | on screen, or what the user just asked for |
+//! | Visible (B) | LspHover, LspDefinitions, LspReferences, ForgeRead, ForgeWrite, AgentStart, NetworkCommand (sync operations), Command / CommandRead (`invoke_async`), StartupLoad, ExternalProgram (reveal) | the user waits, but the duration is somebody else's |
+//! | Visible (G) | AskpassPrompt, AgentRequest, AgentControl, AgentTurn | other jobs or the user wait on them |
+//! | Background (C) | DocumentGutter, DocumentBlame, DocumentLsp, GitRefresh, GitSyncStatus, WatchRegister, FileRescan, Reindex, ReviewFingerprint, ReviewAnalysis (working-tree hint), AgentContext (turn summaries), TerminalSessionsSave, GitLookup (the Changes panel's default base) | needed soon, not on the critical path |
+//! | Background (B) | LspSync, LspLaunch, UpdateCheck | waits on a server or the network; nobody waits for it |
+//! | Background (G) | TerminalKill | a dying process tree; must run even when the blocking lane is full |
+//! | Idle | SymbolIndex (C), ExternalProgram (B; the OS reduce-motion probe) | indexing and probes that can wait |
+//!
+//! Writes the user asked for (DocumentSave, GitWrite, Command, NetworkCommand, ForgeWrite,
+//! AgentControl, TerminalSessionsSave, TerminalKill) are never replaced and are not cancelled
+//! with their subject; at quit they are drained (a unit test keeps the two lists equal).
+//! ReplaceInFile only computes replacements (the edit is applied on the main thread), so it is
+//! not a write.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,8 +70,8 @@ pub enum AtQuit {
 
 macro_rules! job_kinds {
     ($( $(#[$doc:meta])* $name:ident = ($lane:ident, $replaces:expr, $with_subject:expr, $interactive:expr) ),* $(,)?) => {
-        /// The closed set of background job kinds. Adding one is a one-line change here; the
-        /// table in `docs/ARCHITECTURE.md` lists them with their priority.
+        /// The closed set of background job kinds. Adding one is a one-line change here; add it
+        /// to the priority table in the module documentation too.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum JobKind {
             $( $(#[$doc])* $name, )*

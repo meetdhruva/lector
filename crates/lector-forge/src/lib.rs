@@ -1,4 +1,4 @@
-//! Code host adapters for Lector (v0.6, Agent FORGE). See docs/ARCHITECTURE.md, "lector-forge".
+//! Code host adapters for Lector, and the update check ([`releases`]).
 //!
 //! UI-free and blocking (call from a background thread): HTTP goes through `ureq`
 //! (rustls with the platform's certificate verifier, proxies from `HTTPS_PROXY` /
@@ -12,6 +12,13 @@
 //!   GitLab REST v4): list pull/merge requests, details, review threads mapped to
 //!   (path, 0-based line, side), submit a review, reply, resolve.
 //! * [`mock`] is a tiny `std::net` HTTP server serving recorded JSON (tests, screenshots).
+//!
+//! Pull-request heads and bases are fetched by the caller into Lector's shadow repository
+//! (`refs/lector/pr/<n>/{head,base}`, see `fetch_refspecs` on [`Forge`]), never into the
+//! user's repository. GitLab has no "request changes": it is reported as unsupported in
+//! [`SubmittedReview`]. Pagination follows `Link: rel="next"` up to 10 pages. Which hosts are
+//! GitHub or GitLab comes from the user's `[forge]` settings, which a project's
+//! `.lector/settings.toml` cannot set, so a repository cannot send a token to another server.
 #![forbid(unsafe_code)]
 
 mod auth;

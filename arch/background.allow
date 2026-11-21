@@ -1,4 +1,4 @@
-# The one GPUI bridge (ADR 0003, decision 2): `background(cx, key, priority, f) -> Task<T>` in
+# The one GPUI bridge (ADR 0003, decision 2): `background(cx, key, priority, f) -> BackgroundTask<T>` in
 # lector-ui is the only place UI code may call background_spawn / background_executor. Today it needs
 # neither (it runs jobs on the lector-app scheduler and delivers them with the foreground executor);
 # the entry keeps the one place where a GPUI executor detail may be used.

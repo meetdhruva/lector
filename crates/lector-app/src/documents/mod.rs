@@ -20,7 +20,7 @@
 //! * A [`Document`] is the immutable value a snapshot carries: a loaded file
 //!   with its text, language, syntax and lazily derived highlights/outline.
 //!
-//! See `docs/ARCHITECTURE.md`, "lector-app — documents".
+//! See `docs/ARCHITECTURE.md`, "Opening and editing a document".
 
 mod derive;
 mod document;

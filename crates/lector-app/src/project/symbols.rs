@@ -1,4 +1,9 @@
 //! Code navigation: definitions, references, hover (LSP first, tags/text fallback).
+//!
+//! Definitions fall back to the tags index when the server returns nothing or times out (3 s);
+//! tag results are ranked same file first, then same extension, then by directory proximity,
+//! and the open document is indexed on demand. References add a whole-word text search to the
+//! tags' references when there is no server.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

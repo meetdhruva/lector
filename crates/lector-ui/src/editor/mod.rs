@@ -1,7 +1,7 @@
 //! File tabs backed by a shared [`DocumentModel`]: the (editable) code view
 //! with breadcrumbs, banners, hover popovers, and image / binary previews.
 //!
-//! Editing seams (see `docs/ARCHITECTURE.md`, "Editing"):
+//! Editing seams (the flow is in `docs/ARCHITECTURE.md`, "Opening and editing a document"):
 //! * one [`DocumentModel`] per open file, shared by all of its tabs, adapts a
 //!   shared `lector_app::documents::DocHandle` (the same document agents,
 //!   commands and other windows edit) and owns its

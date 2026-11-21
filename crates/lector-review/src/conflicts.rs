@@ -7,6 +7,12 @@
 //! Parsing never fails: nested, unterminated or stray markers are reported as
 //! [`MarkerProblem`]s and the affected text is left alone. Line endings may be
 //! `\n` or `\r\n` (byte ranges include them). Rows are 0-based.
+//!
+//! A marker is exactly seven marker characters followed by the end of the line or a space and
+//! a label (`=======` takes none). The diff3 / zdiff3 base section is optional per conflict. A
+//! lone `=======` outside a conflict is content (Markdown and reStructuredText underlines).
+//! When the `>>>>>>>` line had no line break (end of file), the resolution drops its final
+//! line break too.
 
 use std::ops::Range;
 

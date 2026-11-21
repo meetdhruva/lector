@@ -2,10 +2,20 @@
 //! and the mapping from [`UpdateStatus`] to the words and buttons of the dialog and the status
 //! bar. UI-free and unit-tested; `update_ui.rs` only draws what this module says.
 //!
-//! Policy (see "Updates and signing (v0.7)" in `docs/ARCHITECTURE.md`): notify only. Nothing is
+//! Policy (see "What leaves the machine" in `docs/ARCHITECTURE.md` and `lector_forge::releases`):
+//! notify only. Nothing is
 //! downloaded or run by Lector; "Download" opens the asset URL in the browser. "Verified" is
 //! said only when the checksum file's signature verified; otherwise the dialog says "signature
 //! not available for this build".
+//!
+//! Schedule: on the first run the user is asked once whether to check automatically (default
+//! off; skipped when `[updates] check = "on"` is already set, and under `LECTOR_SCREENSHOT` or
+//! `LECTOR_NO_NOTICES`); the answer lives in [`crate::notices::Notices`] and wins over the setting
+//! (`Notices::effective_check`). When on, one check runs at startup if `should_check_now` allows
+//! it (at most one request per day) and its result is kept so a quiet status bar item can show
+//! on later starts without a request; nothing runs on a timer after startup. "Check for
+//! Updates…" always works, also with checks off, and answers in the window that asked. Every
+//! URL the dialog opens passes [`safe_release_url`].
 
 use lector_app::store::Single;
 use lector_config::{should_check_now, UpdateChannel, UpdateCheck};

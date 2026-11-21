@@ -23,6 +23,23 @@
 //!
 //! The tool list is built from the registry on every `tools/list`, so commands registered later
 //! (by other crates) appear without changes here.
+//!
+//! Protocol surface: `initialize` (echoes a supported `protocolVersion`, else
+//! [`LATEST_PROTOCOL_VERSION`]; capabilities `tools` and `resources`, no `listChanged` /
+//! `subscribe`), `ping`, `tools/list`, `tools/call`, `resources/list`,
+//! `resources/templates/list`, `resources/read`, an empty `prompts/list`, `logging/setLevel`;
+//! notifications `notifications/initialized` and `notifications/cancelled`; JSON-RPC batches
+//! are accepted. Errors: `-32700` parse, `-32600` invalid request, `-32601` unknown method,
+//! `-32602` invalid params or unknown tool, `-32002` resource not found. Invalid arguments,
+//! unavailable or failing commands (and a panic inside one) are tool errors (`isError: true`),
+//! not protocol errors. Tool annotations: `title`, `readOnlyHint = !writes`,
+//! `openWorldHint: false`, and for writes `destructiveHint` (the spec's `destructive`) and
+//! `idempotentHint: false`. A call's result repeats the summary and compact data as text
+//! (for clients that ignore `structuredContent`), puts `Outcome::data` in `structuredContent`
+//! (non-objects wrapped as `{result}`) and, for writes, `_meta.lector { command, undoable,
+//! journalId }`. Documents are served only from inside the project root after resolving
+//! symlinks, never from `.git`; tool path arguments are confined the same way
+//! (`CommandContext::confine_path`).
 
 #![forbid(unsafe_code)]
 

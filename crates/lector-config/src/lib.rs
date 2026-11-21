@@ -5,6 +5,15 @@
 //! `lector_app::store` (ADR 0004). This crate only parses the files people edit
 //! (`settings.toml`, `keymap.toml`, a project's `.lector/settings.toml`) and says where
 //! Lector's folders are.
+//!
+//! Settings load as defaults, then the user's `settings.toml`, then the project's
+//! `.lector/settings.toml` ([`load_settings_for`]); unknown keys and bad values become
+//! warnings, never errors. A project layer cannot set what would run a program or reach the
+//! network: `[forge]`, `[updates]`, `git.auto_fetch`, `agent.servers`,
+//! `lsp.servers.*.command` / `args` / `enabled = true` and the terminal's shell, profiles,
+//! environment, paste prompt and scrollback are dropped from it with a warning. Automatic
+//! fetch and update checks are off by default ([`AutoFetch::Off`], [`UpdateCheck::Off`]);
+//! [`should_check_now`] allows at most one automatic update check per day.
 #![forbid(unsafe_code)]
 
 mod keymap;

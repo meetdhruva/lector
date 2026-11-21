@@ -17,6 +17,12 @@
 //! plus rename destinations), backed up in the shadow repo first (plus the stash entry for
 //! pop). A stash apply that fails puts back what git changed before returning the error.
 //! Fetch and push are journaled but not undoable.
+//!
+//! Stash apply / pop take `restore_index`: `true` applies with `--index` (refused when git
+//! cannot), `false` is git's default (staged changes come back unstaged), absent means `true`
+//! only for a stash Lector's "stash and switch" created. Paths that changed during the apply
+//! but were not backed up are listed in `data.not_backed_up` and in the summary. All commands
+//! here that write are `writes: true`, so MCP lists them only with `--allow-writes`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
