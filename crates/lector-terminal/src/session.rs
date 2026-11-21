@@ -490,11 +490,17 @@ impl Terminal {
         }
     }
 
-    /// Runs the kill escalation on the [kill runner](SpawnOptions::kill_runner), or here.
+    /// Runs the kill escalation on the [kill runner](SpawnOptions::kill_runner), or here when
+    /// there is none or it hands the task back (the app has stopped its scheduler): the kill
+    /// is never lost.
     #[cfg(any(unix, windows))]
-    fn run_kill(&self, task: Box<dyn FnOnce() + Send + 'static>) {
+    fn run_kill(&self, task: lector_base::thread::RunnerTask) {
         match &self.kill_runner {
-            Some(run) => run(task),
+            Some(run) => {
+                if let Err(task) = run(task) {
+                    task();
+                }
+            }
             None => task(),
         }
     }

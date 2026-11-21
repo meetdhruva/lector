@@ -135,6 +135,33 @@ fn a_damaged_state_database_is_reported_and_untouched() {
     assert_eq!(names, vec!["lector.redb".to_string()]);
 }
 
+/// A state database this user cannot read: `lector health` says the state is read-only (as
+/// the next start would run), and leaves the file as it was. Needs an unprivileged user
+/// (privileged users read any file): skipped, with a note, otherwise.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_state_database_is_reported_as_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    std::fs::create_dir_all(&fx.data).expect("data dir");
+    let db = fx.data.join("lector.redb");
+    std::fs::write(&db, b"").expect("write");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::File::open(&db).is_ok() {
+        eprintln!(
+            "an_unreadable_state_database_is_reported_as_read_only: skipped (privileged user)"
+        );
+        return;
+    }
+    let v = fx.json(&["health", "--json"]);
+    let state = v["state"].as_str().expect("a state line");
+    assert!(state.contains("lost when Lector quits"), "{state}");
+    let mode = std::fs::metadata(&db).expect("meta").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o000);
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    assert_eq!(std::fs::read(&db).expect("read"), b"");
+}
+
 #[test]
 fn json_reports_sessions_rate_versions_and_crashes() {
     let fx = Fx::new();

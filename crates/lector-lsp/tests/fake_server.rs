@@ -31,6 +31,7 @@ fn fast() -> LspOptions {
     LspOptions {
         launcher: Some(std::sync::Arc::new(|task| {
             std::thread::spawn(task);
+            Ok(())
         })),
         request_timeout: Duration::from_millis(600),
         init_timeout: Duration::from_secs(10),

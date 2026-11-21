@@ -101,5 +101,6 @@ fn cancelling_fails_git_without_a_terminal_prompt() {
 fn threads() -> lector_base::thread::TaskRunner {
     std::sync::Arc::new(|task| {
         std::thread::spawn(task);
+        Ok(())
     })
 }

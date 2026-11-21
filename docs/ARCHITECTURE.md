@@ -210,9 +210,13 @@ pub enum ThreadKind { PtyReader, PtyWriter, PtyWaiter, PtyParser, LspReader, Lsp
     FileWatcher, WatchPoll, SchedulerWorker, SchedulerTimer, PipeReader, PipeWriter, AcpReader, PickerWorker, MockServer }
                                     // closed, owner threads only (0.8: the 8 short-task kinds moved to the scheduler);
                                     // `as_str()` = the `kind:` names of arch/threads.allow (a unit test keeps them equal); ThreadKind::ALL
-pub type TaskRunner = Arc<dyn Fn(Box<dyn FnOnce() + Send + 'static>) + Send + Sync>;
-                                    // how a crate below lector-app hands a short blocking task to its caller (runs it once, or drops
-                                    // it unrun when cancelled; may run it inline); lector-app: `Scheduler::task_runner(key, prio)`
+pub type RunnerTask = Box<dyn FnOnce() + Send + 'static>;
+pub type TaskRunner = Arc<dyn Fn(RunnerTask) -> Result<(), RunnerTask> + Send + Sync>;
+                                    // how a crate below lector-app hands a short blocking task to its caller. Contract: a task
+                                    // is never silently dropped: the runner takes it (Ok) or hands it back (Err) and the caller
+                                    // runs it itself: `if let Err(t) = runner(t) { t() }`. lector-app: `Scheduler::task_runner`
+                                    // (refused after shutdown / for non-writes while quitting → handed back; a taken
+                                    // AtQuit::Drain task (TerminalKill) that is cancelled before it ran still runs when dropped)
 pub fn spawn_named<T, F>(kind: ThreadKind, name: impl Into<String>, f: F) -> io::Result<JoinHandle<T>>
     where F: FnOnce() -> T + Send + 'static, T: Send + 'static;
                                     // OS thread name `<kind>:<name>` (control chars replaced, <= 63 bytes, cut on a char boundary)
@@ -1583,7 +1587,7 @@ pub enum StoreError { Db(DbError), NewerSchema { concern, found, known }, Migrat
   state) is gone when it exits. It is said for as long as it lasts: `StoreMode::indicator() -> StateIndicator { label:
   "State not saved", detail }` is a status bar item in every window (detail on hover and click; also a 20 s toast at
   startup), `lector health` prints the same line (`Store::probe(path) -> Probe::{Missing, Healthy, ReadOnly, Damaged}`,
-  a read-only look that creates, writes and recovers nothing; JSON field `state`), and headless commands (`lector
+  a read-only look that creates, writes and recovers nothing and answers what `Store::open` would do: `RepairAborted` (a repair a writable open does) counts as healthy only when the file opens for writing, which is checked without writing; permission, other I/O and upgrade errors, a read-only file or file system, a missing file whose folder is not writable and a damaged file whose folder is not writable are read-only; JSON field `state`), and headless commands (`lector
   <subcommand>`, `lector mcp`) print `StoreMode::headless_warning()` once on stderr at their first state change
   (`Store::on_read_only_write`; cache writes do not count). The same applies to a file written by a newer Lector (detected
   through a read-only handle before any writable open) or one that cannot be written (permissions, old redb format).
@@ -1700,7 +1704,10 @@ else starts a thread (`arch-check threads`), and UI code reaches the scheduler o
   `git`, file reads and parsing are bounded by input size and stay on the compute lane.
 * **Guaranteed lane.** **Rule: a kind that other jobs or a person wait on never queues behind the lane bound.**
   AskpassPrompt (a git command waits for it), AgentRequest (the agent waits; permission prompts), AgentControl
-  (cancel / undo a turn), TerminalKill and AgentTurn run on threads started on demand with no bound, so a blocking
+  (cancel / undo a turn), TerminalKill and AgentTurn run on threads started on demand with no bound (each submission
+  claims an unclaimed idle worker or starts a thread, under the lane lock, so a burst never strands a job behind one
+  waking worker; the blocking lane does the same up to its bound; test
+  `guaranteed_lane_bursts_never_strand_a_job_stress`), so a blocking
   lane full of waiters can never keep the job they wait for from starting (tests
   `a_full_blocking_lane_never_delays_what_others_wait_on`,
   `a_command_waiting_for_a_prompt_completes_while_the_lane_is_otherwise_full`). Their number is bounded by their
@@ -1717,6 +1724,12 @@ else starts a thread (`arch-check threads`), and UI code reaches the scheduler o
   GitWrite, Command, NetworkCommand, ForgeWrite, AgentControl, TerminalSessionsSave, TerminalKill) are never replaced
   and survive their window closing.
 * **Results.** A running job sees its `CancelToken`; once cancelled, its result is never delivered (`JobError::Cancelled`).
+  A job stays registered under its key and subject until its result has been taken or nobody can take it (its
+  `JobHandle` / bridge task dropped, or it ran detached): a replacement or subject cancellation that arrives after the
+  job finished but before the main thread delivers its value still cancels it. Delivery checks and unregisters under the
+  scheduler lock (`Registration::deliver`). Tests: `a_finished_undelivered_result_is_replaced_by_a_newer_job_with_its_key`,
+  `a_result_replaced_after_it_finished_is_not_delivered` (bridge), `registrations_end_with_delivery_or_when_nobody_waits`.
+  Quit cancels only queued and running jobs, so a write that finished during the drain still reports success.
   A panicking job is caught: the worker survives, `tracing::error!` logs it, the process's panic hook writes it to the
   crash log (`lector health`), and the waiter gets `JobError::Panicked(message)`.
 * **No deadlock.** The scheduler's lock is never held while a job runs, a thread starts or a runner is called; jobs
@@ -1738,7 +1751,11 @@ else starts a thread (`arch-check threads`), and UI code reaches the scheduler o
   `quit_gives_up_on_a_hung_network_write_within_its_grace_and_reports_it`,
   `reads_are_cancelled_at_once_while_writes_drain`, `quits_promptly_with_reads_queued_and_running`. Every kind not
   cancelled with its subject is drained (a unit test keeps the two lists equal). ReplaceInFile only computes the
-  replacements (the edit is applied to the buffer on the main thread), so it is not a write. Owner threads end with
+  replacements (the edit is applied to the buffer on the main thread), so it is not a write. Terminals (PTY trees are
+  not supervised): the terminal quit hook (`lector_ui_terminal::kill_all`) kills every live session before this runs;
+  each kill's escalation (SIGHUP, then SIGKILL of survivors after 300 ms; `taskkill` on Windows) is a TerminalKill job,
+  which the drain waits for; a terminal dropped after the scheduler stopped gets its task handed back and runs the
+  escalation itself (test `a_terminal_dropped_after_scheduler_shutdown_still_kills_a_child_that_ignores_sighup`). Owner threads end with
   their resource; those still alive are reported (`ShutdownReport::owner_threads_alive`).
 * **Crates below `lector-app` do not schedule.** They expose blocking, cancellable functions; an owner thread with
   short work to hand off calls a `lector_base::thread::TaskRunner` its caller supplies: askpass connections

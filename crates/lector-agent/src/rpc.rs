@@ -348,14 +348,18 @@ impl Connection {
                 // Released even if the runner drops the task unrun (cancelled at shutdown):
                 // then the request is answered as cancelled.
                 let slot = InFlight(Some((conn, id)));
-                requests(Box::new(move || {
+                let task: lector_base::thread::RunnerTask = Box::new(move || {
                     let mut slot = slot;
                     if let Some((conn, id)) = slot.0.take() {
                         let result = h.on_request(&method, params);
                         conn.inner.in_flight.fetch_sub(1, Ordering::AcqRel);
                         conn.respond(id, result);
                     }
-                }));
+                });
+                // Handed back (the app is stopping): answer it here rather than drop it.
+                if let Err(task) = requests(task) {
+                    task();
+                }
             }
             (Some(method), None) => {
                 if let Some(h) = handler.upgrade() {
@@ -431,7 +435,10 @@ mod tests {
         let input = b"not json\n{\"jsonrpc\":\"2.0\",\"method\":\"a\"}\n[1,2]\n\n{\"jsonrpc\":\"2.0\",\"method\":\"b\",\"params\":{}}\n".to_vec();
         let rec = Arc::new(Recorder(Mutex::new(Vec::new())));
         let weak: Weak<dyn Handler> = Arc::downgrade(&(rec.clone() as Arc<dyn Handler>));
-        let runner: TaskRunner = Arc::new(|task| task());
+        let runner: TaskRunner = Arc::new(|task| {
+            task();
+            Ok(())
+        });
         let conn = Connection::new(Cursor::new(input), std::io::sink(), weak, runner);
         for _ in 0..200 {
             if conn.is_closed() {

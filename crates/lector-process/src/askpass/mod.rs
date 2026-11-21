@@ -246,6 +246,7 @@ pub fn askpass_helper_path(exe: &Path) -> PathBuf {
 pub(crate) fn test_runner() -> lector_base::thread::TaskRunner {
     std::sync::Arc::new(|task| {
         std::thread::spawn(task);
+        Ok(())
     })
 }
 
