@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "root": "/fixture/project",
+  "tabs": [
+    {
+      "cwds": [
+        "/fixture/project"
+      ],
+      "title": "server",
+      "vertical": false
+    },
+    {
+      "cwds": [
+        "/fixture/project/web",
+        "/fixture/project/api"
+      ],
+      "title": null,
+      "vertical": true
+    }
+  ]
+}

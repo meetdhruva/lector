@@ -55,9 +55,9 @@ fn branch_changeset() -> Changeset {
 
 /// Loads every file diff of the changeset, in path order (as the review tab does).
 fn load_diffs(s: &Session, cs: &Changeset) -> (String, Vec<(String, Arc<FileDiff>)>) {
-    let view = lector_app::project::load_changeset(s.project(), cs, &s.core.review_store())
+    let view = lector_app::project::load_changeset(s.project(), cs, &s.core.review_marks())
         .expect("changeset");
-    let opts = review::diff_options(&s.project().settings().diff);
+    let opts = review::diff_options(s.project().settings().diff.ignore_whitespace);
     let files = view
         .files
         .iter()

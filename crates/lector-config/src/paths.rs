@@ -89,7 +89,8 @@ pub fn config_dir() -> PathBuf {
         .join(app_dir_name())
 }
 
-/// Directory for Lector-owned state (sessions, review state, logs).
+/// Directory for Lector-owned state (the state database `lector.redb` of
+/// `lector_app::store`, logs, crash reports).
 ///
 /// macOS: `~/Library/Application Support/Lector`; Linux: `$XDG_DATA_HOME/lector`;
 /// Windows: `%APPDATA%\Lector`.
@@ -129,16 +130,6 @@ pub fn themes_dir() -> PathBuf {
 /// `<data_dir>/lector.log`
 pub fn log_file() -> PathBuf {
     data_dir().join("lector.log")
-}
-
-/// `<data_dir>/sessions`
-pub fn sessions_dir() -> PathBuf {
-    data_dir().join("sessions")
-}
-
-/// `<data_dir>/review.json`
-pub fn review_file() -> PathBuf {
-    data_dir().join("review.json")
 }
 
 #[cfg(test)]

@@ -1,0 +1,32 @@
+{
+  "updates_asked": true,
+  "auto_update_check": true,
+  "acknowledged_crash": "1795240000-4242",
+  "pending_update": {
+    "status": "available",
+    "version": "0.8.0",
+    "notes_url": "https://github.com/meetdhruva/lector/releases/tag/v0.8.0",
+    "published_at": 1800000000,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "Lector-0.8.0-linux-x86_64.AppImage",
+        "url": "https://github.com/meetdhruva/lector/releases/download/v0.8.0/Lector-0.8.0-linux-x86_64.AppImage",
+        "size": 98765432,
+        "sha256": "4f2d0c1e9b8a7f6e5d4c3b2a19087f6e5d4c3b2a19087f6e5d4c3b2a19087f6e"
+      }
+    ],
+    "verified": true,
+    "install_kind": "app_image",
+    "action": {
+      "kind": "download",
+      "asset": {
+        "name": "Lector-0.8.0-linux-x86_64.AppImage",
+        "url": "https://github.com/meetdhruva/lector/releases/download/v0.8.0/Lector-0.8.0-linux-x86_64.AppImage",
+        "size": 98765432,
+        "sha256": "4f2d0c1e9b8a7f6e5d4c3b2a19087f6e5d4c3b2a19087f6e5d4c3b2a19087f6e"
+      }
+    },
+    "hint": null
+  }
+}

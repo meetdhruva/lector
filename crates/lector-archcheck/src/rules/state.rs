@@ -12,10 +12,14 @@
 //! 3. otherwise, `fs::write`, `File::create`, `File::create_new` or `OpenOptions` in a
 //!    statement that mentions a string literal ending in `.json`.
 //!
+//! In (1), a name declared in the same file as `const NAME: &str = "x.json";` (or `static`)
+//! counts as its literal, so `data_dir().join(STATE_FILE)` is caught too.
+//!
 //! File names listed as `literal:<name>` in the allow file (`settings.toml`, `keymap.toml`:
 //! user-edited files, ADR 0004 decision 2) are exempt from (1).
 //!
-//! What it cannot see: a file name held in a `const` or built by `format!` from a variable;
+//! What it cannot see: a file name held in a `const` of another file, or built by `format!`
+//! from a variable;
 //! a path received as a function parameter with another name; a path joined across two
 //! statements through a field; persistence through a library that picks its own path;
 //! writes of files with other extensions. Expect misses rather than false positives.
@@ -68,12 +72,48 @@ fn is_str(f: &SourceFile, i: usize) -> bool {
     f.tokens().get(i).is_some_and(|t| t.kind == TokKind::Str)
 }
 
+/// `const NAME: &str = "...";` / `static NAME: &str = "...";` items of non-test code:
+/// (name, literal value).
+fn named_file_literals(f: &SourceFile) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let n = f.tokens().len();
+    for i in 0..n {
+        if f.is_test(i) || !matches!(f.tok(i), "const" | "static") {
+            continue;
+        }
+        let name = i + 1;
+        if !f
+            .tokens()
+            .get(name)
+            .is_some_and(|t| t.kind == TokKind::Ident)
+            || f.tok(name + 1) != ":"
+        {
+            continue;
+        }
+        // The type must mention `str`, and the value must be one string literal.
+        let Some(eq) = (name + 2..n.min(name + 12)).find(|j| matches!(f.tok(*j), "=" | ";")) else {
+            continue;
+        };
+        if f.tok(eq) != "=" || !(name + 2..eq).any(|j| f.tok(j) == "str") {
+            continue;
+        }
+        if is_str(f, eq + 1) && f.tok(eq + 2) == ";" {
+            out.push((
+                f.tok(name).to_string(),
+                str_value(f.tok(eq + 1)).to_string(),
+            ));
+        }
+    }
+    out
+}
+
 /// Findings in one file.
 pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
     if f.test_only || allow.matches_path(&f.path) {
         return Vec::new();
     }
     let exempt: Vec<&str> = allow.tagged("literal");
+    let named = named_file_literals(f);
     let mut out = Vec::new();
     // Block structure: every `{` opens a block with a parent; `block_at[i]` is the innermost
     // block containing token `i`. A binding is visible only inside the block that declared it.
@@ -148,8 +188,15 @@ pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
                 continue;
             }
             let close = f.close_of(i + 2);
-            let literal = (i + 3..close).filter(|k| is_str(f, *k)).find_map(|k| {
-                let v = str_value(f.tok(k));
+            let literal = (i + 3..close).find_map(|k| {
+                let v = if is_str(f, k) {
+                    str_value(f.tok(k))
+                } else {
+                    named
+                        .iter()
+                        .find(|(n, _)| n == f.tok(k) && f.tok(k + 1) != "(")
+                        .map(|(_, v)| v.as_str())?
+                };
                 (STATE_EXTENSIONS.iter().any(|e| v.ends_with(e)) && !exempt.contains(&v))
                     .then(|| v.to_string())
             });
@@ -294,6 +341,20 @@ mod tests {
         let src = "fn a() {\n    std::fs::write(\"out.json\", data).ok();\n    let f = File::create(root.join(\"report.json\"));\n    fs::write(path, bytes);\n    fs::write(data_dir().join(\"c.json\"), b);\n}";
         let v = run("crates/x/src/a.rs", src);
         assert_eq!(v.iter().map(|v| v.line).collect::<Vec<_>>(), [2, 3, 5]);
+    }
+
+    #[test]
+    fn file_names_held_in_consts_and_statics_count_as_literals() {
+        let src = "const STATE_FILE: &str = \"notices.json\";\nstatic DB: &'static str = \"x.redb\";\nconst SETTINGS: &str = \"settings.toml\";\nconst DIR: &str = \"logs\";\nfn p() {\n    data_dir().join(STATE_FILE);\n    config_dir().join(DB);\n    config_dir().join(SETTINGS);\n    data_dir().join(DIR);\n    project.join(STATE_FILE);\n}";
+        let v = run("crates/x/src/a.rs", src);
+        assert_eq!(v.iter().map(|v| v.line).collect::<Vec<_>>(), [6, 7]);
+        assert!(v[0].message.contains("notices.json"), "{}", v[0].message);
+        // A const of a test region, or a function call of that name, does not count.
+        let tests = "#[cfg(test)]\nconst F: &str = \"a.json\";\nfn p() { data_dir().join(F); data_dir().join(G()); }\nconst G: &str = \"g.json\";";
+        assert!(run("crates/x/src/a.rs", tests).is_empty());
+        // Not a string const: ignored.
+        let other = "const N: usize = 3;\nfn p() { data_dir().join(N); }";
+        assert!(run("crates/x/src/a.rs", other).is_empty());
     }
 
     #[test]

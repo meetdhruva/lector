@@ -217,7 +217,7 @@ impl PaneItem for CompareItem {
         Some(self.view.clone())
     }
 
-    fn tab_kind(&self, _: &App) -> Option<lector_config::TabKind> {
+    fn tab_kind(&self, _: &App) -> Option<lector_app::store::TabKind> {
         None
     }
 

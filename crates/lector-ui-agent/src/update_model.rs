@@ -7,8 +7,7 @@
 //! said only when the checksum file's signature verified; otherwise the dialog says "signature
 //! not available for this build".
 
-use std::path::Path;
-
+use lector_app::store::Single;
 use lector_config::{should_check_now, UpdateChannel, UpdateCheck};
 use lector_forge::releases::{
     check_for_update_with, compare_versions, Channel, CheckFailure, ReleaseAsset, UpdateAction,
@@ -28,28 +27,42 @@ pub fn forge_channel(channel: UpdateChannel) -> Channel {
     }
 }
 
-/// Runs a check with the persisted state at `state_path` (blocking: call off the UI thread) and
-/// saves the new state. `opts` is [`UpdateOptions::default`] in production.
+/// The update check's persisted state: the store's `update_state` concern.
+pub type UpdateStateStore = Single<UpdateState>;
+
+/// The stored state; missing or unreadable is the empty state.
+pub fn load_state(store: &UpdateStateStore) -> UpdateState {
+    match store.get() {
+        Ok(s) => s.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!("update state: {e}");
+            UpdateState::default()
+        }
+    }
+}
+
+/// Runs a check with the persisted state (blocking: call off the UI thread) and stores the new
+/// state. `opts` is [`UpdateOptions::default`] in production.
 pub fn run_check(
     current_version: &str,
     channel: Channel,
     opts: &UpdateOptions,
-    state_path: &Path,
+    store: &UpdateStateStore,
 ) -> UpdateStatus {
-    let mut state = UpdateState::load(state_path);
+    let mut state = load_state(store);
     let before = state.clone();
     let status = check_for_update_with(current_version, channel, opts, &mut state);
     if state != before {
-        if let Err(e) = state.save(state_path) {
+        if let Err(e) = store.put(&state) {
             tracing::warn!("update state not saved: {e}");
         }
     }
     status
 }
 
-/// Whether an automatic check is due according to the persisted state at `state_path`.
-pub fn automatic_check_due_in(setting: UpdateCheck, state_path: &Path, now: i64) -> bool {
-    automatic_check_due(setting, UpdateState::load(state_path).last_checked, now)
+/// Whether an automatic check is due according to the persisted state.
+pub fn automatic_check_due_in(setting: UpdateCheck, store: &UpdateStateStore, now: i64) -> bool {
+    automatic_check_due(setting, load_state(store).last_checked, now)
 }
 
 /// Whether `status` is a still-useful "available" answer for the running `current_version`.
@@ -405,6 +418,28 @@ mod tests {
             .any(|b| matches!(b.action, UpdateButtonAction::OpenUrl(_))));
     }
 
+    /// The `update-state.json` 0.7.1 wrote (fixture produced by the 0.7.1 code) reads back
+    /// from the store after the import.
+    #[test]
+    fn the_update_state_of_0_7_1_is_imported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lector-app/tests/fixtures/state-0.7.1/update-state.json");
+        std::fs::copy(&fixture, dir.path().join("update-state.json")).expect("copy");
+        let store = lector_app::store::Store::in_memory();
+        store.import_legacy(dir.path());
+        let state = load_state(&store.update_state());
+        assert_eq!(state.last_checked, Some(1_795_240_061));
+        assert_eq!(state.etag.as_deref(), Some("W/\"fixture-etag-0.7.1\""));
+        assert_eq!(state.releases.len(), 2);
+        assert_eq!(state.releases[0].tag, "v0.8.0-beta.1");
+        let file: UpdateState = serde_json::from_slice(
+            &std::fs::read(dir.path().join("update-state.json.imported")).expect("kept"),
+        )
+        .expect("parse");
+        assert_eq!(state, file);
+    }
+
     #[test]
     fn scheduling_follows_setting_and_last_check() {
         let now = 1_800_000_000;
@@ -416,15 +451,15 @@ mod tests {
             Some(now - 25 * 3600),
             now
         ));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("update-state.json");
-        assert!(automatic_check_due_in(UpdateCheck::On, &path, now));
+        let store = lector_app::store::Store::in_memory();
+        let states: UpdateStateStore = store.update_state();
+        assert!(automatic_check_due_in(UpdateCheck::On, &states, now));
         let state = UpdateState {
             last_checked: Some(now - 60),
             ..UpdateState::default()
         };
-        state.save(&path).expect("save");
-        assert!(!automatic_check_due_in(UpdateCheck::On, &path, now));
+        states.put(&state).expect("save");
+        assert!(!automatic_check_due_in(UpdateCheck::On, &states, now));
     }
 
     #[test]

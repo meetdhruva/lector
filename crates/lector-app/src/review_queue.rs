@@ -340,7 +340,7 @@ pub fn hunk_fingerprints(diff: &FileDiff) -> Vec<HunkFingerprint> {
                     .collect(),
             });
             HunkFingerprint {
-                hash: lector_config::content_hash(text.as_bytes()),
+                hash: lector_review::content_hash(text.as_bytes()),
                 anchor,
                 new_start: line,
             }

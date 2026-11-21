@@ -1761,13 +1761,13 @@ impl PaneItem for DiffItem {
         Some(self.key.clone())
     }
 
-    fn tab_kind(&self, cx: &App) -> Option<lector_config::TabKind> {
+    fn tab_kind(&self, cx: &App) -> Option<lector_app::store::TabKind> {
         let v = self.view.read(cx);
         match (v.target.as_ref()?, &v.viewed) {
-            (DiffTarget::FileVsRev { path, rev }, _) => Some(lector_config::TabKind::Other {
+            (DiffTarget::FileVsRev { path, rev }, _) => Some(lector_app::store::TabKind::Other {
                 label: format!("vs:{rev}:{path}"),
             }),
-            (DiffTarget::Change(change), Some(viewed)) => Some(lector_config::TabKind::Diff {
+            (DiffTarget::Change(change), Some(viewed)) => Some(lector_app::store::TabKind::Diff {
                 changeset_key: viewed.key.clone(),
                 path: change.path().to_string(),
             }),
@@ -1847,11 +1847,11 @@ pub fn open_diff(
 /// Recreates a diff tab from the session (the change is looked up again).
 pub fn restore_item(
     store: &Entity<GitStore>,
-    kind: &lector_config::TabKind,
+    kind: &lector_app::store::TabKind,
     cx: &mut App,
 ) -> Option<Box<dyn PaneItem>> {
     match kind {
-        lector_config::TabKind::Other { label } => {
+        lector_app::store::TabKind::Other { label } => {
             let (rev, path) = label.strip_prefix("vs:")?.split_once(':')?;
             let (rev, path) = (rev.to_string(), path.to_string());
             let name = split_path(&path).0.to_string();
@@ -1871,7 +1871,7 @@ pub fn restore_item(
             });
             Some(Box::new(DiffItem::new(view, key)))
         }
-        lector_config::TabKind::Diff {
+        lector_app::store::TabKind::Diff {
             changeset_key,
             path,
         } => {
@@ -1934,5 +1934,5 @@ pub fn restore_item(
 
 /// Default diff options from settings (used by the panels for stats).
 pub fn settings_diff_options(store: &GitStore, cx: &App) -> DiffOptions {
-    diff_options(&store.settings(cx).diff)
+    diff_options(store.settings(cx).diff.ignore_whitespace)
 }

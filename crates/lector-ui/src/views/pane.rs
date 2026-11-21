@@ -49,9 +49,9 @@ pub trait PaneItem: 'static {
     }
     /// Session state of this tab (restored on startup). Defaults to the
     /// file path; return `None` for transient items.
-    fn tab_kind(&self, cx: &App) -> Option<lector_config::TabKind> {
+    fn tab_kind(&self, cx: &App) -> Option<lector_app::store::TabKind> {
         self.path(cx)
-            .map(|path| lector_config::TabKind::File { path })
+            .map(|path| lector_app::store::TabKind::File { path })
     }
     /// A new item showing the same content (for splits).
     fn clone_item(&self, window: &mut Window, cx: &mut App) -> Option<Box<dyn PaneItem>>;

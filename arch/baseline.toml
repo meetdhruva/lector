@@ -64,13 +64,6 @@
 "crates/lector-ui/src/views/workspace/integration.rs" = 7
 
 [state]
-"crates/lector-app/src/core.rs" = 1
-"crates/lector-config/src/recent.rs" = 1
-"crates/lector-config/src/session.rs" = 1
-"crates/lector-config/src/updates.rs" = 1
-"crates/lector-forge/src/releases.rs" = 1
-"crates/lector-ui-agent/src/notices.rs" = 1
-"crates/lector-ui-terminal/src/session.rs" = 2
 
 [dupes]
 
@@ -79,9 +72,9 @@
 "crates/lector-app/src/comments.rs" = 1506
 "crates/lector-app/src/documents/store.rs" = 2349
 "crates/lector-buffer/src/tests.rs" = 3092
-"crates/lector-forge/src/releases.rs" = 1917
+"crates/lector-forge/src/releases.rs" = 1894
 "crates/lector-git/src/shadow.rs" = 2289
-"crates/lector-review/src/review.rs" = 1586
+"crates/lector-review/src/review.rs" = 1582
 "crates/lector-review/src/risk.rs" = 2696
 "crates/lector-review/src/structural.rs" = 1750
 "crates/lector-text/src/rope.rs" = 1541

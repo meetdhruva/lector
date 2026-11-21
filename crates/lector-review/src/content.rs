@@ -13,6 +13,16 @@ use lector_diff::{DiffOptions, LineDiff};
 use lector_git::Oid;
 use lector_syntax::{Language, Syntax, SyntaxError};
 use lector_text::Text;
+use sha2::{Digest, Sha256};
+
+/// Hex SHA-256 of file content: the hash a "viewed" mark records. Same function and output as
+/// `lector_config::content_hash` of 0.3 to 0.7.1 (moved here in 0.8), so stored marks stay valid.
+pub fn content_hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 /// Identity of a piece of content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -138,5 +148,15 @@ mod tests {
             ContentId::of_bytes(b"abcdefgh\0")
         );
         assert_eq!(ContentId::of_text(&Text::from("hello world")), a);
+    }
+
+    #[test]
+    fn content_hash_is_hex_sha256() {
+        // The output 0.7.1 stored with its viewed marks (and the standard SHA-256 test vector).
+        assert_eq!(
+            content_hash(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(content_hash(b"").len(), 64);
     }
 }

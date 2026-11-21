@@ -157,10 +157,56 @@ pub const ABNORMAL_EXIT_NOTE: &str = "Lector didn't shut down cleanly last time"
 /// Its button.
 pub const ABNORMAL_EXIT_BUTTON: &str = "Show details";
 
+/// The note at startup when Lector's state store is not the normal shared database
+/// (ADR 0004): read-only state in this process, or a damaged database that was replaced.
+/// `None` when there is nothing to say.
+pub fn state_store_note(
+    mode: &lector_app::store::StoreMode,
+    recovered_from: Option<&std::path::Path>,
+) -> Option<String> {
+    if let lector_app::store::StoreMode::ReadOnly { reason } = mode {
+        let mut reason = reason.clone();
+        if reason.chars().count() > 160 {
+            reason = reason.chars().take(157).collect::<String>() + "...";
+        }
+        return Some(format!(
+            "Lector can't save its state in this window: tabs, recent projects, review marks and comments changed here are lost when it quits ({reason})"
+        ));
+    }
+    recovered_from.map(|copy| {
+        format!(
+            "Lector's state database was damaged and has been started anew; the damaged file is kept at {}",
+            copy.display()
+        )
+    })
+}
+
+/// The button of [`state_store_note`].
+pub const STATE_STORE_BUTTON: &str = "OK";
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lector_app::health::VersionHealth;
+
+    #[test]
+    fn the_state_store_note_says_what_is_lost_or_kept() {
+        use lector_app::store::StoreMode;
+        assert_eq!(state_store_note(&StoreMode::ReadWrite, None), None);
+        let ro = StoreMode::ReadOnly {
+            reason: "the database is in use by another process".into(),
+        };
+        let note = state_store_note(&ro, None).expect("note");
+        assert!(note.contains("lost when it quits"), "{note}");
+        assert!(note.contains("another process"), "{note}");
+        let long = StoreMode::ReadOnly {
+            reason: "x".repeat(500),
+        };
+        assert!(state_store_note(&long, None).expect("note").len() < 400);
+        let copy = std::path::Path::new("/data/lector.redb.corrupt-1");
+        let note = state_store_note(&StoreMode::ReadWrite, Some(copy)).expect("note");
+        assert!(note.contains("lector.redb.corrupt-1"), "{note}");
+    }
 
     fn summary() -> HealthSummary {
         HealthSummary {

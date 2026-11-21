@@ -143,7 +143,7 @@ impl PaneItem for TerminalItem {
         None
     }
 
-    fn tab_kind(&self, _: &App) -> Option<lector_config::TabKind> {
+    fn tab_kind(&self, _: &App) -> Option<lector_app::store::TabKind> {
         None
     }
 
@@ -210,11 +210,11 @@ pub fn init(cx: &mut App) {
         if has_folder && view::terminal_settings(cx).restore {
             let root = ws.root().to_path_buf();
             let panel = panel.downgrade();
+            let sessions = lector_ui::commands_bridge::core(cx)
+                .store()
+                .terminal_sessions();
             cx.spawn_in(window, async move |_, cx| {
-                let load =
-                    cx.background_spawn(
-                        async move { session::load(&session::session_path(), &root) },
-                    );
+                let load = cx.background_spawn(async move { session::load(&sessions, &root) });
                 let tabs = load.await;
                 if tabs.is_empty() {
                     return;
@@ -236,7 +236,9 @@ fn save_all_sessions_now(cx: &mut App) {
     };
     let panels: Vec<Entity<TerminalPanel>> =
         r.panels.values().filter_map(WeakEntity::upgrade).collect();
-    let path = session::session_path();
+    let sessions = lector_ui::commands_bridge::core(cx)
+        .store()
+        .terminal_sessions();
     for panel in panels {
         let p = panel.read(cx);
         let Some(ws) = p.workspace_handle().upgrade() else {
@@ -247,7 +249,7 @@ fn save_all_sessions_now(cx: &mut App) {
             continue;
         }
         let tabs = p.saved_tabs(cx);
-        if let Err(err) = session::store(&path, ws.root(), &tabs) {
+        if let Err(err) = session::save(&sessions, ws.root(), &tabs) {
             tracing::warn!("terminal session: {err}");
         }
     }

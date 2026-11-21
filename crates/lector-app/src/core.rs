@@ -11,18 +11,20 @@ use crate::commands::{ActivitySink, CommandRegistry};
 use crate::db::Db;
 use crate::git_service::GitService;
 use crate::scheduler::Scheduler;
+use crate::store::Store;
 
 /// How to build an [`AppCore`].
 #[derive(Debug, Clone, Default)]
 pub struct CoreOptions {
-    /// Database file; `None` = `lector_config::paths::data_dir()/lector.redb`.
+    /// Database file; `None` = [`Store::default_path`].
     pub db_path: Option<PathBuf>,
     /// Use an in-memory database (tests, `--no-state`).
     pub in_memory_db: bool,
     /// Worker threads; `None` = the process-wide [`Scheduler::global`].
     pub workers: Option<usize>,
-    /// Import the v0.3 JSON stores from this data directory on first open
-    /// (`None` = `data_dir()` when `db_path` is `None`, otherwise no import).
+    /// Import the JSON state files of 0.3 to 0.7.1 from this data directory
+    /// ([`Store::import_legacy`]; `None` = `data_dir()` when `db_path` is `None`, otherwise
+    /// no import).
     pub import_from: Option<PathBuf>,
     /// Lector's data directory for the journal's shadow repositories
     /// (`None` = `data_dir()`, or a per-process temp dir with `in_memory_db`).
@@ -43,7 +45,7 @@ impl CoreOptions {
 struct Inner {
     scheduler: Scheduler,
     registry: CommandRegistry,
-    db: Db,
+    store: Store,
     git: GitService,
     activity: RwLock<Option<Arc<dyn ActivitySink>>>,
     extensions: RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
@@ -61,7 +63,7 @@ impl std::fmt::Debug for AppCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppCore")
             .field("commands", &self.inner.registry.len())
-            .field("db", &self.inner.db)
+            .field("store", &self.inner.store)
             .finish()
     }
 }
@@ -75,29 +77,24 @@ impl AppCore {
             .clone()
     }
 
-    /// Builds a core. Never fails: a database that cannot be opened falls back
-    /// to a temporary copy or memory (see [`Db::open_or_fallback`]).
+    /// Builds a core. Never fails: a database that cannot be opened for writing gives
+    /// read-only state, a corrupt one is replaced (see [`Store::open`]).
     pub fn open(opts: CoreOptions) -> AppCore {
         let scheduler = match opts.workers {
             Some(n) => Scheduler::new(n),
             None => Scheduler::global(),
         };
-        let db = if opts.in_memory_db {
-            Db::in_memory()
+        let store = if opts.in_memory_db {
+            Store::in_memory()
         } else {
-            let path = opts
-                .db_path
-                .clone()
-                .unwrap_or_else(|| lector_config::paths::data_dir().join("lector.redb"));
-            Db::open_or_fallback(&path)
+            let path = opts.db_path.clone().unwrap_or_else(Store::default_path);
+            Store::open(&path)
         };
         let import_dir = opts.import_from.clone().or_else(|| {
             (opts.db_path.is_none() && !opts.in_memory_db).then(lector_config::paths::data_dir)
         });
         if let Some(dir) = import_dir {
-            if let Err(err) = db.import_v03(&dir) {
-                tracing::warn!("cannot import v0.3 state from {}: {err}", dir.display());
-            }
+            store.import_legacy(&dir);
         }
         let registry = CommandRegistry::new();
         crate::commands::register_builtin(&registry);
@@ -106,7 +103,7 @@ impl AppCore {
             inner: Arc::new(Inner {
                 scheduler,
                 registry,
-                db,
+                store,
                 git,
                 activity: RwLock::new(None),
                 extensions: RwLock::new(HashMap::new()),
@@ -138,9 +135,14 @@ impl AppCore {
         &self.inner.registry
     }
 
-    /// The database.
+    /// The state store (ADR 0004).
+    pub fn store(&self) -> &Store {
+        &self.inner.store
+    }
+
+    /// The database under the store (comments, journal, `kv`, cache).
     pub fn db(&self) -> &Db {
-        &self.inner.db
+        self.inner.store.db()
     }
 
     /// The git service (one shared state per repository).
@@ -196,12 +198,12 @@ impl AppCore {
 
     /// Review data (changesets, file diffs, viewed marks) for views, the CLI and agents.
     pub fn review(&self) -> crate::review_service::ReviewService {
-        crate::review_service::ReviewService::new(self.review_store())
+        crate::review_service::ReviewService::new(self.review_marks())
     }
 
-    /// Viewed marks backed by the database.
-    pub fn review_store(&self) -> lector_config::ReviewStore {
-        self.inner.db.review_store()
+    /// Viewed marks.
+    pub fn review_marks(&self) -> crate::store::ReviewMarks {
+        self.inner.store.review_marks()
     }
 }
 

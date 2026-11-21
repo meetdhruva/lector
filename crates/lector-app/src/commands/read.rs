@@ -397,7 +397,7 @@ fn list_changes() -> FnCommand {
         |cx, args| {
             let project = cx.require_project()?;
             let cs = changeset_arg(cx, args)?;
-            let view = crate::project::load_changeset(project, &cs, &cx.core.review_store())
+            let view = crate::project::load_changeset(project, &cs, &cx.core.review_marks())
                 .context("cannot load changeset")?;
             let files: Vec<Value> = view
                 .files
@@ -471,10 +471,10 @@ fn show_diff() -> FnCommand {
             let cs = changeset_arg(cx, args)?;
             let ctx_lines = u32_arg(args, "context").unwrap_or(3);
             let max_files = usize_arg(args, "max_files", 50);
-            let view = crate::project::load_changeset(project, &cs, &cx.core.review_store())
+            let view = crate::project::load_changeset(project, &cs, &cx.core.review_marks())
                 .context("cannot load changeset")?;
             let only = str_arg(args, "path").map(|p| p.trim_start_matches("./").to_string());
-            let opts = lector_review::review::diff_options(&project.settings().diff);
+            let opts = lector_review::review::diff_options(project.settings().diff.ignore_whitespace);
             let mut out = Vec::new();
             let selected: Vec<_> = view
                 .files

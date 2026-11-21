@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.0 — unreleased
+
+Upgrading: on its first run, 0.8 imports Lector's own state (recent projects, window and terminal
+sessions, review marks, update and notice choices) from the separate files earlier versions wrote
+into one database (`lector.redb` in the data folder). The old files are kept, renamed with an
+`.imported` suffix. Going back to 0.7.1 afterwards keeps recent projects, window sessions and
+review marks (0.7.1 reads them from the same database) but finds no terminal tabs, update-check
+state or notice answers (it looks for the files, which are now `.imported`), so it asks its
+first-run update question again.
+
+Changes:
+
+- **All of Lector's own state is in one versioned database.** Every save is a transaction, so two
+  windows or two Lector processes saving at once can no longer undo each other's changes (this
+  also covers the update and notice choices, which were rewritten as a whole file by whichever
+  window saved last).
+- **A second Lector that cannot open the database for writing says so** instead of silently
+  working on a private copy whose changes were thrown away at exit: it runs with read-only state
+  (changes made in it are kept until it quits) and shows a note. Two current Lector processes
+  still share the database normally.
+- **A damaged state database is set aside and replaced**, with a note naming the kept copy. 0.7.1
+  kept trying to open the damaged file and silently ran without saving anything, on every start.
+
 ## 0.7.1 — 2026-11-19
 
 Fixes for problems found in review of 0.7.0.

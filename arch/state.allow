@@ -1,8 +1,11 @@
-# Modules that may build paths under the data/config/state dirs (ADR 0004): the database, its
-# future typed store, the path helpers, logging, and crash/session health files.
-crates/lector-app/src/db/**
+# Modules that may build paths under the data/config/state dirs (ADR 0004).
+
+# The state store: its own database file (`data_dir()/lector.redb`, Store::default_path) and the
+# legacy JSON file names its one-time import of 0.3-0.7.1 state reads (store/legacy.rs).
 crates/lector-app/src/store/**
-crates/lector-config/src/paths.rs
+
+# Logs and crash reports stay files so that they work when the database does not (ADR 0004,
+# decision 2): the log file and the crash/session health records.
 crates/lector/src/logging.rs
 crates/lector-app/src/health/**
 

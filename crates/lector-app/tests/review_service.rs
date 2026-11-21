@@ -1,6 +1,7 @@
 //! `ReviewService` (ADR 0001): every method returns what the direct `lector-review` loader
-//! returns for the same inputs, the viewed marks round-trip through the same store and file
-//! format as 0.7.1, and a cancelled call returns without doing the work.
+//! returns for the same inputs, the viewed marks round-trip through the state store (marks
+//! written by 0.7.1 arrive through its one-time import), and a cancelled call returns without
+//! doing the work.
 
 use std::path::Path;
 use std::process::Command;
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use lector_app::content_cache::{CacheConfig, ContentCache};
 use lector_app::review_service::ReviewService;
+use lector_app::store::Store;
 use lector_base::CancelToken;
-use lector_config::ReviewStore;
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, Changeset, FileChange, Repo, Side};
 use lector_review::review::{self, ChangesetView, FileDiff, NoMarks, ReviewFile};
@@ -82,9 +83,10 @@ fn fixture() -> (tempfile::TempDir, Repo) {
     (dir, repo)
 }
 
+/// A service over the state database in `dir` (opened anew: a restart).
 fn service(dir: &Path) -> ReviewService {
     ReviewService::with_cache(
-        ReviewStore::open(dir.join("review.json")),
+        Store::open(&dir.join("lector.redb")).review_marks(),
         ContentCache::new(CacheConfig::default()),
     )
 }
@@ -221,10 +223,9 @@ fn lib_file(view: &ChangesetView) -> &ReviewFile {
 }
 
 #[test]
-fn viewed_state_round_trips_through_the_store_file() {
+fn viewed_state_round_trips_through_the_store() {
     let (dir, repo) = fixture();
     let st = tempfile::tempdir().expect("tempdir");
-    let store_file = st.path().join("review.json");
     let opts = DiffOptions::default();
     let cancel = CancelToken::new();
     let svc = service(st.path());
@@ -239,9 +240,9 @@ fn viewed_state_round_trips_through_the_store_file() {
         .expect("set");
     assert!(view.files[ix].viewed);
     assert!(svc.is_viewed(&root, &key, "lib.rs", &view.files[ix].content_hash));
-    assert!(store_file.exists(), "the mark is on disk");
+    drop(svc);
 
-    // A new service over the same file (a restart) sees it.
+    // A new service over the same database (a restart) sees it.
     let again = service(st.path());
     let view2 = again
         .changeset(&repo, &Changeset::WorkingTree, &opts, &cancel)
@@ -262,6 +263,7 @@ fn viewed_state_round_trips_through_the_store_file() {
         .set_viewed(&root, &key, &mut view4.files[ix], false)
         .expect("unset");
     assert!(!view4.files[ix].viewed);
+    drop(again);
     let view5 = service(st.path())
         .changeset(&repo, &Changeset::WorkingTree, &opts, &cancel)
         .expect("reload");
@@ -295,7 +297,7 @@ fn the_vs_workdir_view_marks_under_its_own_key() {
 
 // The file written by 0.7.1: `ReviewStore::set_viewed(root, key, path, hash, true)` straight
 // from `lector_review::review::set_viewed_with` (this fixture was produced by that code path
-// before it was removed; `lector-config`, which owns the format, is unchanged).
+// before it was removed). 0.8 imports it into the state store once (ADR 0004).
 const FIXTURE_0_7_1: &str = include_str!("fixtures/review-0.7.1.json");
 const FIXTURE_ROOT: &str = "/fixture/repo";
 const FIXTURE_HASH: &str = "536e506bb90914c243a12b397b9a998f85ae2cbd9ba02dfd03a9e155ca5ca0f4";
@@ -318,69 +320,52 @@ fn fake_file(path: &str, hash: &str) -> ReviewFile {
     }
 }
 
-fn entries(json: &str) -> Vec<serde_json::Value> {
-    let mut v: serde_json::Value = serde_json::from_str(json).expect("json");
-    let mut list = v["entries"].as_array().cloned().expect("entries");
-    for e in &mut list {
-        // The timestamp is the only part that varies between runs.
-        e.as_object_mut().expect("object").remove("at");
-    }
-    list.sort_by_key(|e| e.to_string());
-    v["entries"] = serde_json::Value::Null;
-    list
-}
-
 #[test]
-fn the_file_of_0_7_1_is_read_and_the_written_file_has_the_same_shape() {
+fn the_marks_of_0_7_1_are_imported_and_new_marks_join_them() {
     let st = tempfile::tempdir().expect("tempdir");
     let file = st.path().join("review.json");
     std::fs::write(&file, FIXTURE_0_7_1).expect("fixture");
-    let svc = ReviewService::new(ReviewStore::open(&file));
+    let store = Store::open(&st.path().join("lector.redb"));
+    let report = store.import_legacy(st.path());
+    assert_eq!(report.imported, vec!["review.json".to_string()]);
+    let svc = ReviewService::new(store.review_marks());
     let root = Path::new(FIXTURE_ROOT);
     assert!(svc.is_viewed(root, "worktree", "src/lib.rs", FIXTURE_HASH));
     assert!(!svc.is_viewed(root, "worktree", "src/lib.rs", "other-hash"));
+    assert!(svc.is_viewed(root, "commit:abc", "README.md", "deadbeef"));
 
-    // Marking another file keeps the old entry and adds one of the 0.7.1 shape.
+    // Marking another file keeps the imported marks.
     let mut f = fake_file("src/main.rs", "abc123");
     svc.set_viewed(root, "worktree", &mut f, true).expect("set");
     assert!(f.viewed);
-    let after = std::fs::read_to_string(&file).expect("read");
-    let new_entries = entries(&after);
-    let old_entries = entries(FIXTURE_0_7_1);
-    assert_eq!(new_entries.len(), old_entries.len() + 1);
-    for e in &old_entries {
-        assert!(new_entries.contains(e), "{e} kept");
-    }
-    // The raw bytes: compact JSON, `{"entries":[{"repo":..,"changeset":..,"path":..,"hash":..,"at":..}]}`.
-    assert!(after.starts_with("{\"entries\":[{\"repo\":\""), "{after}");
-    assert!(after.contains(
-        "\"changeset\":\"worktree\",\"path\":\"src/main.rs\",\"hash\":\"abc123\",\"at\":"
-    ));
-    assert!(!after.contains('\n'));
+    assert!(svc.is_viewed(root, "worktree", "src/main.rs", "abc123"));
+    assert!(svc.is_viewed(root, "worktree", "src/lib.rs", FIXTURE_HASH));
+    assert_eq!(store.review_marks().len(), 3);
 
-    // Reference: what the 0.7.1 call (`ReviewStore::set_viewed` with the same arguments) writes
-    // equals what the service wrote, up to the timestamp.
-    let ref_file = st.path().join("reference.json");
-    std::fs::write(&ref_file, FIXTURE_0_7_1).expect("fixture");
-    let reference = ReviewStore::open(&ref_file);
-    reference
-        .set_viewed(root, "worktree", "src/main.rs", "abc123", true)
-        .expect("reference");
-    let ref_text = std::fs::read_to_string(&ref_file).expect("read");
-    assert_eq!(entries(&ref_text), new_entries);
+    // The 0.7.1 file is kept, renamed, byte for byte.
+    assert!(!file.exists());
     assert_eq!(
-        ref_text.replace(|c: char| c.is_ascii_digit(), "0").len(),
-        after.replace(|c: char| c.is_ascii_digit(), "0").len()
+        std::fs::read_to_string(st.path().join("review.json.imported")).expect("kept"),
+        FIXTURE_0_7_1
     );
 }
 
 #[test]
 fn a_store_that_cannot_write_reports_it_and_leaves_the_file_unmarked() {
     let st = tempfile::tempdir().expect("tempdir");
-    // The store's file is a directory: writing fails.
-    let file = st.path().join("review.json");
-    std::fs::create_dir(&file).expect("dir");
-    let svc = ReviewService::new(ReviewStore::open(&file));
+    let path = st.path().join("lector.redb");
+    drop(Store::open(&path));
+    // A newer Lector owns the review marks (its schema is newer): writes are refused.
+    {
+        let db = redb::Database::open(&path).expect("open");
+        let tx = db.begin_write().expect("write");
+        tx.open_table(redb::TableDefinition::<&str, u64>::new("store_meta"))
+            .expect("meta")
+            .insert("version:review", 99)
+            .expect("insert");
+        tx.commit().expect("commit");
+    }
+    let svc = ReviewService::new(Store::open(&path).review_marks());
     let mut f = fake_file("a.rs", "h");
     assert!(svc
         .set_viewed(Path::new("/r"), "worktree", &mut f, true)

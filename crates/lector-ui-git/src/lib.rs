@@ -93,16 +93,16 @@ pub fn store_for(workspace: gpui::EntityId, cx: &App) -> Option<Entity<GitStore>
 fn active_changeset(ws: &Workspace, cx: &App) -> Option<lector_git::Changeset> {
     let item = ws.active_pane().read(cx).active_item()?;
     match item.tab_kind(cx)? {
-        lector_config::TabKind::Diff { changeset_key, .. } => {
+        lector_app::store::TabKind::Diff { changeset_key, .. } => {
             lector_review::review::parse_changeset_key(&changeset_key)
         }
-        lector_config::TabKind::Commit { oid } => {
+        lector_app::store::TabKind::Commit { oid } => {
             oid.parse().ok().map(lector_git::Changeset::Commit)
         }
-        lector_config::TabKind::Other { label } => label
+        lector_app::store::TabKind::Other { label } => label
             .strip_prefix("review:")
             .and_then(lector_review::review::parse_changeset_key),
-        lector_config::TabKind::File { .. } => None,
+        lector_app::store::TabKind::File { .. } => None,
     }
 }
 
@@ -439,7 +439,7 @@ fn register_git_actions(
 
 fn restore_tab(
     store: &Entity<GitStore>,
-    kind: &lector_config::TabKind,
+    kind: &lector_app::store::TabKind,
     cx: &mut App,
 ) -> Option<Box<dyn lector_ui::views::pane::PaneItem>> {
     review_tab::restore_item(store, kind, cx)
@@ -464,7 +464,7 @@ fn restore_git_tabs(
     let pane = ws.active_pane().clone();
     let mut activate = None;
     for tab in session.panes.iter().flat_map(|p| p.tabs.iter()) {
-        if matches!(tab.kind, lector_config::TabKind::File { .. }) {
+        if matches!(tab.kind, lector_app::store::TabKind::File { .. }) {
             continue;
         }
         let Some(item) = restore_tab(store, &tab.kind, cx) else {

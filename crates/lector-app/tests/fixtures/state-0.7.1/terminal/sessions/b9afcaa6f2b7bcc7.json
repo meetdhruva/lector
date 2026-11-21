@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "root": "/fixture/new-in-071",
+  "tabs": [
+    {
+      "cwds": [
+        "/fixture/new-in-071/docs"
+      ],
+      "title": null,
+      "vertical": false
+    }
+  ]
+}

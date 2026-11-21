@@ -574,13 +574,15 @@ impl TerminalPanel {
 
     pub(crate) fn schedule_save(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let tabs = self.saved_tabs(cx);
+        let sessions = lector_ui::commands_bridge::core(cx)
+            .store()
+            .terminal_sessions();
         self.save_task = Some(cx.spawn(async move |_, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(1))
                 .await;
-            let path = crate::session::session_path();
             let write =
-                cx.background_spawn(async move { crate::session::store(&path, &root, &tabs) });
+                cx.background_spawn(async move { crate::session::save(&sessions, &root, &tabs) });
             if let Err(err) = write.await {
                 tracing::warn!("terminal session: {err}");
             }

@@ -1,10 +1,8 @@
 //! Update-check policy (v0.7): the `[updates]` settings and the schedule helper.
 //!
 //! The check itself lives in `lector_forge::releases`. Nothing here talks to the network; the
-//! last-check time and the `ETag` are stored by the caller next to Lector's other state
-//! (`paths::data_dir()/update-state.json`, see [`update_state_file`]).
-
-use std::path::PathBuf;
+//! last-check time and the `ETag` are kept by the caller in Lector's state store
+//! (`lector_app::store`, concern `update_state`).
 
 use serde::{Deserialize, Serialize};
 
@@ -57,11 +55,6 @@ pub fn should_check_now(last_checked: Option<i64>, now: i64, setting: UpdateChec
                 || t.saturating_sub(now) > CHECK_INTERVAL_SECS
         }
     }
-}
-
-/// `<data dir>/update-state.json`: last check time, `ETag` and cached release list.
-pub fn update_state_file() -> PathBuf {
-    crate::paths::data_dir().join("update-state.json")
 }
 
 #[cfg(test)]

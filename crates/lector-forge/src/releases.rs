@@ -20,7 +20,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -295,7 +295,10 @@ impl Default for UpdateOptions {
     }
 }
 
-/// What the update check remembers between runs (stored by the caller in `lector_config::paths::data_dir()`).
+/// What the update check remembers between runs. A plain value: the caller persists it
+/// (Lector keeps it in its state store, `lector_app::store`, concern `update_state`); this
+/// crate opens no file for it. Unknown fields are ignored and missing ones default, so a
+/// state written by another version still reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateState {
@@ -305,28 +308,6 @@ pub struct UpdateState {
     pub etag: Option<String>,
     /// The release list that `etag` belongs to.
     pub releases: Vec<Release>,
-}
-
-impl UpdateState {
-    /// Reads the state; a missing or unreadable file is an empty state.
-    pub fn load(path: &Path) -> UpdateState {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    }
-
-    /// Writes the state (temp file + rename). Only ever called by the update check's owner, into
-    /// Lector's own data directory.
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let text = serde_json::to_string(self).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -922,11 +903,6 @@ fn status_from(
         action,
         hint: hint_for(opts.install_kind),
     }
-}
-
-/// Where the update state lives inside Lector's data directory (`<data dir>/update-state.json`).
-pub fn state_file_in(data_dir: &Path) -> PathBuf {
-    data_dir.join("update-state.json")
 }
 
 #[cfg(test)]
@@ -1898,20 +1874,21 @@ mod tests {
     }
 
     #[test]
-    fn state_round_trips_and_tolerates_damage() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = state_file_in(&dir.path().join("data"));
-        assert_eq!(UpdateState::load(&path), UpdateState::default());
+    fn state_round_trips_and_tolerates_other_versions() {
         let state = UpdateState {
             last_checked: Some(1_700_000_000),
             etag: Some("W/\"abc\"".into()),
             releases: releases(),
         };
-        state.save(&path).expect("save");
-        assert_eq!(UpdateState::load(&path), state);
-        std::fs::write(&path, "{ not json").expect("write");
-        assert_eq!(UpdateState::load(&path), UpdateState::default());
-        std::fs::write(&path, r#"{"last_checked": 5, "future_field": true}"#).expect("write");
-        assert_eq!(UpdateState::load(&path).last_checked, Some(5));
+        let text = serde_json::to_string(&state).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<UpdateState>(&text).expect("parse"),
+            state
+        );
+        assert!(serde_json::from_str::<UpdateState>("{ not json").is_err());
+        let newer: UpdateState =
+            serde_json::from_str(r#"{"last_checked": 5, "future_field": true}"#).expect("parse");
+        assert_eq!(newer.last_checked, Some(5));
+        assert_eq!(newer.etag, None);
     }
 }
