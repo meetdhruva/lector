@@ -2,7 +2,7 @@
 //! Lector.
 //!
 //! * [`detect_kind`] classifies a path as text, binary, image or directory.
-//! * [`decode`] turns bytes into text (UTF-8, UTF-16 with BOM, Latin-1
+//! * [`decode`] turns bytes into text (UTF-8, UTF-16 with BOM, windows-1252
 //!   fallback).
 //! * [`load_file`] loads a file into a [`lector_text::Text`], memory-mapping
 //!   large files.

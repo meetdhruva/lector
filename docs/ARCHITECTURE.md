@@ -558,7 +558,7 @@ Tokens come from the environment, `gh`/`glab` or the OS keychain (`lector_forge:
 `Token`'s `Debug` is redacted and tokens are never logged. git credentials go through the user's
 credential helpers first, then Lector's askpass prompt (flow above): answers are `Secret`s,
 zeroed, never stored by Lector; the endpoint and token reach only the git process's environment.
-Remote URLs shown to the user are redacted (`lector_git::redact_credentials`). The pull-request
+Remote URLs shown to the user are redacted (`lector_git::sync::redact_credentials`). The pull-request
 fetch passes its auth header through `GIT_CONFIG_*` environment variables, never argv.
 
 ### Spawning processes
