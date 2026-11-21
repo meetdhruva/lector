@@ -27,8 +27,9 @@ use crate::config::AgentConfig;
 use crate::context::build_prompt;
 use crate::error::AgentError;
 use crate::model::*;
-use crate::paths::{relative, resolve_in_root};
+use crate::paths::confine;
 use crate::rpc::{self, Connection, Handler, RpcError};
+use lector_fs::{Access, CreateDirs};
 
 /// ACP protocol version Lector speaks.
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -949,8 +950,9 @@ impl Shared {
 
     fn read_text_file(&self, params: &Value) -> Result<Value, RpcError> {
         let path = params.get("path").and_then(Value::as_str).unwrap_or("");
-        let abs = resolve_in_root(self.project.root(), path)
-            .map_err(|e| RpcError::remote(rpc::INVALID_PARAMS, e))?;
+        let target = confine(&self.core, self.project.root(), path, Access::Read)
+            .map_err(|e| RpcError::remote(rpc::INVALID_PARAMS, format!("refused: {e}")))?;
+        let abs = target.path();
         let store = DocumentStore::for_core(&self.core);
         let text = match store.get(&abs).and_then(|h| {
             let snap = h.snapshot();
@@ -959,8 +961,9 @@ impl Shared {
         }) {
             Some(text) => text,
             None => {
-                let bytes = std::fs::read(&abs)
-                    .map_err(|e| RpcError::remote(rpc::INTERNAL_ERROR, format!("{path}: {e}")))?;
+                let bytes = target
+                    .read()
+                    .map_err(|e| RpcError::remote(rpc::INTERNAL_ERROR, e.to_string()))?;
                 String::from_utf8(bytes).map_err(|_| {
                     RpcError::remote(rpc::INTERNAL_ERROR, format!("{path} is not UTF-8 text"))
                 })?
@@ -989,9 +992,14 @@ impl Shared {
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::remote(rpc::INVALID_PARAMS, "missing content"))?;
         let root = self.project.root();
-        let abs = resolve_in_root(root, path)
-            .map_err(|e| RpcError::remote(rpc::INVALID_PARAMS, format!("refused: {e}")))?;
-        let rel = relative(root, &abs);
+        let refused = |e: String| RpcError::remote(rpc::INVALID_PARAMS, format!("refused: {e}"));
+        let confinement = lector_app::commands::confinement(&self.core, root)
+            .map_err(|e| refused(e.to_string()))?;
+        let target = confinement
+            .write(path)
+            .map_err(|e| refused(e.to_string()))?;
+        let abs = target.path();
+        let rel = target.relative_slash();
         let (turn, has_checkpoint) = {
             let st = self.state.lock();
             let turn = st.current;
@@ -1028,16 +1036,13 @@ impl Shared {
                         ensure_final_newline: false,
                         run_hooks: false,
                         path: None,
+                        confine: Some(confinement.clone()),
                     })
                     .map_err(|e| err(e.to_string()))?;
             }
-            None => {
-                if let Some(parent) = abs.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| err(e.to_string()))?;
-                }
-                lector_fs::write_atomic(&abs, content.as_bytes())
-                    .map_err(|e| err(e.to_string()))?;
-            }
+            None => target
+                .write(content.as_bytes(), CreateDirs::Yes)
+                .map_err(|e| err(e.to_string()))?,
         }
         self.update_turn(|t| {
             if !t.written.contains(&rel) {
@@ -1153,9 +1158,9 @@ impl Shared {
                 .and_then(Value::as_array)
                 .map(|locs| {
                     locs.iter().all(|l| {
-                        l.get("path")
-                            .and_then(Value::as_str)
-                            .is_some_and(|p| resolve_in_root(self.project.root(), p).is_ok())
+                        l.get("path").and_then(Value::as_str).is_some_and(|p| {
+                            confine(&self.core, self.project.root(), p, Access::Read).is_ok()
+                        })
                     })
                 })
                 .unwrap_or(true);

@@ -97,6 +97,9 @@ pub enum DocError {
         /// The path.
         path: PathBuf,
     },
+    /// A confined save ([`SaveRequest::confine`]) refused the path; nothing was written.
+    #[error(transparent)]
+    Confined(#[from] lector_fs::ConfineError),
     /// I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -386,6 +389,11 @@ pub struct SaveRequest {
     pub run_hooks: bool,
     /// Save As: write here and move the document.
     pub path: Option<PathBuf>,
+    /// Write only inside this confinement, never through a symlink (agents and sandboxed
+    /// command sources): the target is checked again with
+    /// [`lector_fs::Confinement::write`] and written with [`lector_fs::Confined::write`]
+    /// instead of `lector_fs::write_atomic`, which follows a final-component link.
+    pub confine: Option<lector_fs::Confinement>,
 }
 
 impl SaveRequest {
@@ -397,6 +405,7 @@ impl SaveRequest {
             ensure_final_newline: editor.ensure_final_newline,
             run_hooks: true,
             path: None,
+            confine: None,
         }
     }
 }
@@ -2059,7 +2068,12 @@ impl DocHandle {
                 }
             }
         }
-        lector_fs::write_atomic(&target, &bytes)?;
+        match &req.confine {
+            Some(confinement) => confinement
+                .write(&target)?
+                .write(&bytes, lector_fs::CreateDirs::No)?,
+            None => lector_fs::write_atomic(&target, &bytes)?,
+        }
         let new_stamp = lector_fs::stamp(&target).ok();
         // 4. Bookkeeping.
         let mut fx = Fx::default();

@@ -592,3 +592,31 @@ fn ignored_files_are_backed_up_and_dangling_links_refused() {
     assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
     s.stop();
 }
+
+/// The audit's case (ADR 0010, item 1): a project that commits `docs -> .git` and
+/// `cfg -> .git/config`. Every write and read through them is refused and `.git` is untouched.
+#[cfg(unix)]
+#[test]
+fn links_into_git_are_refused_for_reads_and_writes() {
+    let fx = fx!();
+    std::os::unix::fs::symlink(".git", fx.root.join("docs")).unwrap();
+    std::os::unix::fs::symlink(".git/config", fx.root.join("cfg")).unwrap();
+    let config_before = fs::read(fx.root.join(".git/config")).unwrap();
+    let s = fx.start();
+    let t = fx.run(
+        &s,
+        "write docs/hooks/pre-commit evil\nwrite docs/config evil\nwrite docs/newdir/x evil\nwrite cfg evil\nread docs/config\nread cfg",
+    );
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 4, "{answer}");
+    assert_eq!(answer.matches("READ-ERROR:").count(), 2, "{answer}");
+    assert!(!answer.contains("READ:["), "{answer}");
+    assert!(!fx.root.join(".git/hooks/pre-commit").exists());
+    assert!(!fx.root.join(".git/newdir").exists());
+    assert_eq!(
+        fs::read(fx.root.join(".git/config")).unwrap(),
+        config_before
+    );
+    assert!(t.written.is_empty());
+    s.stop();
+}

@@ -7,11 +7,20 @@
 //! * [`detect`] / [`detect_with`] recognise a git remote URL as a GitHub (github.com or
 //!   Enterprise) or GitLab (gitlab.com or self-hosted) repository → [`ForgeRemote`].
 //! * [`auth_token`] finds a token: environment, the `gh` / `glab` CLIs, the OS keychain.
-//!   Tokens never appear in logs or `Debug` output.
+//!   Tokens never appear in logs or `Debug` output. A token goes only to the host it belongs
+//!   to: the `GITHUB_TOKEN` / `GH_TOKEN` / `GITLAB_TOKEN` variables only to `github.com` /
+//!   `gitlab.com`; a host listed in `[forge]` needs its own token (`LECTOR_FORGE_TOKEN_<HOST>`,
+//!   `gh` / `glab` logged in to that host, or the keychain entry for that host); see the
+//!   `auth` rules on [`auth_token`]. Requests carrying a token go only over HTTPS (or to
+//!   loopback), never follow a redirect with it, and never follow a `Link` to another origin.
 //! * [`connect`] returns a [`Forge`] (GitHub REST v3 + GraphQL for review threads,
 //!   GitLab REST v4): list pull/merge requests, details, review threads mapped to
 //!   (path, 0-based line, side), submit a review, reply, resolve.
 //! * [`mock`] is a tiny `std::net` HTTP server serving recorded JSON (tests, screenshots).
+//!
+//! A host is GitHub or GitLab only when it is exactly `github.com` / `gitlab.com` (or `www.`) or
+//! listed in the user's `[forge]` settings, which a project's `.lector/settings.toml` cannot set,
+//! so a repository cannot send a token to another server (no `github.*` / `gitlab.*` guessing).
 #![forbid(unsafe_code)]
 
 mod auth;
@@ -26,10 +35,12 @@ mod time;
 use serde::{Deserialize, Serialize};
 
 pub use crate::auth::{
-    auth_token, auth_token_with, delete_token, store_token, token_help, Token, TokenSource,
-    TokenSources,
+    auth_token, auth_token_with, delete_token, env_vars, host_env_var, store_token, token_help,
+    Token, TokenSource, TokenSources, CLI_SCRUBBED_ENV,
 };
-pub use crate::remote::{detect, detect_with, parse_remote_url, ForgeHosts, ForgeRemote};
+pub use crate::remote::{
+    detect, detect_with, is_public_forge_host, parse_remote_url, ForgeHosts, ForgeRemote,
+};
 pub use crate::time::parse_rfc3339;
 
 /// Which code host.

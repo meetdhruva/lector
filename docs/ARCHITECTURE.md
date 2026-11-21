@@ -2291,11 +2291,14 @@ pub struct Turn { pub id: TurnId, pub prompt: String, pub before: Option<ShadowS
   `session/cancel` and answers pending permission requests `cancelled`.
 * *Files*: `fs/read_text_file` serves the open document's text (unsaved edits included) or the file on disk
   (`line`/`limit` honoured); `fs/write_text_file` goes through the open `DocHandle` (`replace_all` + `save`, no hooks /
-  cleanup; refused when the tab is locked read-only or the file changed on disk) or `lector_fs::write_atomic` for files
-  that are not open (parents created). Both only inside the project root (`paths::resolve_in_root`: `..`, absolute
-  paths elsewhere, symlinks leading out — including dangling ones, whose target a write would create — and `.git/`
-  compared case-insensitively, ignoring trailing dots/spaces and HFS+-ignored code points, are refused with an error to
-  the agent). Each write is journaled as `agent.write_file` (`Source::Agent`, args `{session, turn, path}`); when the turn
+  cleanup; confined save; refused when the tab is locked read-only or the file changed on disk) or
+  `lector_fs::Confined::write` for files that are not open (parents created, never through a link). Both go through
+  the one confinement check, `lector_fs::confine` (0.7.2; via `lector_app::commands::confinement`, which MCP resources
+  and command path arguments use too): the path is resolved with its symlinks and must stay inside the project root,
+  outside every git directory (`.git` in any case, trailing dots/spaces, NTFS stream suffixes, HFS+-ignored code
+  points, Windows short names `git~N`) and outside Lector's data and settings directories; a write never goes through
+  a final-component symlink, and reads and writes re-open the resolved path without following a link swapped in
+  after the check (`openat(O_NOFOLLOW)` on Unix). Refusals are errors to the agent. Each write is journaled as `agent.write_file` (`Source::Agent`, args `{session, turn, path}`); when the turn
   has no checkpoint, or the file is git-ignored (checkpoints leave those out), the file is backed up first
   (`snapshot_paths`) and the entry is undoable on its own.
 * *Permissions*: `session/request_permission` becomes a `PermissionRequest` in the turn (and `pending_permissions()`);
@@ -2373,8 +2376,8 @@ pub trait Forge: Send + Sync { fn kind(&self) -> ForgeKind; fn list_pull_request
     fn pull_request(&self, number) -> Result<PullRequest>; fn review_threads(&self, number) -> Result<Vec<ReviewThread>>;
     fn submit_review(&self, number, review: &ReviewSubmission /* event: Approve|RequestChanges|Comment, body, comments */) -> Result<()>;
     fn reply(&self, number, thread, body) -> Result<()>; }
-pub fn detect(remote_url: &str) -> Option<ForgeRemote>;   // github.com, GitHub Enterprise, gitlab.com, self-hosted GitLab
-pub fn auth_token(remote: &ForgeRemote) -> Option<Token>;   // env (GITHUB_TOKEN/GH_TOKEN/GITLAB_TOKEN), `gh auth token`, OS keychain
+pub fn detect(remote_url: &str) -> Option<ForgeRemote>;   // github.com, gitlab.com; detect_with adds the user's [forge] hosts
+pub fn auth_token(remote: &ForgeRemote) -> Option<Token>;   // env (only the host's own variables), `gh auth token`, OS keychain
 ```
 PR head/base commits are fetched into the **shadow repo** (never the user's repo) and reviewed as a
 `Changeset::Range` there; inline comments come from `review_threads` and drafts from `CommentStore`.
@@ -2408,10 +2411,13 @@ Submitting a review is an explicit user action, irreversible → confirmation di
 * **`lector-forge`** (`ureq` 3 with rustls + the platform verifier, proxies from `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`,
   no proxy for loopback; `keyring` 3 with native backends): `detect` / `detect_with(url, &ForgeHosts { github, gitlab,
   api_urls })` → `ForgeRemote { kind, host, path, owner, name, api_base, web_base, remote_url }` (https, ssh, scp-like,
-  git://; github.com → `api.github.com`, GHE → `/api/v3` + `/api/graphql`, GitLab → `/api/v4`; `github.*` /
-  `gitlab.*` hosts are recognised too). `auth_token` = env (`GITHUB_TOKEN`, `GH_TOKEN`; GHE also
-  `GH_ENTERPRISE_TOKEN`; `GITLAB_TOKEN`) → `gh auth token --hostname` / `glab auth status -t` → keychain (service
-  `lector-forge`, account = host; `store_token` / `delete_token`); `Token`'s `Debug` is redacted and tokens are never
+  git://; github.com → `api.github.com`, GHE → `/api/v3` + `/api/graphql`, GitLab → `/api/v4`; since 0.7.2 only
+  `github.com` / `gitlab.com` (and `www.`) and hosts listed in `[forge]` are recognised, never by name prefix).
+  `auth_token` = env (`GITHUB_TOKEN`, `GH_TOKEN` for github.com only; `GITLAB_TOKEN`, `GITLAB_PRIVATE_TOKEN` for
+  gitlab.com only; a listed host only `LECTOR_FORGE_TOKEN_<HOST>`) → `gh auth token --hostname` /
+  `glab auth status -t` (for a listed host with every token variable removed from their environment) → keychain
+  (service `lector-forge`, account = host; `store_token` / `delete_token`); requests carrying a token go only over
+  HTTPS or to loopback and drop it on redirects; `Token`'s `Debug` is redacted and tokens are never
   logged. `connect(&remote, token) -> Box<dyn Forge>`; trait as above plus `remote()`, `viewer()`,
   `resolve_thread(n, thread, resolved)`, `fetch_refspecs(&pr)` (`+refs/pull/N/head` or `+refs/merge-requests/N/head`
   and the base branch into `refs/lector/pr/N/{head,base}`). GitHub: REST for pulls (filters: `Mine` = author is

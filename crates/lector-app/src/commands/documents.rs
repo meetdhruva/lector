@@ -326,9 +326,10 @@ fn apply_edits() -> FnCommand {
 
 fn do_save(cx: &CommandContext, h: &DocHandle, force: bool) -> anyhow::Result<SaveOutcome> {
     let editor = h.project().settings().editor;
-    let _ = cx;
+    // Sandboxed callers (MCP, agents) save only inside the project and never through a link.
     let req = SaveRequest {
         force,
+        confine: cx.save_confinement()?,
         ..SaveRequest::from_settings(&editor)
     };
     match h.save(req) {

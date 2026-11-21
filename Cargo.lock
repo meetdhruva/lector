@@ -4476,7 +4476,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lector"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4503,7 +4503,7 @@ dependencies = [
 
 [[package]]
 name = "lector-agent"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "lector-app",
@@ -4526,7 +4526,7 @@ dependencies = [
 
 [[package]]
 name = "lector-app"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -4556,7 +4556,7 @@ dependencies = [
 
 [[package]]
 name = "lector-buffer"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "criterion",
  "lector-text",
@@ -4567,7 +4567,7 @@ dependencies = [
 
 [[package]]
 name = "lector-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4588,7 +4588,7 @@ dependencies = [
 
 [[package]]
 name = "lector-config"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
@@ -4605,7 +4605,7 @@ dependencies = [
 
 [[package]]
 name = "lector-diff"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "criterion",
  "imara-diff",
@@ -4615,7 +4615,7 @@ dependencies = [
 
 [[package]]
 name = "lector-forge"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "blake2",
  "keyring",
@@ -4632,19 +4632,21 @@ dependencies = [
 
 [[package]]
 name = "lector-fs"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dunce",
  "encoding_rs",
  "lector-text",
  "notify",
+ "proptest",
+ "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "lector-git"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dunce",
  "gix",
@@ -4657,11 +4659,11 @@ dependencies = [
 
 [[package]]
 name = "lector-icons"
-version = "0.7.1"
+version = "0.7.2"
 
 [[package]]
 name = "lector-lsp"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "crossbeam-channel",
  "futures",
@@ -4679,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "lector-mcp"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "dunce",
@@ -4693,7 +4695,7 @@ dependencies = [
 
 [[package]]
 name = "lector-perf"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "lector-buffer",
@@ -4707,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "lector-process"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "crossbeam-channel",
  "getrandom 0.3.4",
@@ -4721,7 +4723,7 @@ dependencies = [
 
 [[package]]
 name = "lector-search"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "criterion",
  "globset",
@@ -4741,7 +4743,7 @@ dependencies = [
 
 [[package]]
 name = "lector-syntax"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "insta",
  "lector-text",
@@ -4776,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "lector-terminal"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "alacritty_terminal",
  "crossbeam-channel",
@@ -4795,7 +4797,7 @@ dependencies = [
 
 [[package]]
 name = "lector-text"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -4810,7 +4812,7 @@ dependencies = [
 
 [[package]]
 name = "lector-theme"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "serde",
  "tempfile",
@@ -4820,7 +4822,7 @@ dependencies = [
 
 [[package]]
 name = "lector-ui"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "dunce",
@@ -4853,7 +4855,7 @@ dependencies = [
 
 [[package]]
 name = "lector-ui-agent"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "futures",
  "gpui",
@@ -4876,7 +4878,7 @@ dependencies = [
 
 [[package]]
 name = "lector-ui-git"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "dunce",
@@ -4904,7 +4906,7 @@ dependencies = [
 
 [[package]]
 name = "lector-ui-terminal"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dunce",
  "futures",
@@ -4923,7 +4925,7 @@ dependencies = [
 
 [[package]]
 name = "lector-workspace"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "criterion",

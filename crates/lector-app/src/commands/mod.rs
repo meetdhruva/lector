@@ -252,44 +252,59 @@ impl CommandContext {
         matches!(self.source, Source::Mcp | Source::Agent)
     }
 
-    /// Checks a resolved path argument. For [sandboxed](Self::is_sandboxed) callers the
-    /// path must lie inside the project root after resolving `..` and symlinks of its
-    /// deepest existing ancestor, and outside any `.git` directory; other callers pass.
+    /// Checks a path argument the command will read. For [sandboxed](Self::is_sandboxed)
+    /// callers the path goes through [`lector_fs::Confinement::read`] ([`confinement`]): it
+    /// must resolve (symlinks included) inside the project, outside every git directory and
+    /// outside Lector's own data and settings; the resolved path is returned. Other callers
+    /// get the path back unchanged.
     pub fn confine_path(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        self.confine_as(path, lector_fs::Access::Read)
+    }
+
+    /// [`CommandContext::confine_path`] for a path the command will write: a final-component
+    /// symlink is refused too ([`lector_fs::Confinement::write`]). Commands that write such a
+    /// path pass [`CommandContext::save_confinement`] on to the save so the write itself does
+    /// not follow a link that appears after this check.
+    pub fn confine_write_path(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        self.confine_as(path, lector_fs::Access::Write)
+    }
+
+    /// The confinement a write from this context must stay in (`Some` for sandboxed callers),
+    /// for [`crate::documents::SaveRequest::confine`].
+    pub fn save_confinement(&self) -> anyhow::Result<Option<lector_fs::Confinement>> {
+        if !self.is_sandboxed() {
+            return Ok(None);
+        }
+        Ok(Some(confinement(
+            &self.core,
+            self.require_project()?.root(),
+        )?))
+    }
+
+    fn confine_as(&self, path: PathBuf, access: lector_fs::Access) -> anyhow::Result<PathBuf> {
         if !self.is_sandboxed() {
             return Ok(path);
         }
-        let outside = || anyhow::anyhow!("{} is outside the project", path.display());
         let root = self.require_project()?.root();
-        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let mut lexical = PathBuf::new();
-        for c in path.components() {
-            match c {
-                std::path::Component::ParentDir => {
-                    if !lexical.pop() {
-                        return Err(outside());
-                    }
-                }
-                std::path::Component::CurDir => {}
-                other => lexical.push(other.as_os_str()),
-            }
-        }
-        let mut existing = lexical.as_path();
-        while std::fs::symlink_metadata(existing).is_err() {
-            existing = existing.parent().ok_or_else(outside)?;
-        }
-        let real = dunce::canonicalize(existing).map_err(|_| outside())?;
-        let rest = lexical.strip_prefix(existing).map_err(|_| outside())?;
-        let resolved = real.join(rest);
-        let rel = resolved.strip_prefix(&root).map_err(|_| outside())?;
-        if rel
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
-        {
-            anyhow::bail!("{} is inside .git", path.display());
-        }
-        Ok(lexical)
+        Ok(confinement(&self.core, root)?.check(&path, access)?.path())
     }
+}
+
+/// The one confinement of sandboxed callers (agents, MCP clients) to a project `root`:
+/// [`lector_fs::Confinement`] for the root, also forbidding Lector's data directory (the
+/// journal's directory and `lector_config::paths::data_dir`) and its settings directory when the
+/// project contains them (portable mode, overrides), so an agent cannot reach backups, logs or
+/// `settings.toml` (which chooses programs to run).
+pub fn confinement(
+    core: &AppCore,
+    root: &std::path::Path,
+) -> Result<lector_fs::Confinement, lector_fs::ConfineError> {
+    let mut c = lector_fs::Confinement::new(root)?;
+    if let Some(journal) = crate::journal::Journal::of(core) {
+        c = c.forbid(journal.data_dir());
+    }
+    Ok(c.forbid(&lector_config::paths::data_dir())
+        .forbid(&lector_config::paths::config_dir()))
 }
 
 /// A request for the front-end, carried in [`Outcome::ui`]. Headless callers may

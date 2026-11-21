@@ -27,7 +27,7 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -551,7 +551,7 @@ impl McpServer {
                     .project
                     .as_ref()
                     .ok_or_else(|| not_found("no folder is open"))?;
-                let path = inside_project(project, &tail)
+                let path = inside_project(&self.core, project, &tail)
                     .ok_or_else(|| not_found("not a file inside the project"))?;
                 let store = DocumentStore::for_core(&self.core);
                 let _guard = self.exec_guard();
@@ -765,20 +765,16 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The absolute path of project-relative `rel`, if it is an existing file inside the
-/// project root after resolving symlinks (no `..` escapes), outside `.git`.
-fn inside_project(project: &Project, rel: &str) -> Option<PathBuf> {
-    if rel.is_empty() {
-        return None;
-    }
-    let path = project.absolute_path(rel);
-    let canonical = dunce::canonicalize(&path).ok()?;
-    let root = dunce::canonicalize(project.root()).ok()?;
-    // `.git` holds credentials (remote URLs, config) and is not project content.
-    let in_git_dir = canonical.strip_prefix(&root).is_ok_and(|rel| {
-        rel.components()
-            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
-    });
-    (canonical.starts_with(&root) && !in_git_dir && Path::new(&canonical).is_file())
-        .then_some(canonical)
+/// The absolute path of project-relative `rel`, if it is an existing file that passes the one
+/// confinement check for sandboxed callers (`lector_app::commands::confinement`, i.e.
+/// `lector_fs::confine` with its read rules): inside the project after resolving symlinks,
+/// outside every git directory (which holds credentials in remote URLs and config) and outside
+/// Lector's own data.
+fn inside_project(core: &AppCore, project: &Project, rel: &str) -> Option<PathBuf> {
+    let confined = lector_app::commands::confinement(core, project.root())
+        .ok()?
+        .read(rel)
+        .ok()?
+        .path();
+    confined.is_file().then_some(confined)
 }

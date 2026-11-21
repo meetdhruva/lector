@@ -1610,9 +1610,12 @@ impl ShadowRepo {
             cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
         }
         if let Some(header) = &opts.http_header {
-            cmd.env("GIT_CONFIG_COUNT", "1")
+            // The header goes to the URL's host only: no redirects (which could lead elsewhere).
+            cmd.env("GIT_CONFIG_COUNT", "2")
                 .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                .env("GIT_CONFIG_VALUE_0", header);
+                .env("GIT_CONFIG_VALUE_0", header)
+                .env("GIT_CONFIG_KEY_1", "http.followRedirects")
+                .env("GIT_CONFIG_VALUE_1", "false");
         }
         exec(cmd, "git fetch", None).map_err(|e| match (&opts.http_header, e) {
             // Never echo the header back in an error.
