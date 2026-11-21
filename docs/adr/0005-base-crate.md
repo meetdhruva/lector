@@ -34,9 +34,14 @@ Recorded by the architect when reviewing the implementation, before merge.
   scores add; positions are the union). A one-atom query scores exactly as before. The
   nucleo operator syntax (`^ $ ! '`), which only one picker had and no document described, is
   not carried over.
-- **No ranking of large lists on the UI thread.** Lists up to 5,000 candidates rank inline
-  (measured under 1 ms); larger lists rank on the `lector-app` scheduler under one job key per
-  picker, cancellable (`rank_cancellable`), newest query wins (`lector-ui` `ListRanker`).
+- **No ranking of large lists on the UI thread.** The decision is by work, not by count
+  (cost is query length x candidate length): a ranking runs inline under a budget of 500,000
+  work units (1.0-1.6 ms in the dev profile, `rank_by_budgeted`) and otherwise on the
+  `lector-app` scheduler under one job key per picker, cancellable by work done
+  (`rank_cancellable`), newest query wins (`lector-ui` `ListRanker`). Query atoms over 64
+  characters are substring searches, at most 16 atoms count. Rows of an older query that are
+  still on screen while a ranking is pending are never confirmed: an Enter waits for the new
+  rows.
 - **`CancelToken`** has `child()` (weakly held by the parent) and `on_cancel` hooks that run
   exactly once on the cancelling thread, never under the internal lock. Crates import
   `lector_base::CancelToken` directly; there are no aliases or re-exports.

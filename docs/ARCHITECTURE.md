@@ -165,7 +165,9 @@ pub struct Cancelled;               // Error + Display "cancelled"; crates imple
 // ---- lector_base::fuzzy: the one scorer (completion, symbol / recent / command / ref / theme pickers) ----
 pub struct Options { pub max_chars: usize /* candidate chars matched, default 256 */ }
 pub struct Query;                   // Query::new(&str): split on whitespace into atoms (all must match, any order, scores add, positions
-                                    // are the sorted union), folded; is_empty(), len(), is_prefix_of(&Query)
+                                    // are the sorted union), folded; at most MAX_QUERY_ATOMS (16) atoms; an atom longer than
+                                    // MAX_FUZZY_ATOM_CHARS (64) is a case-insensitive contiguous substring, not a subsequence;
+                                    // is_empty(), len(), is_prefix_of(&Query)
 pub struct Match { pub score: i32, pub positions: Vec<usize> /* byte offsets of matched chars, strictly increasing */ }
 pub struct Ranked { pub index: usize, pub score: i32, pub positions: Vec<usize> }
 pub struct Matcher;                 // owns scratch buffers; keep one per thread; Matcher::new() / with_options(&Options)
@@ -176,9 +178,13 @@ impl Matcher {
     pub fn rank<S: AsRef<str>>(&mut self, q: &Query, candidates: &[S], limit: usize) -> Vec<Ranked>;
     pub fn rank_by<T>(&mut self, q: &Query, items: &[T], text: impl Fn(&T) -> &str, limit: usize) -> Vec<Ranked>;
     pub fn rank_cancellable<S: AsRef<str>>(&mut self, q: &Query, c: &[S], limit: usize, cancel: &CancelToken) -> Result<Vec<Ranked>, Cancelled>;
-    pub fn rank_by_cancellable<T>(&mut self, q: &Query, items: &[T], text: impl Fn(&T) -> &str, limit: usize, cancel: &CancelToken) -> Result<Vec<Ranked>, Cancelled>;   // checks the token every CANCEL_CHECK_EVERY (1024) candidates
-        // best `limit`: higher score, then fewer chars, then lower index; empty query keeps the first `limit` in input order
+    pub fn rank_by_cancellable<T>(&mut self, q: &Query, items: &[T], text: impl Fn(&T) -> &str, limit: usize, cancel: &CancelToken) -> Result<Vec<Ranked>, Cancelled>;   // checks the token every CANCEL_CHECK_WORK (32,768) units of work()
+    pub fn rank_by_budgeted<T>(&mut self, q: &Query, items: &[T], text: impl Fn(&T) -> &str, limit: usize, max_work: u64) -> Option<Vec<Ranked>>;   // None once more than max_work units were spent (nothing kept)
+        // best `limit`: higher score, then fewer chars (at most max_chars counted), then lower index; empty query keeps the first `limit` in input order
+    pub fn work(&self) -> u64;      // cumulative work done, ~ one alignment cell per unit; bounded per candidate by 16 atoms x 64 x max_chars
 }
+pub const INTERACTIVE_WORK_BUDGET: u64 = 500_000;   // what a UI thread may spend on one ranking: 1.0-1.6 ms in the workspace dev profile
+pub const WORK_PER_CANDIDATE: u64 = 8;              // least cost of any candidate (a list of n costs at least n x this)
 pub struct Index;                   // Index::new(&Options) / with_capacity; push(&str) -> slot: pre-folded texts for repeated queries
 pub fn score(query: &str, candidate: &str, options: &Options) -> Option<Match>;   // one-shot convenience
 pub fn fold(c: char) -> char;
@@ -187,7 +193,12 @@ Ranking (module docs of `fuzzy.rs` have the table): each whitespace-separated at
 (start / after `/` 900, after another separator 800, camelCase 700, after `.` or letter/digit change 600), +1000 when it follows the
 previous match, +50 for the query's own case; gaps cost 5 before the first match and 10 between matches, nothing after the last;
 +1500 for a prefix, +500 more for an exact match. Hence prefix > word boundary / camelCase > scattered, and text after the last
-match is free (completion breaks ties by `sortText`, `rank` by length then input order). Folding: ASCII lowercased, other chars
+match is free (completion breaks ties by `sortText`, `rank` by length then input order). The alignment costs atom x candidate length,
+so an atom of more than 64 characters (a pasted identifier or path) is matched as a case-insensitive contiguous substring of the
+candidate's first `max_chars` characters instead (linear, Knuth-Morris-Pratt; the same scores an aligned contiguous match gets, the
+occurrence with the best boundary bonus minus leading gap wins; positions are the run), on every path including `score_indexed`;
+words after the 16th are ignored. `Matcher::work()` counts the work in units of about one alignment cell, and `rank_by_budgeted`
+and the cancellable rankings stop by it, whatever the length of query and candidates. Folding: ASCII lowercased, other chars
 map to the first char of their Unicode lowercase (`İ`→`i`), `ς`→`σ`; no `ß`→`ss`, no normalisation, no accent stripping. The file
 picker keeps its own nucleo scoring and index (`lector-search`): per path this scorer is slower and ranks the top results differently,
 and the picker's score bound and property tests are defined by nucleo's scores.
@@ -2956,10 +2967,14 @@ Notes (as implemented, lector-ui integration):
   `path:line[:col]`, git colors); the command palette, outline (`ToggleOutline`), project symbols (`ToggleSymbolFinder`,
   from `symbols::project_symbols`), multiple definition targets, recent projects, themes and git refs rank with
   `lector_base::fuzzy`: the query is split on whitespace into atoms that must all match, in any order (`push git` finds
-  `Git: Push`); the old nucleo operators `^ $ ! '` are not supported there. `components::ranker::ListRanker` ranks lists of up to
-  5,000 candidates inline and larger ones (symbols of a big project, refs of a monorepo) on the `lector-app` scheduler under one
-  `JobKey` per picker: a newer query cancels the older (`Matcher::rank_cancellable`, checked every 1,024 candidates), stale
-  results are dropped by generation and the rows arrive in one message. Find bar uses `find_in_text` on a background thread.
+  `Git: Push`); the old nucleo operators `^ $ ! '` are not supported there. `components::ranker::ListRanker` decides by
+  work, not by count: it ranks inline under `INTERACTIVE_WORK_BUDGET` (`Matcher::rank_by_budgeted`) and hands what does not fit
+  (symbols of a big project, refs of a monorepo, or 5,000 long names with a long query) to the `lector-app` scheduler under one
+  `JobKey` per picker: a newer query cancels the older (`Matcher::rank_cancellable`, checked by work done), stale results are
+  dropped by generation and the rows arrive in one message. While a ranking is pending the rows of the previous query stay
+  visible but cannot be confirmed: `ListRanker::confirm_or_defer` holds an Enter until the rows of the latest query land and
+  applies it to their top row, unless the query changed again or the picker was dismissed (symbol and ref pickers); the file
+  finder does the same against the nucleo picker's published generation. Find bar uses `find_in_text` on a background thread.
 * Sidebar panels: Files (`DirIndex` built from `FileList` off-thread, git colors/badges with folder roll-ups,
   auto-reveal of the active file, context menu), Search (debounced 150 ms, `CancelToken` per query, streamed in
   30 ms batches, 20 000-line cap), Outline (`ShowOutline`). References open as a pane item; Markdown preview opens

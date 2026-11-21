@@ -289,6 +289,13 @@ mod tests {
             .find(|t| t.kind == kind && t.name == id_of)
     }
 
+    /// The registry is process-wide and forgets old finished entries: tests that start threads
+    /// and read it back run one at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn wait_until(mut cond: impl FnMut() -> bool) {
         let end = Instant::now() + Duration::from_secs(10);
         while !cond() {
@@ -299,6 +306,7 @@ mod tests {
 
     #[test]
     fn registered_while_running_and_cleared_on_return() {
+        let _serial = serial();
         let (release, wait) = mpsc::channel::<()>();
         let (ready_tx, ready) = mpsc::channel::<()>();
         let h = spawn_named(ThreadKind::PtyReader, "t-return", move || {
@@ -318,6 +326,7 @@ mod tests {
 
     #[test]
     fn cleared_when_the_closure_panics_and_the_registry_keeps_working() {
+        let _serial = serial();
         let h = spawn_named(ThreadKind::LspReader, "t-panic", || {
             if true {
                 panic!("expected test panic");
@@ -334,6 +343,7 @@ mod tests {
 
     #[test]
     fn the_os_thread_carries_kind_and_name() {
+        let _serial = serial();
         let h = spawn_named(ThreadKind::FileWatcher, "root", || {
             std::thread::current().name().map(str::to_owned)
         })
@@ -359,6 +369,7 @@ mod tests {
 
     #[test]
     fn full_name_is_kept_in_the_registry() {
+        let _serial = serial();
         let long = "n".repeat(200);
         spawn_named(ThreadKind::SchedulerWorker, long.clone(), || ())
             .unwrap()
@@ -369,6 +380,7 @@ mod tests {
 
     #[test]
     fn ids_increase_and_finished_entries_are_bounded() {
+        let _serial = serial();
         let mut last = 0;
         for i in 0..(KEEP_FINISHED + 40) {
             spawn_named(ThreadKind::PipeWriter, format!("bulk-{i}"), || ())

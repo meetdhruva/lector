@@ -18,6 +18,8 @@ pub(super) struct PathMatch {
 pub(super) struct PathList {
     picker: lector_search::Picker<Arc<str>>,
     query: String,
+    /// Counts the queries set so far; see [`PathList::stamp`].
+    queries: u64,
 }
 
 impl PathList {
@@ -27,6 +29,7 @@ impl PathList {
         PathList {
             picker: lector_search::Picker::new_for_paths(notify),
             query: String::new(),
+            queries: 0,
         }
     }
 
@@ -40,7 +43,22 @@ impl PathList {
         if query != self.query {
             self.picker.set_query(query);
             self.query = query.to_string();
+            self.queries += 1;
         }
+    }
+
+    /// Identifies the current query: `Some(stamp)` when the matcher has published results for
+    /// it (what [`PathList::top`] returns now answers it, possibly only the first part of a
+    /// pass still running), `None` while it still returns those of an earlier query. A caller
+    /// that keeps rows compares the stamp it got when it read them with the stamp now.
+    pub fn stamp(&self) -> Option<u64> {
+        self.picker.progress().current.then_some(self.queries)
+    }
+
+    /// The number of the latest query, to tell whether rows read under a stamp are still the
+    /// answer to it.
+    pub fn latest(&self) -> u64 {
+        self.queries
     }
 
     /// Lets matching progress for up to `ms`; true while still running.

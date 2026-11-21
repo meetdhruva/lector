@@ -41,6 +41,24 @@
 //! Only the first [`Options::max_chars`] characters of a candidate are matched (default 256),
 //! which bounds the work per candidate.
 //!
+//! # Long atoms
+//!
+//! The alignment costs `atom length x candidate length`, so an atom longer than
+//! [`MAX_FUZZY_ATOM_CHARS`] (64) characters, typically a pasted identifier or path, is not
+//! matched as a subsequence. It is matched as a case-insensitive **contiguous substring** of the
+//! candidate's first characters (linear time). A candidate without that substring does not
+//! match. The substring scores what the alignment would give a contiguous match (boundary bonus
+//! of its first character, 1000 per following character, 50 per character of equal case, prefix
+//! and exact bonuses); when it occurs several times, the occurrence with the best boundary
+//! bonus minus leading gap is taken, the earliest on a tie. The positions are the run.
+//!
+//! # Work
+//!
+//! A [`Matcher`] counts the work it does in units of about one alignment cell (see
+//! [`Matcher::work`]). [`Matcher::rank_by_budgeted`] gives up when a ranking would exceed a
+//! budget ([`INTERACTIVE_WORK_BUDGET`] suits a UI thread), and the cancellable rankings look at
+//! their token every [`CANCEL_CHECK_WORK`] units, whatever the length of query and candidates.
+//!
 //! # Performance
 //!
 //! A [`Matcher`] owns all scratch buffers: after the first calls nothing allocates in
@@ -50,6 +68,8 @@
 //! folded characters and boundary bonuses so repeated queries skip that work.
 
 use crate::{CancelToken, Cancelled};
+
+mod substring;
 
 /// Tuning that does not depend on the query.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,8 +111,31 @@ pub struct Ranked {
     pub positions: Vec<usize>,
 }
 
-/// [`Matcher::rank_cancellable`] looks at its token once per this many candidates.
-pub const CANCEL_CHECK_EVERY: usize = 1024;
+/// Atoms longer than this many characters are matched as a contiguous substring instead of a
+/// subsequence (see the module documentation).
+pub const MAX_FUZZY_ATOM_CHARS: usize = 64;
+
+/// A query keeps at most this many atoms; later words are ignored, so the work per candidate
+/// has a bound whatever is pasted into the query.
+pub const MAX_QUERY_ATOMS: usize = 16;
+
+/// [`Matcher::rank_cancellable`] looks at its token whenever this much [`Matcher::work`] has been
+/// done since the last look: about 0.1 ms in the workspace dev profile, so cancellation is
+/// prompt for 1,000 short candidates and for 100 candidates of 256 characters alike.
+pub const CANCEL_CHECK_WORK: u64 = 32_768;
+
+/// The work a ranking may spend on a UI thread ([`Matcher::rank_by_budgeted`]): 500,000 units.
+/// Measured in the workspace dev profile (`opt-level = 1`; `calibrate_work_units` in
+/// `fuzzy/work_tests.rs` prints it): one unit takes 1.9 to 3.1 ns on typical names, 256-character
+/// names, all-`a` worst cases for the alignment and substring searches, and 4.8 ns on the worst
+/// shape found (a two-letter alphabet, where half the cells branch each way). The budget is
+/// therefore 1.0 to 1.6 ms, 2.4 ms at worst, and less in a release build. The candidate in
+/// progress when the budget runs out adds at most one atom's alignment (16,500 units, 0.05 ms).
+pub const INTERACTIVE_WORK_BUDGET: u64 = 500_000;
+
+/// The least work charged for a candidate (the call and its buffers): a list of `n` candidates
+/// costs at least `n * WORK_PER_CANDIDATE`.
+pub const WORK_PER_CANDIDATE: u64 = 8;
 
 const NEG_INF: i32 = i32::MIN / 4;
 const GAP_LEADING: i32 = -5;
@@ -148,6 +191,8 @@ struct Atom {
     folded_ascii: Vec<u8>,
     orig_ascii: Vec<u8>,
     ascii: bool,
+    /// Longer than [`MAX_FUZZY_ATOM_CHARS`]: matched as a substring, with this failure table.
+    fail: Option<Vec<u32>>,
 }
 
 impl Atom {
@@ -163,12 +208,14 @@ impl Atom {
         } else {
             (Vec::new(), Vec::new())
         };
+        let fail = (orig.len() > MAX_FUZZY_ATOM_CHARS).then(|| substring::failure_table(&folded));
         Atom {
             folded,
             orig,
             folded_ascii,
             orig_ascii,
             ascii,
+            fail,
         }
     }
 }
@@ -183,9 +230,14 @@ pub struct Query {
 
 impl Query {
     /// Prepares `text`: it is split on whitespace (Unicode `White_Space`) into atoms; leading,
-    /// trailing and repeated whitespace is ignored.
+    /// trailing and repeated whitespace is ignored, and so are the words after the first
+    /// [`MAX_QUERY_ATOMS`].
     pub fn new(text: &str) -> Query {
-        let atoms: Vec<Atom> = text.split_whitespace().map(Atom::new).collect();
+        let atoms: Vec<Atom> = text
+            .split_whitespace()
+            .take(MAX_QUERY_ATOMS)
+            .map(Atom::new)
+            .collect();
         let ascii = atoms.iter().all(|a| a.ascii);
         Query { atoms, ascii }
     }
@@ -303,6 +355,10 @@ pub struct Matcher {
     offsets: Vec<usize>,
     d_mat: Vec<i32>,
     m_mat: Vec<i32>,
+    work: u64,
+    /// While ranking under a budget: the `work` value past which scoring gives up in the middle
+    /// of a candidate (the caller then discards the answer). `0` means no limit.
+    stop_at: u64,
 }
 
 fn subsequence<T: Copy + PartialEq>(query: &[T], text: &[T]) -> bool {
@@ -337,10 +393,41 @@ impl Matcher {
         }
     }
 
-    /// Cheap rejection: is every atom a subsequence of the candidate's first characters?
-    fn prefilter(&self, q: &Query, text: &str, text_ascii: bool) -> bool {
+    /// Whether the candidate's first characters are all ASCII. Looks at those characters only,
+    /// so it costs at most `max_chars` however long the text is.
+    fn head_is_ascii(&self, text: &str) -> bool {
+        text.as_bytes()[..text.len().min(self.limit())].is_ascii()
+    }
+
+    /// The work done so far, in units of about one alignment cell: the alignment costs one per
+    /// cell (query characters x candidate characters), a test of a candidate, a substring search
+    /// and the preparation of a candidate one per character, plus a few per candidate. It only
+    /// grows; take differences. Bounded per candidate by
+    /// `MAX_FUZZY_ATOM_CHARS x max_chars x (number of atoms)`, never by the length of a long atom
+    /// or text.
+    pub fn work(&self) -> u64 {
+        self.work
+    }
+
+    fn add_work(&mut self, units: usize) {
+        self.work = self.work.saturating_add(units as u64);
+    }
+
+    /// Whether a ranking under a budget has overrun it: scoring then stops early and its answer
+    /// is meaningless (the ranking discards it).
+    fn overrun(&self) -> bool {
+        self.stop_at != 0 && self.work > self.stop_at
+    }
+
+    /// Cheap rejection: is every (short) atom a subsequence of the candidate's first characters?
+    /// Long atoms are not tested here: their substring search is the test.
+    fn prefilter(&mut self, q: &Query, text: &str, text_ascii: bool) -> bool {
         let limit = self.limit();
-        q.atoms.iter().all(|a| {
+        self.add_work(WORK_PER_CANDIDATE as usize);
+        let scanned = text.len().min(limit);
+        let mut cost = 0;
+        let passed = q.atoms.iter().filter(|a| a.fail.is_none()).all(|a| {
+            cost += scanned;
             if a.ascii && text_ascii {
                 let bytes = &text.as_bytes()[..text.len().min(limit)];
                 let mut qi = 0;
@@ -359,7 +446,9 @@ impl Matcher {
                 }
                 qi == a.folded.len()
             }
-        })
+        });
+        self.add_work(cost);
+        passed
     }
 
     /// Score of `query` against `text`, `None` if it does not match. With several atoms every
@@ -369,11 +458,12 @@ impl Matcher {
         if query.is_empty() {
             return Some(0);
         }
-        let text_ascii = text.is_ascii();
+        let text_ascii = self.head_is_ascii(text);
         if !self.prefilter(query, text, text_ascii) {
             return None;
         }
         let limit = self.limit();
+        let mut total = 0;
         if query.ascii && text_ascii {
             let bytes = &text.as_bytes()[..text.len().min(limit)];
             self.orig_b.clear();
@@ -387,46 +477,86 @@ impl Matcher {
                 self.bonus.push(boundary_bonus(prev, c) as i16);
                 prev = Some(c);
             }
-            let mut total = 0;
+            let n = bytes.len();
+            self.add_work(n);
             for a in &query.atoms {
-                total += score_core(
-                    &mut self.rows,
-                    &a.folded_ascii,
-                    &a.orig_ascii,
-                    &self.orig_b,
-                    &self.fold_b,
-                    &self.bonus,
-                );
+                if self.overrun() {
+                    return None;
+                }
+                total += match &a.fail {
+                    Some(fail) => {
+                        self.add_work(3 * n);
+                        let parts = (&a.folded_ascii[..], &a.orig_ascii[..], &fail[..]);
+                        substring::score(parts, &self.orig_b, &self.fold_b, &self.bonus)?.0
+                    }
+                    None => {
+                        self.add_work(a.folded_ascii.len() * n);
+                        score_core(
+                            &mut self.rows,
+                            &a.folded_ascii,
+                            &a.orig_ascii,
+                            &self.orig_b,
+                            &self.fold_b,
+                            &self.bonus,
+                        )
+                    }
+                };
             }
-            Some(total)
         } else {
             self.fill_chars(text);
-            let mut total = 0;
+            let n = self.fold_c.len();
+            self.add_work(n);
             for a in &query.atoms {
-                total += score_core(
-                    &mut self.rows,
-                    &a.folded,
-                    &a.orig,
-                    &self.orig_c,
-                    &self.fold_c,
-                    &self.bonus,
-                );
+                if self.overrun() {
+                    return None;
+                }
+                total += match &a.fail {
+                    Some(fail) => {
+                        self.add_work(3 * n);
+                        let parts = (&a.folded[..], &a.orig[..], &fail[..]);
+                        substring::score(parts, &self.orig_c, &self.fold_c, &self.bonus)?.0
+                    }
+                    None => {
+                        self.add_work(a.folded.len() * n);
+                        score_core(
+                            &mut self.rows,
+                            &a.folded,
+                            &a.orig,
+                            &self.orig_c,
+                            &self.fold_c,
+                            &self.bonus,
+                        )
+                    }
+                };
             }
-            Some(total)
         }
+        Some(total)
     }
 
     /// [`Matcher::score`] for text `slot` of an [`Index`] (the same score as scoring the text).
     pub fn score_indexed(&mut self, index: &Index, slot: usize, query: &Query) -> Option<i32> {
         let (orig, folded, bonus) = index.slices(slot);
-        let mut total = 0;
+        let n = folded.len();
+        self.add_work(WORK_PER_CANDIDATE as usize);
         for a in &query.atoms {
-            if a.folded.len() > folded.len() || !subsequence(&a.folded, folded) {
+            self.add_work(n);
+            if a.folded.len() > n || (a.fail.is_none() && !subsequence(&a.folded, folded)) {
                 return None;
             }
         }
+        let mut total = 0;
         for a in &query.atoms {
-            total += score_core(&mut self.rows, &a.folded, &a.orig, orig, folded, bonus);
+            total += match &a.fail {
+                Some(fail) => {
+                    self.add_work(3 * n);
+                    let parts = (&a.folded[..], &a.orig[..], &fail[..]);
+                    substring::score(parts, orig, folded, bonus)?.0
+                }
+                None => {
+                    self.add_work(a.folded.len() * n);
+                    score_core(&mut self.rows, &a.folded, &a.orig, orig, folded, bonus)
+                }
+            };
         }
         Some(total)
     }
@@ -457,13 +587,29 @@ impl Matcher {
                 positions: Vec::new(),
             });
         }
-        if !self.prefilter(query, text, text.is_ascii()) {
+        let text_ascii = self.head_is_ascii(text);
+        if !self.prefilter(query, text, text_ascii) {
             return None;
         }
         self.fill_chars(text);
+        let n = self.fold_c.len();
+        self.add_work(n);
         let mut score = 0;
-        let mut chars: Vec<usize> = Vec::with_capacity(query.len());
+        let mut chars: Vec<usize> = Vec::with_capacity(query.len().min(n));
         for a in &query.atoms {
+            if self.overrun() {
+                return None;
+            }
+            if let Some(fail) = &a.fail {
+                self.add_work(3 * n);
+                let parts = (&a.folded[..], &a.orig[..], &fail[..]);
+                let (sc, start) = substring::score(parts, &self.orig_c, &self.fold_c, &self.bonus)?;
+                score += sc;
+                chars.extend(start..start + a.folded.len());
+                continue;
+            }
+            // The alignment, again for its score, then its trace back.
+            self.add_work(4 * a.folded.len() * n);
             score += score_core(
                 &mut self.rows,
                 &a.folded,
@@ -544,9 +690,9 @@ impl Matcher {
     }
 
     /// The best `limit` of `candidates` for `query`, best first: higher score, then shorter text
-    /// (fewer characters), then lower index. Non-matching candidates are left out. An empty query
-    /// keeps the first `limit` candidates in input order. Positions are computed for the
-    /// returned candidates only.
+    /// (fewer characters, counting at most [`Options::max_chars`] of them), then lower index.
+    /// Non-matching candidates are left out. An empty query keeps the first `limit` candidates
+    /// in input order. Positions are computed for the returned candidates only.
     pub fn rank<S: AsRef<str>>(
         &mut self,
         query: &Query,
@@ -564,14 +710,15 @@ impl Matcher {
         text: impl Fn(&T) -> &str,
         limit: usize,
     ) -> Vec<Ranked> {
-        // Without a token the ranking cannot be cancelled and cannot fail.
-        self.rank_impl(query, items, text, limit, None)
+        // Without a token or a budget the ranking cannot stop early.
+        self.rank_impl(query, items, text, limit, Control::default())
             .unwrap_or_default()
     }
 
-    /// [`Matcher::rank`] that stops with `Err(Cancelled)` soon after `cancel` is set (it is
-    /// checked every [`CANCEL_CHECK_EVERY`] candidates), for ranking large lists off the UI
-    /// thread.
+    /// [`Matcher::rank`] that stops with `Err(Cancelled)` soon after `cancel` is set, for ranking
+    /// large lists off the UI thread. The token is looked at every [`CANCEL_CHECK_WORK`] units
+    /// of [`Matcher::work`], so it is prompt whatever the length of the query and of the
+    /// candidates (not once per number of candidates).
     pub fn rank_cancellable<S: AsRef<str>>(
         &mut self,
         query: &Query,
@@ -579,7 +726,7 @@ impl Matcher {
         limit: usize,
         cancel: &CancelToken,
     ) -> Result<Vec<Ranked>, Cancelled> {
-        self.rank_impl(query, candidates, S::as_ref, limit, Some(cancel))
+        self.rank_by_cancellable(query, candidates, S::as_ref, limit, cancel)
     }
 
     /// [`Matcher::rank_by`] with cancellation, see [`Matcher::rank_cancellable`].
@@ -591,7 +738,35 @@ impl Matcher {
         limit: usize,
         cancel: &CancelToken,
     ) -> Result<Vec<Ranked>, Cancelled> {
-        self.rank_impl(query, items, text, limit, Some(cancel))
+        let control = Control {
+            cancel: Some(cancel),
+            max_work: u64::MAX,
+        };
+        self.rank_impl(query, items, text, limit, control)
+            .map_err(|_| Cancelled)
+    }
+
+    /// [`Matcher::rank_by`] for a thread that must not stall: `None` as soon as the ranking has
+    /// done more than `max_work` units of [`Matcher::work`] (see [`INTERACTIVE_WORK_BUDGET`]),
+    /// with nothing kept. The work wasted is at most `max_work` plus one candidate. Not
+    /// overrunning is decided by the work actually done (a candidate the cheap test rejects
+    /// costs little), not by the number of candidates.
+    pub fn rank_by_budgeted<T>(
+        &mut self,
+        query: &Query,
+        items: &[T],
+        text: impl Fn(&T) -> &str,
+        limit: usize,
+        max_work: u64,
+    ) -> Option<Vec<Ranked>> {
+        let control = Control {
+            cancel: None,
+            max_work,
+        };
+        self.stop_at = self.work.saturating_add(max_work).max(1);
+        let ranked = self.rank_impl(query, items, text, limit, control).ok();
+        self.stop_at = 0;
+        ranked
     }
 
     fn rank_impl<T>(
@@ -600,28 +775,44 @@ impl Matcher {
         items: &[T],
         text: impl Fn(&T) -> &str,
         limit: usize,
-        cancel: Option<&CancelToken>,
-    ) -> Result<Vec<Ranked>, Cancelled> {
+        control: Control<'_>,
+    ) -> Result<Vec<Ranked>, Stop> {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let start = self.work;
+        let mut next_check = start;
+        let mut guard = |m: &Matcher| -> Result<(), Stop> {
+            let done = m.work - start;
+            if done > control.max_work {
+                return Err(Stop::OverBudget);
+            }
+            if m.work >= next_check {
+                next_check = m.work.saturating_add(CANCEL_CHECK_WORK);
+                if let Some(cancel) = control.cancel {
+                    cancel.check().map_err(|_| Stop::Cancelled)?;
+                }
+            }
+            Ok(())
+        };
+        let max_chars = self.limit();
         // (score, chars, index)
         let mut scored: Vec<(i32, usize, usize)> = Vec::new();
         for (index, item) in items.iter().enumerate() {
-            if index % CANCEL_CHECK_EVERY == 0 {
-                if let Some(cancel) = cancel {
-                    cancel.check()?;
-                }
-            }
+            guard(self)?;
             if query.is_empty() {
                 if index >= limit {
                     break;
                 }
+                self.add_work(WORK_PER_CANDIDATE as usize);
                 scored.push((0, 0, index));
             } else {
                 let t = text(item);
-                if let Some(score) = self.score(query, t) {
-                    scored.push((score, t.chars().count(), index));
+                let score = self.score(query, t);
+                // After the call: a candidate abandoned in the middle must not count.
+                guard(self)?;
+                if let Some(score) = score {
+                    scored.push((score, t.chars().take(max_chars).count(), index));
                 }
             }
         }
@@ -633,18 +824,45 @@ impl Matcher {
             scored.truncate(limit);
         }
         scored.sort_unstable_by(order);
-        Ok(scored
-            .into_iter()
-            .map(|(score, _, index)| Ranked {
+        let mut ranked = Vec::with_capacity(scored.len());
+        for (score, _, index) in scored {
+            guard(self)?;
+            let positions = self
+                .matches(query, text(&items[index]))
+                .map(|m| m.positions)
+                .unwrap_or_default();
+            guard(self)?;
+            ranked.push(Ranked {
                 index,
                 score,
-                positions: self
-                    .matches(query, text(&items[index]))
-                    .map(|m| m.positions)
-                    .unwrap_or_default(),
-            })
-            .collect())
+                positions,
+            });
+        }
+        guard(self)?;
+        Ok(ranked)
     }
+}
+
+/// What may end a ranking early.
+#[derive(Clone, Copy)]
+struct Control<'a> {
+    cancel: Option<&'a CancelToken>,
+    max_work: u64,
+}
+
+impl Default for Control<'_> {
+    fn default() -> Self {
+        Control {
+            cancel: None,
+            max_work: u64::MAX,
+        }
+    }
+}
+
+/// Why a ranking ended early.
+enum Stop {
+    Cancelled,
+    OverBudget,
 }
 
 /// `query` against `candidate` in one call (allocates; use a [`Matcher`] in loops).
@@ -734,555 +952,6 @@ fn dp_score<T: Copy + PartialEq>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    fn s(query: &str, text: &str) -> Option<i32> {
-        Matcher::new().score(&Query::new(query), text)
-    }
-
-    fn m(query: &str, text: &str) -> Option<Match> {
-        score(query, text, &Options::default())
-    }
-
-    fn order(query: &str, candidates: &[&str]) -> Vec<String> {
-        let reversed: Vec<&str> = candidates.iter().rev().copied().collect();
-        Matcher::new()
-            .rank(&Query::new(query), &reversed, usize::MAX)
-            .into_iter()
-            .map(|r| reversed[r.index].to_string())
-            .collect()
-    }
-
-    /// The shared ranking table (ADR 0005): query -> candidates, best first. It is the union of
-    /// the ranking tests of the old completion matcher (lector-lsp) and the old picker matcher
-    /// (lector-ui). Candidates are fed in reverse order, so a tie would fail the test too.
-    #[test]
-    fn shared_ranking_table() {
-        let table: &[(&str, &[&str])] = &[
-            // Prefix beats later occurrences.
-            ("fo", &["foo", "xfoo"]),
-            ("fo", &["foobar", "buffoon"]),
-            ("pr", &["print", "xxprint"]),
-            ("name", &["name", "rename"]),
-            // Word boundaries (separator, camelCase) beat scattered matches.
-            ("fb", &["foo_bar", "fxxbxx"]),
-            ("fb", &["fooBar", "fobar_x"]),
-            ("gc", &["get_count", "gic"]),
-            ("sl", &["slice", "selfLen"]),
-            ("ab", &["ab", "a_b", "axb"]),
-            ("tsb", &["Toggle Side Bar", "tasbar", "testsubject"]),
-            // Contiguity and word starts in paths.
-            ("main", &["src/main.rs", "src/domain.rs"]),
-            ("main", &["main.rs", "main_window.rs"]),
-            ("lib", &["src/lib.rs", "src/public_library.rs"]),
-            // Case: an exact-case match beats a different-case one.
-            ("Vec", &["Vec", "vec"]),
-            ("vec", &["vec", "Vec"]),
-            // Equal scores: shorter text first, then input order (picker tie-break).
-            ("fo", &["foo", "foobar", "foobarbaz"]),
-            // Exact beats prefix.
-            ("name", &["name", "names"]),
-        ];
-        for (query, expected) in table {
-            assert_eq!(
-                order(query, expected),
-                expected.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-                "query {query:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn scores_order_without_the_tie_break_where_the_old_lsp_table_did() {
-        // The completion matcher compared raw scores: the better one must be strictly higher.
-        for (q, better, worse) in [
-            ("fo", "foo", "xfoo"),
-            ("fb", "fooBar", "fobar_x"),
-            ("Vec", "Vec", "vec"),
-            ("vec", "vec", "Vec"),
-            ("ab", "a_b", "axb"),
-        ] {
-            let (a, b) = (s(q, better).unwrap(), s(q, worse).unwrap());
-            assert!(a > b, "{q}: {better} ({a}) should beat {worse} ({b})");
-        }
-    }
-
-    #[test]
-    fn trailing_text_does_not_matter() {
-        assert_eq!(s("fo", "foo"), s("fo", "foobarbaz"));
-    }
-
-    #[test]
-    fn subsequence_required_and_empty_query_matches_everything() {
-        assert!(s("fb", "foo_bar").is_some());
-        assert!(s("bf", "foo_bar").is_none());
-        assert!(s("foox", "foo").is_none());
-        assert!(s("abd", "abc").is_none());
-        assert!(s("abc", "a_b_c").is_some());
-        assert_eq!(s("", "anything"), Some(0));
-        assert_eq!(s("  \t", "anything"), Some(0));
-        assert_eq!(m("", "x").unwrap().positions, Vec::<usize>::new());
-        assert_eq!(s("  ab \t", "ab"), s("ab", "ab"));
-    }
-
-    #[test]
-    fn folding_is_documented_and_exact() {
-        assert!(s("ärg", "Ärger").is_some());
-        assert!(s("ÄRG", "ärger").is_some());
-        assert!(s("é", "café").is_some());
-        assert!(s("é", "CAFÉ").is_some());
-        assert!(s("σ", "ς").is_some(), "final sigma folds to sigma");
-        assert!(s("ς", "Σ").is_some());
-        assert!(
-            s("i", "İstanbul").is_some(),
-            "İ folds to i (first char of its lowercase)"
-        );
-        // Not folded: multi-char expansion, normalisation, accents.
-        assert!(s("straße", "STRASSE").is_none());
-        assert!(s("ss", "straße").is_none());
-        assert!(s("e", "café").is_none());
-        assert!(s("e\u{301}", "caf\u{e9}").is_none());
-        assert_eq!(fold('A'), 'a');
-        assert_eq!(fold('Ω'), 'ω');
-        assert_eq!(fold('1'), '1');
-    }
-
-    #[test]
-    fn ascii_and_unicode_paths_agree() {
-        // The same ASCII text scored on the byte path and (through a non-ASCII query char that
-        // folds to ASCII: KELVIN SIGN -> k) on the char path.
-        let ascii = s("kb", "kilo_byte").unwrap();
-        let chars = s("\u{212a}b", "kilo_byte").unwrap();
-        // The case bonus differs (the query's K is not the candidate's k), nothing else.
-        assert_eq!(ascii - chars, BONUS_CASE);
-    }
-
-    #[test]
-    fn long_text_is_truncated_not_rejected_with_a_panic() {
-        let text = "a".repeat(300);
-        assert!(s("aa", &text).is_some());
-        assert!(s("b", &text).is_none());
-        let tail = format!("{}b", "a".repeat(300));
-        assert!(
-            s("b", &tail).is_none(),
-            "characters past max_chars are ignored"
-        );
-        let wide = Options { max_chars: 400 };
-        assert!(score("b", &tail, &wide).is_some());
-        assert!(Matcher::with_options(&Options { max_chars: 0 })
-            .score(&Query::new("a"), "a")
-            .is_some());
-    }
-
-    #[test]
-    fn positions_are_byte_offsets_of_the_best_alignment() {
-        let p = |q: &str, t: &str| m(q, t).map(|m| m.positions);
-        assert_eq!(p("fb", "foo_bar"), Some(vec![0, 4]));
-        assert_eq!(p("fb", "fooBar"), Some(vec![0, 3]));
-        assert_eq!(p("pr", "print"), Some(vec![0, 1]));
-        assert_eq!(p("fo", "xxfooxfo"), Some(vec![2, 3]));
-        assert_eq!(p("ts", "toggle sidebar"), Some(vec![0, 7]));
-        assert_eq!(p("", "abc"), Some(vec![]));
-        assert_eq!(p("z", "abc"), None);
-        assert_eq!(p("main", "src/main.rs"), Some(vec![4, 5, 6, 7]));
-    }
-
-    #[test]
-    fn positions_are_correct_for_multi_byte_text() {
-        let p = |q: &str, t: &str| m(q, t).map(|m| m.positions);
-        assert_eq!(p("é", "café"), Some(vec![3]));
-        assert_eq!(p("hl", "héllo"), Some(vec![0, 3]));
-        assert_eq!(p("日本", "今日の日本語"), Some(vec![9, 12]));
-        assert_eq!(p("ab", "αβaβb"), Some(vec![4, 7]));
-        let text = "ünï_cödé";
-        let pos = p("ücd", text).unwrap();
-        assert!(pos.iter().all(|&i| text.is_char_boundary(i)));
-        assert_eq!(
-            pos.iter()
-                .map(|&i| text[i..].chars().next().unwrap())
-                .collect::<String>(),
-            "ücd"
-        );
-    }
-
-    #[test]
-    fn match_score_equals_scorer_score() {
-        for (q, t) in [
-            ("get_user", "get_user_by_id"),
-            ("hm", "HashMap"),
-            ("tstr", "to_string"),
-            ("ln", "Lïne_nö"),
-        ] {
-            assert_eq!(m(q, t).unwrap().score, s(q, t).unwrap(), "{q} {t}");
-        }
-    }
-
-    #[test]
-    fn indexed_scores_equal_direct_scores() {
-        let texts = ["get_count", "getCount", "GC", "né_ü", "x", ""];
-        let mut index = Index::new(&Options::default());
-        for t in texts {
-            index.push(t);
-        }
-        assert_eq!(index.len(), texts.len());
-        assert!(!index.is_empty());
-        let mut matcher = Matcher::new();
-        for q in ["gc", "g", "né", "", "zz", "ü"] {
-            let query = Query::new(q);
-            for (slot, t) in texts.iter().enumerate() {
-                assert_eq!(
-                    matcher.score_indexed(&index, slot, &query),
-                    matcher.score(&query, t),
-                    "{q:?} vs {t:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn query_prefix_relation() {
-        let (a, ab) = (Query::new("a"), Query::new("ab"));
-        assert!(a.is_prefix_of(&ab));
-        assert!(!ab.is_prefix_of(&a));
-        assert!(Query::default().is_prefix_of(&a));
-        assert_eq!(ab.len(), 2);
-        // Several atoms: the earlier ones must stay, the last one may grow.
-        let (push, push_g, push_gi, gi_push) = (
-            Query::new("push"),
-            Query::new("push g"),
-            Query::new("push gi"),
-            Query::new("gi push"),
-        );
-        assert!(push.is_prefix_of(&push_g));
-        assert!(push_g.is_prefix_of(&push_gi));
-        assert!(!push_gi.is_prefix_of(&push_g));
-        assert!(!push.is_prefix_of(&gi_push));
-        assert!(Query::new("pu").is_prefix_of(&push_gi));
-        assert_eq!(push_gi.len(), 6);
-    }
-
-    #[test]
-    fn atoms_match_in_any_order() {
-        assert!(s("push git", "Git: Push").is_some());
-        assert!(s("git push", "Git: Push").is_some());
-        assert!(s("fold open", "Open Folder").is_some());
-        assert!(s("open fold", "Open Folder").is_some());
-        // Every atom must match.
-        assert!(s("push zzz", "Git: Push").is_none());
-        assert!(s("zzz push", "Git: Push").is_none());
-        // Each atom is matched against the whole candidate, not after the previous atom.
-        assert!(s("sidebar toggle", "Workspace: Toggle Sidebar").is_some());
-        // The characters of one atom stay in order.
-        assert!(s("hsup git", "Git: Push").is_none());
-    }
-
-    #[test]
-    fn whitespace_between_atoms_is_ignored() {
-        let reference = s("push git", "Git: Push");
-        assert!(reference.is_some());
-        for q in [
-            "push   git",
-            "  push git",
-            "push git  ",
-            "\tpush\n git\u{3000}",
-            " push git ",
-        ] {
-            assert_eq!(s(q, "Git: Push"), reference, "{q:?}");
-        }
-        // All-whitespace is the empty query: everything, score 0, input order.
-        for q in ["", " ", " \t\n\u{3000}"] {
-            assert_eq!(s(q, "anything"), Some(0));
-            assert!(Query::new(q).is_empty());
-            let items = ["b", "a", "c"];
-            let r = Matcher::new().rank(&Query::new(q), &items, usize::MAX);
-            assert_eq!(r.iter().map(|x| x.index).collect::<Vec<_>>(), [0, 1, 2]);
-            assert!(r.iter().all(|x| x.score == 0 && x.positions.is_empty()));
-        }
-    }
-
-    #[test]
-    fn score_is_the_sum_of_the_atom_scores_and_one_atom_is_unchanged() {
-        for (a, b, t) in [
-            ("push", "git", "Git: Push"),
-            ("fo", "ba", "foo_bar"),
-            ("ab", "ab", "ab"),
-            ("é", "ü", "Ünï café"),
-        ] {
-            let both = s(&format!("{a} {b}"), t);
-            let sum = s(a, t).zip(s(b, t)).map(|(x, y)| x + y);
-            assert_eq!(both, sum, "{a} {b} {t}");
-        }
-        // A single atom is scored exactly as before, whatever surrounds it.
-        assert_eq!(s(" fb ", "foo_bar"), s("fb", "foo_bar"));
-        assert_eq!(m(" fb ", "foo_bar"), m("fb", "foo_bar"));
-    }
-
-    #[test]
-    fn repeated_atoms_count_twice() {
-        let (once, twice) = (
-            s("git", "Git: Push").unwrap(),
-            s("git git", "Git: Push").unwrap(),
-        );
-        assert_eq!(twice, 2 * once);
-        // The same word twice is not satisfied by a text that has only part of it.
-        assert!(s("git git", "gi").is_none());
-        // More specific (more atoms) wins over fewer for the same candidate, so a longer
-        // query narrows rather than reshuffles.
-        let items = ["Git: Push", "Git: Pull", "Git: Push Tags"];
-        let r = Matcher::new().rank(&Query::new("git push"), &items, usize::MAX);
-        let names: Vec<&str> = r.iter().map(|x| items[x.index]).collect();
-        assert_eq!(names, ["Git: Push", "Git: Push Tags"]);
-    }
-
-    #[test]
-    fn atoms_may_overlap_on_the_same_characters() {
-        // `ab` and `bc` both use the `b` of `abc`.
-        assert!(s("ab bc", "abc").is_some());
-        assert_eq!(m("ab bc", "abc").unwrap().positions, vec![0, 1, 2]);
-        // The same atom twice matches one occurrence twice.
-        assert!(s("ab ab", "ab").is_some());
-        assert_eq!(m("ab ab", "ab").unwrap().positions, vec![0, 1]);
-        // `a a` is satisfied by a single `a`.
-        assert!(s("a a", "a").is_some());
-    }
-
-    #[test]
-    fn positions_are_the_sorted_union_of_the_atoms_positions() {
-        let p = |q: &str, t: &str| m(q, t).map(|m| m.positions);
-        assert_eq!(p("push git", "Git: Push"), Some(vec![0, 1, 2, 5, 6, 7, 8]));
-        assert_eq!(p("git push", "Git: Push"), p("push git", "Git: Push"));
-        assert_eq!(
-            p("fold open", "Open Folder"),
-            Some(vec![0, 1, 2, 3, 5, 6, 7, 8])
-        );
-        // Duplicates collapse.
-        assert_eq!(p("git git", "Git: Push"), Some(vec![0, 1, 2]));
-        // Multi-byte text: byte offsets, increasing.
-        let text = "Ünï café";
-        let found = p("café ünï", text).unwrap();
-        assert!(found.windows(2).all(|w| w[0] < w[1]));
-        assert!(found.iter().all(|&i| text.is_char_boundary(i)));
-        assert_eq!(
-            found
-                .iter()
-                .map(|&i| text[i..].chars().next().unwrap())
-                .collect::<String>(),
-            "Ünïcafé"
-        );
-    }
-
-    #[test]
-    fn indexed_scores_equal_direct_scores_for_several_atoms() {
-        let texts = ["Git: Push", "Open Folder", "né ü", ""];
-        let mut index = Index::new(&Options::default());
-        for t in texts {
-            index.push(t);
-        }
-        let mut matcher = Matcher::new();
-        for q in ["push git", "fold open", "né ü", "x y", "git"] {
-            let query = Query::new(q);
-            for (slot, t) in texts.iter().enumerate() {
-                assert_eq!(
-                    matcher.score_indexed(&index, slot, &query),
-                    matcher.score(&query, t),
-                    "{q:?} vs {t:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn rank_cancellable_matches_rank_when_not_cancelled() {
-        let items: Vec<String> = (0..3000).map(|i| format!("item_{i}_name")).collect();
-        let q = Query::new("itm 7 nm");
-        let token = CancelToken::new();
-        let mut matcher = Matcher::new();
-        let a = matcher.rank_cancellable(&q, &items, 50, &token).unwrap();
-        assert_eq!(a, matcher.rank(&q, &items, 50));
-        let b = matcher
-            .rank_by_cancellable(&q, &items, |s| s.as_str(), 50, &token)
-            .unwrap();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn rank_cancellable_stops_promptly_when_cancelled() {
-        use std::cell::Cell;
-        // Already cancelled: nothing is scored.
-        let token = CancelToken::new();
-        token.cancel();
-        let items = vec!["abc"; 100_000];
-        let seen = Cell::new(0usize);
-        let r = Matcher::new().rank_by_cancellable(
-            &Query::new("a"),
-            &items,
-            |s| {
-                seen.set(seen.get() + 1);
-                s
-            },
-            10,
-            &token,
-        );
-        assert_eq!(r, Err(Cancelled));
-        assert_eq!(seen.get(), 0);
-
-        // Cancelled while ranking (from inside the scorer's input): stops within one check
-        // interval, not after the whole list.
-        let token = CancelToken::new();
-        let seen = Cell::new(0usize);
-        let r = Matcher::new().rank_by_cancellable(
-            &Query::new("a"),
-            &items,
-            |s| {
-                seen.set(seen.get() + 1);
-                if seen.get() == 5000 {
-                    token.cancel();
-                }
-                s
-            },
-            10,
-            &token,
-        );
-        assert_eq!(r, Err(Cancelled));
-        assert!(seen.get() > 5000 && seen.get() <= 5000 + CANCEL_CHECK_EVERY);
-
-        // From another thread: returns long before the uncancelled run would.
-        let items = std::sync::Arc::new(vec!["a_long_candidate_name_for_scoring"; 2_000_000]);
-        let token = CancelToken::new();
-        let (t, i) = (token.clone(), items.clone());
-        let started = std::time::Instant::now();
-        let worker = std::thread::spawn(move || {
-            Matcher::new().rank_cancellable(&Query::new("ac nm"), &i, 10, &t)
-        });
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        token.cancel();
-        assert_eq!(worker.join().unwrap(), Err(Cancelled));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    }
-
-    #[test]
-    fn rank_limits_orders_and_gives_positions() {
-        let items = ["xxfoo", "foo", "bar", "foo_bar", "fOo"];
-        let mut mt = Matcher::new();
-        let all = mt.rank(&Query::new("foo"), &items, usize::MAX);
-        let names: Vec<&str> = all.iter().map(|r| items[r.index]).collect();
-        assert_eq!(names, ["foo", "fOo", "foo_bar", "xxfoo"]);
-        assert_eq!(all[0].positions, vec![0, 1, 2]);
-        let top2 = mt.rank(&Query::new("foo"), &items, 2);
-        assert_eq!(top2.iter().map(|r| r.index).collect::<Vec<_>>(), [1, 4]);
-        assert!(mt.rank(&Query::new("foo"), &items, 0).is_empty());
-        let none = mt.rank(&Query::new("qq"), &items, 5);
-        assert!(none.is_empty());
-        let empty = mt.rank(&Query::new(""), &items, 3);
-        assert_eq!(empty.iter().map(|r| r.index).collect::<Vec<_>>(), [0, 1, 2]);
-        let by = mt.rank_by(&Query::new("b"), &[(1, "abc"), (2, "bcd")], |t| t.1, 9);
-        assert_eq!(by[0].index, 1);
-    }
-
-    #[test]
-    fn long_queries_do_not_panic() {
-        let long_q = "a".repeat(500);
-        assert_eq!(s(&long_q, "aaa"), None);
-        assert_eq!(s(&long_q, &"a".repeat(600)), None);
-        assert!(m(&"ab".repeat(20), &"ab".repeat(100)).is_some());
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(512))]
-
-        #[test]
-        fn never_panics_on_arbitrary_unicode(q in "\\PC{0,12}", t in "\\PC{0,60}") {
-            let mut mt = Matcher::new();
-            let query = Query::new(&q);
-            let _ = mt.score(&query, &t);
-            let _ = mt.matches(&query, &t);
-            let _ = mt.rank(&query, &[t.as_str(), "x"], 3);
-        }
-
-        #[test]
-        fn deterministic_and_reusing_a_matcher_changes_nothing(q in "[a-zA-Z_é]{0,6}", t in "[a-zA-Z_é ./]{0,40}", u in "[a-zA-Z_é]{0,40}") {
-            let query = Query::new(&q);
-            let mut one = Matcher::new();
-            let first = one.score(&query, &t);
-            let _ = one.score(&query, &u); // dirty the scratch buffers
-            let _ = one.matches(&query, &u);
-            prop_assert_eq!(one.score(&query, &t), first);
-            prop_assert_eq!(Matcher::new().score(&query, &t), first);
-            prop_assert_eq!(m(&q, &t).map(|x| x.score), first);
-        }
-
-        #[test]
-        fn positions_are_increasing_char_boundaries_and_spell_the_query(q in "[a-zA-Zé日_]{1,6}", t in "[a-zA-Zé日_ /.]{0,50}") {
-            if let Some(found) = m(&q, &t) {
-                prop_assert_eq!(found.positions.len(), q.chars().count());
-                prop_assert!(found.positions.windows(2).all(|w| w[0] < w[1]));
-                let mut folded_query = q.chars().map(fold);
-                for &p in &found.positions {
-                    prop_assert!(t.is_char_boundary(p));
-                    let c = t[p..].chars().next().unwrap();
-                    prop_assert_eq!(Some(fold(c)), folded_query.next());
-                }
-            }
-        }
-
-        #[test]
-        fn atoms_are_independent_order_free_and_positions_are_a_sorted_union(
-            a in "[a-d]{1,3}", b in "[a-d]{1,3}", t in "[a-d_ ]{0,24}"
-        ) {
-            let both = m(&format!("{a} {b}"), &t);
-            let swapped = m(&format!("{b} {a}"), &t);
-            prop_assert_eq!(&both, &swapped);
-            let (ma, mb) = (m(&a, &t), m(&b, &t));
-            prop_assert_eq!(both.is_some(), ma.is_some() && mb.is_some());
-            if let (Some(both), Some(ma), Some(mb)) = (both, ma, mb) {
-                prop_assert_eq!(both.score, ma.score + mb.score);
-                let mut union: Vec<usize> = ma.positions.iter().chain(&mb.positions).copied().collect();
-                union.sort_unstable();
-                union.dedup();
-                prop_assert_eq!(both.positions, union);
-            }
-        }
-
-        #[test]
-        fn no_match_without_the_characters_in_order(q in "[a-e]{1,5}", t in "[a-e]{0,20}") {
-            let in_order = {
-                let mut it = t.chars();
-                q.chars().all(|c| it.any(|x| x == c))
-            };
-            prop_assert_eq!(s(&q, &t).is_some(), in_order);
-        }
-
-        #[test]
-        fn adding_a_matching_prefix_never_lowers_rank_below_a_scattered_match(q in "[a-m]{2,4}", pad in "[n-z]{1,4}") {
-            // A: the query typed in full at the start; B: the same letters scattered with
-            // padding. Appending text to A (not changing the prefix) keeps A above B.
-            let scattered: String = q.chars().flat_map(|c| [c].into_iter().chain(pad.chars())).collect();
-            let rank_of = |first: &str, second: &str| {
-                let items = [first, second];
-                Matcher::new().rank(&Query::new(&q), &items, 2)[0].index
-            };
-            for extra in ["", "_more", "Tail", "zzzzzz"] {
-                let prefixed = format!("{q}{extra}");
-                prop_assert_eq!(rank_of(&prefixed, &scattered), 0);
-                prop_assert_eq!(rank_of(&scattered, &prefixed), 1);
-            }
-        }
-
-        #[test]
-        fn rank_agrees_with_score_and_is_sorted(q in "[a-c]{1,3}", ts in proptest::collection::vec("[a-c_]{0,8}", 0..12)) {
-            let mut mt = Matcher::new();
-            let query = Query::new(&q);
-            let ranked = mt.rank(&query, &ts, usize::MAX);
-            let expected = ts.iter().filter(|t| mt.score(&query, t).is_some()).count();
-            prop_assert_eq!(ranked.len(), expected);
-            for w in ranked.windows(2) {
-                prop_assert!(w[0].score >= w[1].score);
-            }
-            for r in &ranked {
-                prop_assert_eq!(Some(r.score), mt.score(&query, &ts[r.index]));
-            }
-        }
-    }
-}
+mod tests;
+#[cfg(test)]
+mod work_tests;

@@ -56,7 +56,10 @@ impl Inner {
         // The lock is released: hooks and children may cancel other tokens (or this one) freely.
         let mut first_panic: Option<Box<dyn Any + Send>> = None;
         for child in children.into_iter().filter_map(|c| c.upgrade()) {
-            child.cancel();
+            // A panic in a child's hook must not stop the siblings or this token's hooks.
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| child.cancel())) {
+                first_panic.get_or_insert(payload);
+            }
         }
         for hook in hooks {
             if let Err(payload) = catch_unwind(AssertUnwindSafe(hook)) {
@@ -107,8 +110,13 @@ impl CancelToken {
     /// Requests cancellation. Idempotent; visible to every clone and child.
     ///
     /// Runs the hooks registered with [`on_cancel`](Self::on_cancel) on the calling thread,
-    /// after cancelling the children, without holding any internal lock. If a hook panics, the
-    /// remaining hooks still run and the first panic is then resumed on the caller.
+    /// after cancelling the children, without holding any internal lock.
+    ///
+    /// Completing the cancellation comes first: if a hook (of this token or of any descendant)
+    /// panics, every other child and hook still runs, the token stays cancelled, and only then
+    /// is the **first** panic resumed on the caller (later ones are dropped). Callers on shutdown
+    /// paths that must not unwind wrap the call in `catch_unwind`; a repeated `cancel()` is a
+    /// no-op and does not panic again.
     pub fn cancel(&self) {
         self.inner.cancel();
     }
@@ -353,6 +361,56 @@ mod tests {
         assert!(token.is_cancelled());
         token.on_cancel(hook(2));
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_panicking_child_hook_does_not_skip_siblings_or_parent_hooks() {
+        let parent = CancelToken::new();
+        let (first, second) = (parent.child(), parent.child());
+        let (count, hook) = counter();
+        first.on_cancel(|| panic!("boom in child"));
+        second.on_cancel(hook(1));
+        parent.on_cancel(hook(10));
+        let p = parent.clone();
+        // Policy: everything is cancelled first, then the first panic is resumed.
+        assert!(catch_unwind(AssertUnwindSafe(move || p.cancel())).is_err());
+        assert!(first.is_cancelled() && second.is_cancelled());
+        assert_eq!(count.load(Ordering::SeqCst), 11);
+        // A second cancel is a no-op and does not panic again.
+        parent.cancel();
+        assert_eq!(count.load(Ordering::SeqCst), 11);
+    }
+
+    #[test]
+    fn a_panic_three_levels_down_still_completes_the_cancellation() {
+        let root = CancelToken::new();
+        let mid = root.child();
+        let (bad, good) = (mid.child(), mid.child());
+        let sibling = root.child();
+        let (count, hook) = counter();
+        bad.on_cancel(|| panic!("deep boom"));
+        good.on_cancel(hook(1));
+        mid.on_cancel(hook(10));
+        sibling.on_cancel(hook(100));
+        root.on_cancel(hook(1000));
+        let r = root.clone();
+        let err = catch_unwind(AssertUnwindSafe(move || r.cancel())).unwrap_err();
+        assert_eq!(err.downcast_ref::<&str>(), Some(&"deep boom"));
+        assert!([&mid, &bad, &good, &sibling]
+            .iter()
+            .all(|t| t.is_cancelled()));
+        assert_eq!(count.load(Ordering::SeqCst), 1111);
+    }
+
+    #[test]
+    fn the_first_panic_wins_and_later_ones_are_dropped() {
+        let parent = CancelToken::new();
+        let child = parent.child();
+        child.on_cancel(|| panic!("first"));
+        parent.on_cancel(|| panic!("second"));
+        let p = parent.clone();
+        let err = catch_unwind(AssertUnwindSafe(move || p.cancel())).unwrap_err();
+        assert_eq!(err.downcast_ref::<&str>(), Some(&"first"));
     }
 
     #[test]
