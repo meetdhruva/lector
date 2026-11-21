@@ -8,6 +8,7 @@
 //! until the user saves. Drawn through the code view's owner-keyed layers
 //! (`CodeView::set_row_backgrounds` / `set_row_widgets`, owner [`LAYER`]).
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -158,8 +159,9 @@ impl FileConflicts {
             cx.background_executor()
                 .timer(Duration::from_millis(REPARSE_DELAY_MS))
                 .await;
-            let work = cx.background_spawn(async move { parse_rope(&rope) });
-            let parsed = work.await;
+            let key = view_key(JobKind::ConflictParse, this.entity_id());
+            let work = background(cx, key, Priority::Visible, move |_| parse_rope(&rope));
+            let Ok(parsed) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.task = None;
                 this.set_parsed(parsed, cx);

@@ -48,3 +48,7 @@ Recorded by the architect when reviewing the implementation, before merge.
 - **`ThreadKind` lists 25 kinds today**, 16 owner threads and 9 short tasks that currently
   use a thread. Step 3 (ADR 0003) moves the short tasks to the scheduler and removes their
   kinds; only owner kinds remain.
+- **`TaskRunner`** (step 3) is part of `lector_base::thread`: a caller-supplied way for owner
+  threads below `lector-app` to hand off short work. Of the short-task `ThreadKind`s, eight
+  were removed when their work moved to the scheduler; `PipeWriter` stays an owner thread (a
+  child's stdin pump outlives the call that spawned it).

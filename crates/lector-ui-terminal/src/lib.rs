@@ -26,6 +26,7 @@ pub mod view;
 #[cfg(test)]
 mod tests;
 
+use lector_ui::background::{background, view, JobKey, JobKind, Priority};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
@@ -213,9 +214,12 @@ pub fn init(cx: &mut App) {
             let sessions = lector_ui::commands_bridge::core(cx)
                 .store()
                 .terminal_sessions();
+            let key = JobKey::new(JobKind::TerminalSessions, view(panel.entity_id()));
             cx.spawn_in(window, async move |_, cx| {
-                let load = cx.background_spawn(async move { session::load(&sessions, &root) });
-                let tabs = load.await;
+                let load = background(cx, key, Priority::Visible, move |_| {
+                    session::load(&sessions, &root)
+                });
+                let Ok(tabs) = load.await else { return };
                 if tabs.is_empty() {
                     return;
                 }

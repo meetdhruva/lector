@@ -1,6 +1,7 @@
 //! The Branches sidebar panel: local branches (current marked, upstream
 //! ahead/behind), remote branches, tags and stashes.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -175,9 +176,10 @@ impl BranchesPanel {
             self.error = Some("Not a git repository".into());
             return;
         };
-        let work = cx.background_spawn(async move { load(&repo) });
+        let key = view_key(JobKind::GitRefs, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| load(&repo));
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 match result {

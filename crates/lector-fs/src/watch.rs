@@ -1,5 +1,6 @@
 //! Debounced, recursive file watching with git-state classification.
 
+use lector_base::thread::{spawn_named, ThreadKind};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -88,9 +89,12 @@ pub fn watch(
         config,
     )?;
     watcher.watch(root, RecursiveMode::Recursive)?;
-    std::thread::Builder::new()
-        .name("lector-fs-watch".into())
-        .spawn(move || debounce_loop(&rx, debounce, &roots, &sink))?;
+    // An owner thread: lives as long as the watcher (it ends when the watcher is dropped).
+    spawn_named(
+        ThreadKind::FileWatcher,
+        root.display().to_string(),
+        move || debounce_loop(&rx, debounce, &roots, &sink),
+    )?;
     Ok(Watcher { _watcher: watcher })
 }
 

@@ -14,7 +14,6 @@
 //! * Never `--no-verify`: hooks always run.
 
 use std::ffi::OsString;
-use std::io::Write as _;
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 
@@ -91,26 +90,15 @@ impl WriteCli<'_> {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|err| {
+        let child = cmd.spawn().map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 Error::GitNotInstalled(what)
             } else {
                 Error::Io(err)
             }
         })?;
-        if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            // Write on a helper thread so a large patch can't deadlock against a full
-            // stdout/stderr pipe. A broken pipe means git exited early; its exit status
-            // and stderr explain why, so the write error itself is ignored.
-            let input = input.to_vec();
-            let writer = std::thread::spawn(move || {
-                let _ = pipe.write_all(&input);
-            });
-            let output = child.wait_with_output()?;
-            let _ = writer.join();
-            return finish(args, output);
-        }
-        let output = child.wait_with_output()?;
+        // A large patch is written on a scoped helper thread (see `pipes`).
+        let output = crate::pipes::output_with_input(child, stdin)?;
         finish(args, output)
     }
 }

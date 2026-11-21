@@ -1,6 +1,7 @@
 //! Image preview: fit-to-window or 100%, dimensions and size, and a
 //! checkerboard behind transparent pixels.
 
+use crate::background::{background, view_key, JobKind, Priority};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -208,10 +209,11 @@ impl ImageView {
         if have != Some(want) && pending != Some(want) {
             let path = self.path.clone();
             let task = cx.spawn(async move |this, cx| {
-                let image = cx
-                    .background_executor()
-                    .spawn(async move { rasterize_svg(&path, want.0, want.1) })
-                    .await;
+                let key = view_key(JobKind::ImageDecode, this.entity_id());
+                let raster = background(cx, key, Priority::Visible, move |_| {
+                    rasterize_svg(&path, want.0, want.1)
+                });
+                let Ok(image) = raster.await else { return };
                 let _ = this.update(cx, |this, cx| {
                     this.raster_task = None;
                     if let Some(image) = image {

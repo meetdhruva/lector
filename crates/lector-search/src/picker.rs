@@ -39,6 +39,8 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::thread::JoinHandle;
+
+use lector_base::thread::{spawn_named, ThreadKind};
 use std::time::{Duration, Instant};
 
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
@@ -225,12 +227,12 @@ impl<T: Send + Sync + 'static> Picker<T> {
     pub fn with_config(notify: Arc<dyn Fn() + Send + Sync>, config: Config) -> Self {
         let store = Arc::new(Store::new());
         let shared = Shared::new();
-        let worker = Some(spawn_worker(
+        let worker = spawn_worker(
             shared.clone(),
             store.clone(),
             config.clone(),
             notify.clone(),
-        ));
+        );
         let mut picker = Self {
             store,
             shared,
@@ -401,12 +403,12 @@ impl<T: Send + Sync + 'static> Picker<T> {
         self.shared = Shared::new();
         self.generation = 0;
         self.query.clear();
-        self.worker = Some(spawn_worker(
+        self.worker = spawn_worker(
             self.shared.clone(),
             self.store.clone(),
             self.config.clone(),
             self.notify.clone(),
-        ));
+        );
         self.post_query("");
     }
 
@@ -528,16 +530,18 @@ fn worker_count() -> usize {
         .clamp(1, 8)
 }
 
+/// Starts the picker's matching thread (an owner thread: it lives as long as the picker).
+/// `None` when the OS refused a thread; the picker then shows no matches.
 fn spawn_worker<T: Send + Sync + 'static>(
     shared: Arc<Shared>,
     store: Arc<Store<T>>,
     config: Config,
     notify: Arc<dyn Fn() + Send + Sync>,
-) -> JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("lector-picker".into())
-        .spawn(move || run_worker(&shared, &store, config, &*notify))
-        .unwrap_or_else(|_| std::thread::spawn(|| {}))
+) -> Option<JoinHandle<()>> {
+    spawn_named(ThreadKind::PickerWorker, "picker", move || {
+        run_worker(&shared, &store, config, &*notify)
+    })
+    .ok()
 }
 
 fn run_worker<T: Send + Sync + 'static>(

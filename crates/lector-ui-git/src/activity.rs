@@ -8,6 +8,7 @@
 //! undone again). When files changed since, Undo refuses and asks whether to restore
 //! anyway.
 
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -122,11 +123,15 @@ pub fn undo_entry(
 ) {
     let journal = journal(cx);
     let ctx = context_for(store, cx);
-    let work = cx.background_spawn(async move { journal.undo(id, &ctx, mode) });
+    // A write the user asked for: never replaced, survives the panel closing.
+    let key = view_key(JobKind::GitWrite, store.entity_id());
+    let work = background(cx, key, Priority::Visible, move |_| {
+        journal.undo(id, &ctx, mode)
+    });
     let store = store.clone();
     window
         .spawn(cx, async move |cx| {
-            let result = work.await;
+            let Ok(result) = work.await else { return };
             let _ = cx.update(|window, cx| {
                 notify_repo_changed(&store, cx);
                 match result {
@@ -326,7 +331,8 @@ impl ActivityView {
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let journal = journal(cx);
         let repo = self.repo_path(cx);
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::JournalList, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             journal
                 .list(LIMIT)
                 .into_iter()
@@ -347,7 +353,7 @@ impl ActivityView {
                 .collect::<Vec<_>>()
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let rows = work.await;
+            let Ok(rows) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.rows = rows;
                 this.loaded = true;
@@ -378,7 +384,8 @@ impl ActivityView {
         let record = entry.undo.clone();
         let summary = entry.summary.clone();
         let data_dir = journal(cx).data_dir().to_path_buf();
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::JournalPreview, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             let repo = Repo::discover(&repo_path).map_err(|e| e.to_string())?;
             let current = std::fs::read(repo.workdir().join(&rel)).ok();
             let snaps = record
@@ -421,7 +428,7 @@ impl ActivityView {
         let store = self.store.clone();
         window
             .spawn(cx, async move |cx| {
-                let result = work.await;
+                let Ok(result) = work.await else { return };
                 let _ = cx.update(|window, cx| match result {
                     Ok((rel, before, after)) => {
                         let title = format!("{rel}: before → after ({summary})");

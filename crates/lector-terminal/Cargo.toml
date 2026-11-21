@@ -9,6 +9,7 @@ authors.workspace = true
 description = "UI-free terminal sessions for Lector: PTY, VT emulation, scrollback, damage tracking, shell integration."
 
 [dependencies]
+lector-base.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true

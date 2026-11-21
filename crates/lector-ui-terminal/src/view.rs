@@ -8,6 +8,7 @@
 //! next snapshot, so a hidden terminal (not painted, never snapshotting) costs nothing however
 //! much output it produces; it only raises its "new output" flag for the tab strip.
 
+use lector_ui::background::{background, task_runner, view, view_key, JobKey, JobKind, Priority};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -204,9 +205,21 @@ impl TerminalView {
                 }
             }
         });
-        let spawn = cx.background_spawn(async move { Terminal::spawn(options, Some(wake)) });
+        let mut options = options;
+        // A killed session's grace-period escalation runs on the scheduler's blocking lane
+        // (it outlives the view: not cancelled when the view closes).
+        let kill = JobKey::new(JobKind::TerminalKill, view(cx.entity_id()));
+        options.kill_runner = Some(task_runner(cx, kill, Priority::Background));
+        let key = view_key(JobKind::TerminalSpawn, cx.entity_id());
+        let spawn = background(cx, key, Priority::Visible, move |_| {
+            Terminal::spawn(options, Some(wake))
+        });
         let spawn_task = cx.spawn(async move |this, cx| {
-            let result = spawn.await;
+            let result = spawn.await.unwrap_or_else(|e| {
+                Err(lector_terminal::TerminalError::Thread(
+                    std::io::Error::other(e.to_string()),
+                ))
+            });
             let _ = this.update(cx, |view, cx| view.on_spawned(result, cx));
         });
         self._tasks = vec![wake_task, spawn_task];
@@ -874,6 +887,7 @@ impl TerminalView {
                 }
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.link_cancel = Some(cancel.clone());
+                let key = view_key(JobKind::TerminalLink, cx.entity_id());
                 let target = link.target.clone();
                 let root = self
                     .workspace
@@ -881,7 +895,7 @@ impl TerminalView {
                     .filter(|ws| ws.read(cx).has_folder())
                     .map(|ws| ws.read(cx).root().to_path_buf());
                 // Existence checks touch the disk: off the UI thread, cancellable.
-                let resolve = cx.background_spawn(async move {
+                let resolve = background(cx, key, Priority::Visible, move |_| {
                     let resolved = match session.resolve_link(&target, &cancel) {
                         Some(LinkTarget::File { path, line, col }) => Some((path, line, col)),
                         _ => None,
@@ -889,7 +903,7 @@ impl TerminalView {
                     route_file(resolved, root.as_deref())
                 });
                 cx.spawn_in(window, async move |this, cx| {
-                    let action = resolve.await;
+                    let Ok(action) = resolve.await else { return };
                     let _ = this.update_in(cx, |view, window, cx| {
                         view.apply_file_link(action, window, cx)
                     });

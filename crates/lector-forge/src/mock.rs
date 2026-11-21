@@ -2,6 +2,7 @@
 //! forge adapters and offline screenshots (`cargo run -p lector-forge --example
 //! mock_forge -- <fixtures dir> <port>`). Never used against real hosts.
 
+use lector_base::thread::{spawn_named, ThreadKind};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -130,20 +131,23 @@ impl MockServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (r, q, s) = (routes.clone(), requests.clone(), stop.clone());
-        let thread = std::thread::spawn(move || {
+        let thread = spawn_named(ThreadKind::MockServer, addr.to_string(), move || {
             for stream in listener.incoming() {
                 if s.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
                 let (r, q) = (r.clone(), q.clone());
-                std::thread::spawn(move || {
+                let served = spawn_named(ThreadKind::MockServer, "connection", move || {
                     if let Err(err) = serve(stream, &r, &q) {
                         tracing::debug!("mock forge: {err}");
                     }
                 });
+                if let Err(err) = served {
+                    tracing::debug!("mock forge: cannot serve a connection: {err}");
+                }
             }
-        });
+        })?;
         Ok(MockServer {
             addr,
             routes,

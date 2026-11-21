@@ -22,6 +22,28 @@ Changes:
   still share the database normally.
 - **A damaged state database is set aside and replaced**, with a note naming the kept copy. 0.7.1
   kept trying to open the damaged file and silently ran without saving anything, on every start.
+- **Background work has one scheduler with priorities.** What answers a keystroke (reparse, picker
+  ranking, find as you type) always has a worker of its own, so it stays quick while large diffs,
+  indexing or blame run; waits on the network, language servers, agents and credential prompts run
+  on a separate bounded set of threads and can no longer hold up local work. Before, a fetch or
+  push ran on the same few workers as everything else.
+- **Closing a view, document or repository stops its background work**: a newer request replaces an
+  older one, and results that are no longer wanted are dropped instead of being applied late. The
+  project file scan and symbol indexing of a closed window, and diff and changeset loads that were
+  superseded, now stop instead of running to the end.
+- **A background job that panics is caught**: the worker keeps running, the panic is written to the
+  crash log (`lector health`), and views that report errors (diffs, panels, commits) show it.
+- **Quitting finishes your writes and stops the rest.** A save, a stage, a commit or an undo that is
+  running or waiting when you quit now completes (up to 10 seconds; a push or a pull-request comment
+  up to 2 seconds, since the network can hang) before Lector stops its child processes; everything
+  else is cancelled at once. Before, Lector did not wait for any of them: a save still in progress
+  was lost (never half-written: saves replace the file in one step), and a git command still running,
+  such as a commit, was killed by the process stop that quitting does. A write that could not finish
+  in time is named in the log and the crash log (`lector health`).
+- **A credential prompt or an agent's question always appears**, even while many network operations
+  or agent sessions are busy: what other work waits on no longer queues behind them.
+- **The Changes panel's mode menu no longer runs git when it opens**, and Review Branch no longer
+  runs git on the UI thread: the branch's base is looked up in the background.
 
 ## 0.7.1 — 2026-11-19
 

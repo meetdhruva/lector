@@ -1,6 +1,7 @@
 //! Rendered Markdown preview (pane item), shown side by side with the
 //! source; follows the source's scroll position and reloads on change.
 
+use crate::background::{background, view_key, JobKind, Priority};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -122,14 +123,13 @@ impl MarkdownPreview {
         let project = self.project.clone();
         let path = self.path.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let blocks = cx
-                .background_executor()
-                .spawn(async move {
-                    let doc = project.load_document(&path).ok()?;
-                    let text = doc.text()?.to_string();
-                    Some(markdown::parse(&text))
-                })
-                .await;
+            let key = view_key(JobKind::MarkdownRender, this.entity_id());
+            let blocks = background(cx, key, Priority::Visible, move |_| {
+                let doc = project.load_document(&path).ok()?;
+                let text = doc.text()?.to_string();
+                Some(markdown::parse(&text))
+            });
+            let Ok(blocks) = blocks.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.blocks = Arc::new(blocks.unwrap_or_default());
                 this.loaded = true;
@@ -148,10 +148,11 @@ impl MarkdownPreview {
     /// Parses `text` in the background and swaps the rendered blocks in.
     fn render_text(&mut self, text: lector_text::Text, cx: &mut Context<Self>) {
         self.task = Some(cx.spawn(async move |this, cx| {
-            let blocks = cx
-                .background_executor()
-                .spawn(async move { markdown::parse(&text.to_string()) })
-                .await;
+            let key = view_key(JobKind::MarkdownRender, this.entity_id());
+            let blocks = background(cx, key, Priority::Visible, move |_| {
+                markdown::parse(&text.to_string())
+            });
+            let Ok(blocks) = blocks.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.blocks = Arc::new(blocks);
                 this.loaded = true;

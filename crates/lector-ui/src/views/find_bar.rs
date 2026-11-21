@@ -10,6 +10,7 @@
 //! `DocumentModel::apply_edits`; with the regex toggle on, `$1` / `${name}`
 //! in the replacement expand capture groups. Read-only tabs only search.
 
+use crate::background::{background, view_key, JobKind, Priority};
 use std::ops::Range;
 
 use crate::scale::px;
@@ -248,12 +249,11 @@ impl FindBar {
             (b.text().clone(), b.buffer().version())
         };
         self.replace_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let found = cx
-                .background_executor()
-                .spawn(
-                    async move { replacements_in_text(&text.to_string(), &search, &replacement) },
-                )
-                .await;
+            let key = view_key(JobKind::ReplaceInFile, this.entity_id());
+            let found = background(cx, key, Priority::Visible, move |_| {
+                replacements_in_text(&text.to_string(), &search, &replacement)
+            });
+            let Ok(found) = found.await else { return };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.error = None;
                 match found {
@@ -390,28 +390,28 @@ impl FindBar {
             return;
         };
         self.search_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let string = text.to_string();
-                    lector_search::find_in_text(&string, &search).map(|ranges| {
-                        ranges
-                            .into_iter()
-                            .take(MAX_MATCHES)
-                            .map(|r| {
-                                let start = text.offset_to_point(r.start);
-                                let end = text.offset_to_point(r.end);
-                                let end_col = if end.row == start.row {
-                                    end.column as usize
-                                } else {
-                                    text.line_len(start.row) as usize
-                                };
-                                (start.row, start.column as usize..end_col)
-                            })
-                            .collect::<Vec<_>>()
-                    })
+            // Typing drives it: interactive, newest query wins.
+            let key = view_key(JobKind::FindInFile, this.entity_id());
+            let result = background(cx, key, Priority::Interactive, move |_| {
+                let string = text.to_string();
+                lector_search::find_in_text(&string, &search).map(|ranges| {
+                    ranges
+                        .into_iter()
+                        .take(MAX_MATCHES)
+                        .map(|r| {
+                            let start = text.offset_to_point(r.start);
+                            let end = text.offset_to_point(r.end);
+                            let end_col = if end.row == start.row {
+                                end.column as usize
+                            } else {
+                                text.line_len(start.row) as usize
+                            };
+                            (start.row, start.column as usize..end_col)
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .await;
+            });
+            let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| match result {
                 Ok(matches) => this.apply_matches(matches, cx),
                 Err(err) => {

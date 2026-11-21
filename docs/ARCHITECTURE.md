@@ -84,7 +84,7 @@ L3 analysis
                         lector-syntax, lector-text
 L2 service
   lector-buffer      -> lector-text
-  lector-fs          -> lector-text
+  lector-fs          -> lector-base, lector-text
   lector-git         -> lector-base, lector-process
   lector-lsp         -> lector-base, lector-process, lector-text
   lector-syntax      -> lector-text
@@ -92,11 +92,11 @@ L1 leaf
   lector-archcheck   -> (none)
   lector-config      -> (none)
   lector-diff        -> (none)
-  lector-forge       -> (none)
+  lector-forge       -> lector-base
   lector-icons       -> (none)
   lector-process     -> lector-base
   lector-search      -> lector-base
-  lector-terminal    -> (none)
+  lector-terminal    -> lector-base
   lector-text        -> (none)
   lector-theme       -> (none)
 L0 base
@@ -205,18 +205,26 @@ map to the first char of their Unicode lowercase (`İ`→`i`), `ς`→`σ`; no `
 picker keeps its own nucleo scoring and index (`lector-search`): per path this scorer is slower and ranks the top results differently,
 and the picker's score bound and property tests are defined by nucleo's scores.
 ```rust
-// ---- lector_base::thread (ADR 0003, decision 3) ----
-pub enum ThreadKind { PtyReader, PtyWriter, PtyWaiter, PtyParser, PtyReaper, LspReader, LspWriter, LspWatchdog, LspLaunch,
-    AskpassListener, AskpassConnection, FileWatcher, WatchPoll, SchedulerWorker, SchedulerTimer, PipeReader, PipeWriter,
-    ProcessReaper, ShutdownHelper, AcpReader, AcpRequest, AgentTurn, PickerWorker, MockServer, StartupLoader }
-                                    // closed; `as_str()` = the `kind:` names of arch/threads.allow (a unit test keeps them equal); ThreadKind::ALL
+// ---- lector_base::thread (ADR 0003, decisions 3 and 4) ----
+pub enum ThreadKind { PtyReader, PtyWriter, PtyWaiter, PtyParser, LspReader, LspWriter, LspWatchdog, AskpassListener,
+    FileWatcher, WatchPoll, SchedulerWorker, SchedulerTimer, PipeReader, PipeWriter, AcpReader, PickerWorker, MockServer }
+                                    // closed, owner threads only (0.8: the 8 short-task kinds moved to the scheduler);
+                                    // `as_str()` = the `kind:` names of arch/threads.allow (a unit test keeps them equal); ThreadKind::ALL
+pub type RunnerTask = Box<dyn FnOnce() + Send + 'static>;
+pub type TaskRunner = Arc<dyn Fn(RunnerTask) -> Result<(), RunnerTask> + Send + Sync>;
+                                    // how a crate below lector-app hands a short blocking task to its caller. Contract: a task
+                                    // is never silently dropped: the runner takes it (Ok) or hands it back (Err) and the caller
+                                    // runs it itself: `if let Err(t) = runner(t) { t() }`. lector-app: `Scheduler::task_runner`
+                                    // (refused after shutdown / for non-writes while quitting → handed back; a taken
+                                    // AtQuit::Drain task (TerminalKill) that is cancelled before it ran still runs when dropped)
 pub fn spawn_named<T, F>(kind: ThreadKind, name: impl Into<String>, f: F) -> io::Result<JoinHandle<T>>
     where F: FnOnce() -> T + Send + 'static, T: Send + 'static;
                                     // OS thread name `<kind>:<name>` (control chars replaced, <= 63 bytes, cut on a char boundary)
 pub fn threads() -> Vec<ThreadInfo>;   // { id, kind, name /* full */, started_at: SystemTime, alive }: running threads plus the last 64 finished
 ```
 `spawn_named` registers the thread before it returns and clears `alive` through a drop guard when the closure returns or panics;
-the registry tolerates poisoning. There is no join-all or shutdown policy: whoever owns the resource stops and joins its threads.
+the registry tolerates poisoning. There is no join-all here: whoever owns the resource stops and joins its threads;
+`lector_app::shutdown` reports the ones still alive at quit. See "Background work (ADR 0003)".
 
 ### lector-text
 ```rust
@@ -544,6 +552,9 @@ pub enum SymbolKind { File, Module, Namespace, Package, Class, Method, Property,
                       Function, Variable, Constant, String, Number, Boolean, Array, Object, Key, Null, EnumMember,
                       Struct, Event, Operator, TypeParameter, Other }   // lector_lsp::SymbolKind (LSP kinds)
 // Additions: LspManager::with_options(root, configs, LspOptions), root(); lector_lsp::which(cmd);
+// LspOptions { launcher: Option<TaskRunner> /* launches + restarts; None = inline (first opener / dying reader thread);
+//   lector-app: blocking lane, LspLaunch */, request_timeout, init_timeout, restart_base_delay, max_restarts, shutdown_grace }
+// Threads per server: reader, writer, stderr pipe reader, timeout watchdog (owner threads); shutdown is scoped.
 // LspError / Result<T>; futures are Send + 'static. Languages: "Rust","TypeScript","TSX","JavaScript","Python",...
 // Config order = priority: the first config for a language whose command is on PATH is used (pyright, then pylsp).
 // Per-server overrides from lector-config (`lsp.servers.<name>`) are applied by the caller to `ServerConfig`s.
@@ -1212,7 +1223,8 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
   * Changes panel: `SyncPanelBar` at the top (state text, Fetch / Pull / Push icon buttons with tooltips and key
     bindings; disabled with "A push is running" while busy; progress bar + Cancel while running).
   * Running: `run_action(SyncAction)` → `sync_model::plan` → `Plan::{Run, Confirm, Blocked}`; `execute(OpKind, steps,
-    label, quiet)` runs the registry commands in order on the app `Scheduler` (`Priority::Interactive`, journaled,
+    label, quiet)` runs the registry commands in order through the background bridge (`JobKind::NetworkCommand`,
+    blocking lane, `Visible`, drained 2 s at quit, journaled,
     `Source::Ui`), then `notify_repo_changed` (status, history, branches, diff tabs reload) and a status refresh. One
     operation per repository: this window's running op or a `SyncHost::running()` entry for the repo blocks new ones
     (toast). Progress comes from `SyncHost::subscribe` (filtered by repo, coalesced to the newest event). Cancel =
@@ -1672,25 +1684,161 @@ wrong"*. Foundations so every later feature is cheap:
 6. **Embedded database** (redb) for review state, comments, sessions, recents, caches.
 7. **Content-addressed caching** keyed by git blob id / content hash.
 
+### Background work (ADR 0003)
+One scheduler, `lector_app::scheduler`, runs every short piece of background work of the GUI, the CLI and `lector mcp`
+(`Scheduler::global()`; headless front-ends use it without GPUI). Long-lived resources get owner threads; nothing
+else starts a thread (`arch-check threads`), and UI code reaches the scheduler only through the bridge
+(`arch-check background`).
+
+* **Compute lane.** `default_workers()` (num_cpus − 1, at least 2) general workers take the highest non-empty
+  priority first, FIFO within a priority, plus **one worker reserved for `Interactive` jobs**: a keystroke-driven job
+  starts at once even when every general worker is busy with long background work (test
+  `an_interactive_job_runs_while_every_general_worker_is_busy_with_background_work`). Only the kinds that
+  `may_be_interactive()` (DocumentParse, PickerRank, FindInFile: short, keystroke-driven) get `Interactive`; any other
+  kind asking for it runs at `Visible` (`Priority::for_kind`), so the reserved worker cannot be occupied by long work.
+* **Blocking lane.** "Leaf" waits whose duration depends on somebody else — the network (forge, update check, git
+  sync commands), a language server (hover, definitions, references, launch), starting an agent, an external program
+  (reveal in file manager, OS preference probes) — run on their own threads, started on demand up to `BLOCKING_MAX`
+  (16) and stopped after 30 s idle; more jobs queue by priority, and a job that waits more than 3 s for a slot is
+  logged once. They never occupy a compute worker (test `blocking_jobs_never_occupy_the_compute_workers`). Local
+  `git`, file reads and parsing are bounded by input size and stay on the compute lane.
+* **Guaranteed lane.** **Rule: a kind that other jobs or a person wait on never queues behind the lane bound.**
+  AskpassPrompt (a git command waits for it), AgentRequest (the agent waits; permission prompts), AgentControl
+  (cancel / undo a turn), TerminalKill and AgentTurn run on threads started on demand with no bound (each submission
+  claims an unclaimed idle worker or starts a thread, under the lane lock, so a burst never strands a job behind one
+  waking worker; the blocking lane does the same up to its bound; test
+  `guaranteed_lane_bursts_never_strand_a_job_stress`), so a blocking
+  lane full of waiters can never keep the job they wait for from starting (tests
+  `a_full_blocking_lane_never_delays_what_others_wait_on`,
+  `a_command_waiting_for_a_prompt_completes_while_the_lane_is_otherwise_full`). Their number is bounded by their
+  owners: 8 askpass prompt slots (+16 handshakes), the requests in flight per agent connection, one turn per session
+  (a busy session refuses a second prompt), user clicks; more than 64 threads at once is logged. **AgentTurn** is a
+  turn of a session, not the session: it starts with a prompt and ends with the turn, so it is a job, not an owner
+  thread; it is here rather than on the blocking lane so that N parallel agents use N threads and never take the
+  leaf bound.
+* **Keys.** Every job has a `JobKey { kind: JobKind, subject: Subject }`; `JobKind` is a closed enum in
+  `scheduler/key.rs`, one line per kind with its lane and policies. A kind that `replaces()` cancels older jobs with
+  the same key ("latest wins"; a replaced job that has not started never runs). `cancel_subject(&Subject)` cancels
+  every queued, running and debounced job of a document (`DocShared` drop), a repository (`RepoState` drop), a view
+  (the bridge) or any subject, except kinds not `cancelled_with_subject()`: writes the user asked for (DocumentSave,
+  GitWrite, Command, NetworkCommand, ForgeWrite, AgentControl, TerminalSessionsSave, TerminalKill) are never replaced
+  and survive their window closing.
+* **Results.** A running job sees its `CancelToken`; once cancelled, its result is never delivered (`JobError::Cancelled`).
+  A job stays registered under its key and subject until its result has been taken or nobody can take it (its
+  `JobHandle` / bridge task dropped, or it ran detached): a replacement or subject cancellation that arrives after the
+  job finished but before the main thread delivers its value still cancels it. Delivery checks and unregisters under the
+  scheduler lock (`Registration::deliver`). Tests: `a_finished_undelivered_result_is_replaced_by_a_newer_job_with_its_key`,
+  `a_result_replaced_after_it_finished_is_not_delivered` (bridge), `registrations_end_with_delivery_or_when_nobody_waits`.
+  Quit cancels only queued and running jobs, so a write that finished during the drain still reports success.
+  A panicking job is caught: the worker survives, `tracing::error!` logs it, the process's panic hook writes it to the
+  crash log (`lector health`), and the waiter gets `JobError::Panicked(message)`.
+* **No deadlock.** The scheduler's lock is never held while a job runs, a thread starts or a runner is called; jobs
+  never run inline on `spawn` (only the cancelled no-op body after shutdown). A job that waits for a compute job
+  (`JobHandle::wait`) on a scheduler thread runs it inline when it has not started yet (test
+  `a_job_waiting_for_another_job_on_a_one_worker_pool_does_not_deadlock`); a job of the other lanes is waited for,
+  never run inline on a compute worker (test `a_compute_job_waits_for_a_blocking_job_instead_of_running_it_inline`):
+  the guaranteed lane always starts, the blocking lane only holds leaf waits.
+* **Quit: writes are drained, not cancelled.** `lector_app::shutdown::shutdown(QuitBounds::default())` (the GUI's
+  last quit hook): (1) `begin_quit` cancels every `AtQuit::Cancel` job (reads, computations, debounces) and refuses
+  new ones, and starts a drain worker that runs only writes; (2) `drain` waits for writes — `AtQuit::Drain`
+  (DocumentSave, GitWrite, Command = writing registry commands incl. their journal entries, TerminalSessionsSave,
+  TerminalKill): queued ones run, running ones finish, up to 10 s; `AtQuit::DrainBriefly` (NetworkCommand = push /
+  pull / fetch flows, ForgeWrite, AgentControl) only 2 s, then cancelled — while every child process is still
+  alive, so a `git commit` is never killed halfway; (3) every supervised child process tree is stopped (TERM, KILL
+  after 1.5 s); (4) `Scheduler::shutdown` cancels the rest, 0.5 s bounded wait. Worst case ≈ 12 s. Writes given up
+  on are logged and written to the crash log (`ShutdownReport::abandoned`). Tests:
+  `quit_completes_a_queued_save_and_a_running_git_write`,
+  `quit_gives_up_on_a_hung_network_write_within_its_grace_and_reports_it`,
+  `reads_are_cancelled_at_once_while_writes_drain`, `quits_promptly_with_reads_queued_and_running`. Every kind not
+  cancelled with its subject is drained (a unit test keeps the two lists equal). ReplaceInFile only computes the
+  replacements (the edit is applied to the buffer on the main thread), so it is not a write. Terminals (PTY trees are
+  not supervised): the terminal quit hook (`lector_ui_terminal::kill_all`) kills every live session before this runs;
+  each kill's escalation (SIGHUP, then SIGKILL of survivors after 300 ms; `taskkill` on Windows) is a TerminalKill job,
+  which the drain waits for; a terminal dropped after the scheduler stopped gets its task handed back and runs the
+  escalation itself (test `a_terminal_dropped_after_scheduler_shutdown_still_kills_a_child_that_ignores_sighup`). Owner threads end with
+  their resource; those still alive are reported (`ShutdownReport::owner_threads_alive`).
+* **Crates below `lector-app` do not schedule.** They expose blocking, cancellable functions; an owner thread with
+  short work to hand off calls a `lector_base::thread::TaskRunner` its caller supplies: askpass connections
+  (`AskpassServer::start(dir, runner, handler)`, app: `AskpassPrompt`), language-server launches and restarts
+  (`LspOptions::launcher`, app: `LspLaunch`), a terminal's kill escalation (`SpawnOptions::kill_runner`, UI:
+  `TerminalKill`), requests from an agent (`rpc::Connection::new(.., requests)`, app: `AgentRequest`). Without a runner
+  the task runs inline. Helpers bounded by one call use `std::thread::scope` (stopping process trees and language
+  servers at shutdown, feeding a git child's stdin); a killed process that is not reaped within 2 s is reaped by a
+  later sweep instead of a thread.
+* **Owner threads** (`lector_base::thread::spawn_named`, closed `ThreadKind`): PTY reader / writer / waiter / parser,
+  language-server reader / writer / watchdog, askpass listener, file watcher and its poll fallback, scheduler workers
+  and timer, child pipe readers and the stdin pump, the ACP reader, the file picker's matcher, the test forge server.
+
+**The GPUI bridge** (`lector_ui::background`) is the only way UI code (lector-ui, lector-ui-git, lector-ui-terminal,
+lector-ui-agent) starts background work:
+```rust
+pub fn background<C: BridgeContext + ?Sized, T: Send + 'static>(cx: &C, key: JobKey, prio: Priority,
+    f: impl FnOnce(&CancelToken) -> T + Send + 'static) -> BackgroundTask<T>;   // impl Future<Output = Result<T, JobError>>
+impl<T> BackgroundTask<T> { pub fn detach(self); }   // dropping it before it resolved cancels the job at once
+pub fn detach(cx, key, prio, f);                     // fire and forget (still keyed and cancellable by subject)
+pub fn cancel_subject(cx, &Subject) -> usize; pub fn task_runner(cx, key, prio) -> TaskRunner; pub fn scheduler(cx) -> Scheduler;
+pub fn cancel_on_release(cx: &mut Context<V>) -> Subscription;   // the workspace holds one: closing a window cancels its jobs
+pub fn view(EntityId) -> Subject; pub fn view_key(JobKind, EntityId) -> JobKey;   // Subject::View(entity id)
+// BridgeContext: App, Context<V>, AsyncApp, AsyncWindowContext
+```
+The result is delivered on the main thread (a GPUI foreground task) and re-checked there: a job replaced or cancelled
+after it produced its value resolves to `Err(JobError::Cancelled)` (test `a_stale_result_is_not_delivered`). Call sites
+keep the outer `cx.spawn` task in a field as before; dropping it drops the `BackgroundTask` and cancels the job
+(GPUI's task-drop cancellation is kept, and made synchronous). Under GPUI's test dispatcher the bridge uses a
+`Scheduler::with_runner` on GPUI's test executor (one per dispatcher), so `run_until_parked` and the fake clock drive
+jobs and debounces deterministically; the document store uses the same scheduler there. Timers
+(`background_executor().timer(..)`) and pure UI animation stay on GPUI. `ListRanker` calls `Scheduler::global()`
+directly (it does not touch GPUI).
+
+**Priorities by job kind** (call sites choose the priority; "C" compute lane, "B" blocking lane, "G" guaranteed lane):
+
+| Priority | Kinds | Why |
+|---|---|---|
+| Interactive (C, reserved worker) | DocumentParse (reparse after an edit), PickerRank (ranking for the typed query), FindInFile (find as you type) | answer a keystroke; short; newest wins |
+| Visible (C) | DocumentHighlight, DocumentStructure, DocumentOpen, DocumentReload, DocumentSave, FileRead, ImageDecode, MarkdownRender, ReplaceInFile, ProjectSearch, ProjectSymbols, PickerFeed, GitChangeset, GitFileSummary, GitBlame, GitLog, GitRefs, GitIdentity, GitCommitMessage, GitLookup, GitConfigRead, ConflictParse, GitWrite, JournalList, JournalPreview, ProvenanceExplain, ReviewAnalysis (review queue), AgentContext (attach diff), TerminalSpawn, TerminalLink, TerminalSessions (restore) | what is on screen, or what the user just asked for and waits to see |
+| Visible (B) | LspHover, LspDefinitions, LspReferences, ForgeRead, ForgeWrite, AgentStart, NetworkCommand (sync operations), Command / CommandRead (`invoke_async`), StartupLoad, ExternalProgram (reveal) | the user waits, but the duration is somebody else's |
+| Visible (G) | AskpassPrompt, AgentRequest, AgentControl, AgentTurn | other jobs or the user wait on them: guaranteed start |
+| Background (C) | DocumentGutter, DocumentBlame, DocumentLsp, GitRefresh, GitSyncStatus, WatchRegister, FileRescan, Reindex, ReviewFingerprint, ReviewAnalysis (working-tree hint), AgentContext (turn summaries), TerminalSessionsSave, GitLookup (the changes panel's default base) | needed soon, not on the critical path |
+| Background (B) | LspSync, LspLaunch, UpdateCheck | waits on a server or the network; nobody waits for it |
+| Background (G) | TerminalKill | a dying process tree; must run even when the lane is full |
+| Idle | SymbolIndex (C), ExternalProgram (B; OS reduce-motion probe) | indexing and probes that can wait |
+
 ### lector-app `os` (ADR 0002)
 Processes the UI needs that are not writes, so plain functions rather than registry commands, built on `lector-process`
 (own process tree; no console window on Windows): `os::reveal_in_file_manager(&core, path)` (`open -R` / `explorer
-/select,` / `xdg-open <dir>`, run on the core's scheduler, returns at once; `REVEAL_LABEL`), `os::detect_os_reduce_motion()
+/select,` / `xdg-open <dir>`, run on the core's scheduler's blocking lane (`ExternalProgram`), returns at once; `REVEAL_LABEL`), `os::detect_os_reduce_motion()
 -> Option<bool>` (blocking; `LECTOR_REDUCE_MOTION`, macOS `defaults`, GNOME `gsettings`, 5 s limit). `lector_ui::os` and
 `lector_ui::a11y` call these; UI crates start no processes (ADR 0002).
 
 ### lector-app (v0.4; UI-free, no GPUI, no tokio)
 ```rust
-// scheduler.rs (Agent APP)
-pub enum Priority { Interactive, Visible, Background, Idle }
-pub struct JobKey(pub String);                 // jobs with the same key: newest cancels older ("latest wins")
-pub struct Scheduler;                          // Clone; Scheduler::global(); fixed worker pool; priority queues
+// scheduler/ (ADR 0003; see "Background work (ADR 0003)")
+pub enum Priority { Interactive, Visible, Background, Idle }   // Interactive only for kinds that may_be_interactive(), else Visible
+pub enum JobKind { DocumentParse, PickerRank, FindInFile, GitChangeset, LspHover, ForgeRead, AgentTurn, /* ... closed, scheduler/key.rs */ }
+    // lane() -> Lane::{Compute, Blocking, Guaranteed}; replaces(); cancelled_with_subject(); may_be_interactive();
+    // at_quit() -> AtQuit::{Cancel, Drain, DrainBriefly}; ALL
+pub enum Subject { App, Document(u64), Repo(Arc<Path>), Path(Arc<Path>), View(u64), Session(u64), Local(u64) }
+    // Subject::repo(p), path(p), unique()
+pub struct JobKey { pub kind: JobKind, pub subject: Subject }  // JobKey::new(kind, subject)
+pub enum JobError { Cancelled, Panicked(String) }
+pub struct Scheduler;                          // Clone; Scheduler::global() (GUI, CLI, MCP); new(workers); with_limits(workers, blocking_max);
+                                               // with_runner(Runner) (no threads; GPUI tests); BLOCKING_MAX = 16
 impl Scheduler {
-    pub fn spawn<T: Send + 'static>(&self, prio: Priority, key: Option<JobKey>,
+    pub fn spawn<T: Send + 'static>(&self, key: JobKey, prio: Priority,
         f: impl FnOnce(&CancelToken) -> T + Send + 'static) -> JobHandle<T>;
     pub fn debounce(&self, key: JobKey, delay: Duration, prio: Priority, f: impl FnOnce(&CancelToken) + Send + 'static);
+    pub fn task_runner(&self, key: JobKey, prio: Priority) -> lector_base::thread::TaskRunner;
+    pub fn cancel_key(&self, key: &JobKey); pub fn cancel_subject(&self, s: &Subject) -> usize;
+    pub fn begin_quit(&self) -> usize;                    // cancel every AtQuit::Cancel job, refuse new ones, start the drain worker
+    pub fn drain(&self, bound: Duration, network_grace: Duration) -> DrainReport { abandoned: Vec<JobKind> };
+    pub fn shutdown(&self, timeout: Duration) -> bool;   // cancel everything, bounded wait for the threads; later jobs cancelled at once
+    // workers(), blocking_max(), pending(), live_jobs(), wait_idle(timeout), is_shut_down()
 }
-pub struct JobHandle<T>;   // cancel(), is_finished(), try_take(), into_future() -> impl Future<Output = Option<T>> (None = cancelled)
+pub struct JobHandle<T>;   // cancel(), token(), is_finished(), try_take(), outcome() -> Future<Result<T, JobError>>,
+                           // into_future() -> Future<Option<T>>, wait_outcome() / wait() (block; on a scheduler thread a compute
+                           // job that has not started runs inline; other lanes are waited for). Dropping it does not cancel.
+// shutdown.rs: shutdown(QuitBounds { drain: 10 s, network_grace: 2 s, process_grace: 1.5 s, scheduler: 0.5 s })
+//   -> ShutdownReport { cancelled, abandoned: Vec<JobKind>, scheduler_stopped, owner_threads_alive }
 
 // commands/ (Agent APP)
 pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'static str, pub category: &'static str,
@@ -1756,12 +1904,9 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   ActivitySink>)` / `activity_sink()`; typed extension slots `set_extension::<T>(Arc<T>)`, `extension::<T>()`,
   `extension_or_init` (DocumentStore, Journal live there). `open` registers `commands::register_builtin` (read +
   documents + git_write) and installs the journal (`Journal::install`, or `install_in(data_dir)`).
-* **Scheduler**: `Scheduler::new(workers)` / `global()` (`default_workers()` = num_cpus − 1, min 2); FIFO within a
-  priority, highest priority first; keyed jobs cancel the previous job of the key (queued ones never run, running ones
-  see the token and their result is dropped → handle resolves `None`); `debounce` keeps only the last closure per key
-  and runs it as a keyed job `delay` after the last call; `cancel_key`, `pending()`, `wait_idle(timeout)`; panics in
-  jobs are caught (handle → `None`). `JobHandle::{cancel, token, is_finished, try_take, into_future, wait}` (`wait` blocks;
-  never from a worker). Workers stop when the last `Scheduler` clone drops. Job tokens are `lector_base::CancelToken`.
+* **Scheduler**: see "Background work (ADR 0003)" below for lanes, keys, priorities, cancellation, panics, shutdown
+  and the GPUI bridge. `debounce` keeps only the last closure per key and runs it as a keyed job `delay` after the last
+  call. Job tokens are `lector_base::CancelToken`.
 * **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, undo, ui_action, ui_flow }` built with
   `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.with_ui_flow(..)`, `.destructive()`, `.undoable()`,
   `.not_undoable(reason)`, `.ui_only()` (`sources: Sources::{All, UiOnly}`: `CommandRegistry::invoke` refuses a
@@ -1812,8 +1957,9 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   unsubscribe), refresh (debounced 40 ms, keyed per repo → N windows = one computation), refresh_and_notify (publish even
   if unchanged, after writes), refresh_blocking, is_watching, computations}`. `GitSnapshot { head, status, conflicts
   (operation + entries), generation, error }` + `branch_label()`; snapshots are published only when something changed
-  (unchanged parts keep their `Arc`). Each state starts a `lector-fs` watcher on a background thread (`Files`,
-  `GitStateChanged`, `Rescan` → refresh); if that fails, a 5 s poll thread runs while the state is alive.
+  (unchanged parts keep their `Arc`). Each state registers a `lector-fs` watcher in a scheduler job (`WatchRegister`;
+  `Files`, `GitStateChanged`, `Rescan` → refresh); if that fails, a 5 s poll owner thread (`WatchPoll`) runs while the
+  state is alive. Dropping the state cancels its jobs (`Subject::Repo(workdir)`).
 * **UI** (`lector_ui::commands_bridge`): `CoreGlobal(AppCore)`, `core(cx)`, `command_context(&Workspace, cx)` (project,
   active path, selections + `register_focus_provider` hooks — lector-ui-git fills the changeset of the active diff /
   review / commit tab), `invoke(ws, id, args, toast_summary, window, cx)` (scheduler job; errors toast), `apply_outcome`
@@ -2012,8 +2158,13 @@ pub enum ProcessError { NotFound{program}, Spawn{program, source}, Cancelled, Ti
   masters survive, as in a terminal); after that no signal is ever sent to that group id again (no pid-reuse races).
   Windows has no console-less SIGTERM: closing stdin is the polite step. A crash of Lector itself does not kill
   children (Unix sessions are detached; the Job Object is created without kill-on-close): children see EOF on stdin.
-  **The app must call `Supervisor::global().shutdown(grace)` when it quits.**
-* **Askpass** (`lector_process::askpass`). `AskpassServer::start(runtime_dir, handler)`: Unix domain socket `s` in a fresh
+  A killed process not reaped within 2 s is kept on a list and reaped by a later sweep (the next spawn or
+  `shutdown`), not by a thread. `shutdown` stops the trees in parallel inside the call (`std::thread::scope`).
+  **The app must call `Supervisor::global().shutdown(grace)` when it quits** (the GUI does it through
+  `lector_app::shutdown::shutdown`).
+* **Askpass** (`lector_process::askpass`). `AskpassServer::start(runtime_dir, runner: TaskRunner, handler)` (also
+  `start_tcp(runner, handler)`, `start_unix(dir, runner, handler)`; the accept loop is an owner thread and hands each
+  connection to `runner`; `lector-app` passes its scheduler's blocking lane, kind `AskpassPrompt`): Unix domain socket `s` in a fresh
   `0700` directory `lector-askpass-<random>` under `runtime_dir` (temp dir if the path would exceed `sun_path`, which
   is 104 bytes on macOS; paths are kept ≤ 100), socket `0600`; loopback TCP on Windows (`start_tcp`, also used in
   tests). The directory holds a `pid` file; at start the server removes directories of its own name pattern under the
@@ -2025,7 +2176,7 @@ pub enum ProcessError { NotFound{program}, Spawn{program, source}, Cancelled, Ti
   re-armed per read, no slowloris), at most 16 connections in the handshake; only authenticated connections take one
   of the 8 prompt slots; the rest of the request within 10 s. A panicking handler = cancel. `handler:
   Fn(PromptRequest { text, kind: PromptKind::{Username, Password, Passphrase, HostKeyConfirm, Other}, op: Option<u64> })
-  -> PromptReply::{Answer(Secret), Cancel}` runs on a connection thread and may block while the user answers.
+  -> PromptReply::{Answer(Secret), Cancel}` runs on the runner (one task per connection) and may block while the user answers.
   `op` comes from `LECTOR_ASKPASS_OP` in the helper's environment (`askpass::op_env(id)`; the app tags each sync
   operation's git process with its `SyncHost` operation id) so the UI can attribute the prompt.
   **Prompt text is untrusted** (an SSH server's keyboard-interactive prompts reach askpass verbatim):
@@ -2200,7 +2351,8 @@ term.set_focused(bool); scroll(ScrollAmount); resize(TermSize) -> Result<..>; ki
 term.cwd() -> PathBuf; resolve_link(&LinkTarget, &AtomicBool) -> Option<LinkTarget>
 term.exit_info() -> Option<ExitInfo { code, signal, success }>; is_running(); pid()
 SpawnOptions { profile: ShellProfile { name, program, args, env }, cwd, env, size, scrollback /*10_000*/,
-               shell_integration: Option<PathBuf /*dir under data_dir()*/>, env_scrub, scroll_to_bottom_on_input }
+               shell_integration: Option<PathBuf /*dir under data_dir()*/>, env_scrub, scroll_to_bottom_on_input,
+               kill_runner: Option<TaskRunner /* the kill escalation; None = inline */> }
 ShellProfile::default_for_platform()       // Unix $SHELL → /bin/bash → /bin/sh (login on macOS);
                                            // Windows pwsh.exe → powershell.exe → cmd.exe on PATH
 enum TerminalEvent { Wakeup, TitleChanged(Option<String>), Bell, CwdChanged(PathBuf), PromptStarted, CommandStarted,
@@ -2257,7 +2409,9 @@ CommandBlock { id, prompt_line: i32, command_start: Option<GridPoint>, output_li
   name; `tests/scrub.rs` (dev-dependency on `lector-process`) checks it.
 - **Process lifetime.** Drop/kill: Unix collects every process of the shell's session (`/proc` on Linux, `ps`
   descendants elsewhere) while the shell is alive, sends SIGHUP+SIGCONT to them and their groups, and SIGKILLs
-  survivors after 500 ms on a reaper thread (drop never blocks). Windows: `taskkill /T /F` then `TerminateProcess`.
+  survivors after 500 ms (300 ms for `kill()`) on the `kill_runner` (the UI passes the scheduler's blocking lane, kind
+  `TerminalKill`, so drop never blocks; without one the escalation runs on the dropping thread). Windows: `taskkill
+  /T /F` then `TerminateProcess`, on the same runner.
 - **Security.** Nothing received from the program is executed. OSC 52: copy reported as `ClipboardCopy` (UI decides),
   read denied (`ClipboardReadDenied`; alacritty `Osc52::OnlyCopy`). Titles: control and bidi-override characters
   stripped, 256 chars max. Link targets are untrusted data (the UI asks before opening); file links are resolved
@@ -2279,7 +2433,7 @@ GPUI front end of the integrated terminal, on top of `lector-terminal` (depends 
 `lector_ui::init`) registers the keymap extension, the "Open in Terminal" hook, quit handling and, for every
 `Workspace`, a `TerminalPanel` installed with `Workspace::set_bottom_panel`.
 ```rust
-TerminalView::new(id, SpawnOptions, WeakEntity<Workspace>, window, cx)   // spawns on the background executor
+TerminalView::new(id, SpawnOptions, WeakEntity<Workspace>, window, cx)   // spawns through the background bridge (TerminalSpawn)
   display_title(); cwd(); has_exited(); is_command_running(); last_command_failed(); kill()
   copy(cx) -> bool; paste(window, cx); select_all; clear; scroll(ScrollAmount); scroll_to_command(Direction)
   open_find / find_next(Direction) / close_find               // events: TerminalViewEvent::{TitleChanged, Activity,
@@ -2337,7 +2491,7 @@ panel_for(workspace_id, cx); kill_all(cx)
 - **Security.** Lector never writes to a terminal on its own: no auto-run; "Open in Terminal" only sets the folder;
   Clear sends Ctrl+L to the shell only as the user's explicit command. Links: only `http`, `https`, `mailto` open
   (`routing::route_url`), anything else is ignored with a toast; file links are resolved by the core against the
-  terminal's cwd on the background executor (cancellable) and open in Lector at the line (outside the project:
+  terminal's cwd through the background bridge (cancellable) and open in Lector at the line (outside the project:
   locked read-only by the open itself, see "Locked read-only tabs" below). Multi-line pastes into a program without bracketed paste ask first (`terminal.confirm_multiline_paste`,
   "don't ask again" for the session). OSC 52 copies land only while that terminal is focused; reads are denied by
   the core. The shell program/args, profiles and env are user-only settings (project layers are stripped, like
@@ -2545,8 +2699,10 @@ pub struct Turn { pub id: TurnId, pub prompt: String, pub before: Option<ShadowS
   reader thread per agent process (spawned since 0.7 through `lector_process::Supervisor::global().spawn` with
   `ProcessKind::Agent`: its own process tree, killed whole on stop / restart / failed start and on app exit; askpass
   variables scrubbed from its environment), requests block their caller (`Connection::request(method, params, timeout)` /
-  `start_request` → `PendingReply::wait`), agent→client requests each run on their own thread (a permission prompt
-  blocks only itself), notifications are delivered in order. Malformed lines are counted and skipped, answers to
+  `start_request` → `PendingReply::wait`), agent→client requests each run as a task of the `TaskRunner` given to
+  `Connection::new(reader, writer, handler, requests)` (the session passes the scheduler's blocking lane, kind
+  `AgentRequest`; a permission prompt blocks only itself; a task dropped unrun is answered with an error), turns run as
+  `AgentTurn` jobs on the blocking lane (a turn dropped unrun at shutdown ends as failed), notifications are delivered in order. Malformed lines are counted and skipped, answers to
   unknown ids ignored, unknown methods answered `-32601`. No async runtime (the `agent-client-protocol` crate needs an
   executor). `initialize` advertises `fs.readTextFile/writeTextFile = true`, `terminal = false`; `session/new { cwd:
   project root, mcpServers: [] }` (an `-32000` with `authMethods` → `authenticate` with the first method, retried
@@ -3029,7 +3185,7 @@ Startup (`lector` binary): settings (`load_settings_for(root)`) and `Project::op
 (warm-up) when a file loads; status polled every second for the status bar.
 
 Notes (as implemented, lector-ui integration):
-* File tabs (`editor::FileView`) load `Document`s on the background executor, pre-computing outline, folds and the
+* File tabs (`editor::FileView`) load `Document`s through the background bridge (`DocumentOpen`), pre-computing outline, folds and the
   highlight chunks around the target row, so the first paint is already colored; other chunks (128 rows) are queued
   by `DocumentSource::highlights` and computed off-thread (newest 4 requests per batch; missing rows render plain).
   `Text::Mapped` files show a "Large file" banner; binaries a panel; images an `ImageView` (fit / 100 %, checkerboard;
@@ -3045,7 +3201,7 @@ Notes (as implemented, lector-ui integration):
   dropped by generation and the rows arrive in one message. While a ranking is pending the rows of the previous query stay
   visible but cannot be confirmed: `ListRanker::confirm_or_defer` holds an Enter until the rows of the latest query land and
   applies it to their top row, unless the query changed again or the picker was dismissed (symbol and ref pickers); the file
-  finder does the same against the nucleo picker's published generation. Find bar uses `find_in_text` on a background thread.
+  finder does the same against the nucleo picker's published generation. Find bar uses `find_in_text` through the background bridge (`FindInFile`, Interactive, newest query wins).
 * Sidebar panels: Files (`DirIndex` built from `FileList` off-thread, git colors/badges with folder roll-ups,
   auto-reveal of the active file, context menu), Search (debounced 150 ms, `CancelToken` per query, streamed in
   30 ms batches, 20 000-line cap), Outline (`ShowOutline`). References open as a pane item; Markdown preview opens
@@ -3071,7 +3227,7 @@ focus, scale, motion and contrast work only.
   shadows `gpui::px` with it) and `metrics::*()` functions; `Workspace` sets the window rem size per frame
   (`scale::sync_window`). `apply_settings` re-applies it on every settings reload. Code font size is separate.
 * **Reduced motion** (`lector_ui::a11y`): `reduce_motion(cx)` = `ui.reduce_motion`, else `os_reduce_motion()` (read once on
-  a background thread by `start_os_detection`: `LECTOR_REDUCE_MOTION`, `defaults` on macOS, `gsettings` on GNOME), else
+  the scheduler's blocking lane by `start_os_detection(cx)`: `LECTOR_REDUCE_MOTION`, `defaults` on macOS, `gsettings` on GNOME), else
   false. Asked by the caret blink, smooth scrolling, toast slide-in and spinner.
 * **Focus ring** (`lector_ui::a11y`): `ring_width()` (2 px, 3 px at scale >= 1.6), `focus_ring_style`, `ring_focus(cx)` for
   `.focus(..)`, `focusable(el, cx)`, `region_ring`, `ring_overlay`, `outset_ring`. Controls with their own handle show an
@@ -3223,7 +3379,7 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   Option<Task<anyhow::Result<Vec<TextEdit>>>>)` (also `Workspace::register_before_save`). Hooks run in registration
   order; their edits apply only if the buffer did not change while the hook ran.
 * **Saving** (`DocumentModel::save(force)` → `SaveOutcome::{Saved, Unchanged, Conflict}`; `FileView::save(window)`
-  prompts on conflicts; v0.4: GPUI hooks, then `DocHandle::save` on the background executor, `DocError::ChangedOnDisk` →
+  prompts on conflicts; v0.4: GPUI hooks, then `DocHandle::save` through the background bridge (`DocumentSave`), `DocError::ChangedOnDisk` →
   `Conflict`): hooks → `trim_trailing_whitespace` / `ensure_final_newline` applied *as buffer edits*
   (buffer == disk afterwards) → `lector_buffer::save::encode` with the file's encoding (UTF-8, UTF-8 BOM — sniffed at
   load —, UTF-16 LE/BE) and line ending (`Lf`/`CrLf` normalized, `Mixed` kept) → stamp check (`lector_fs::stamp`
@@ -3239,7 +3395,7 @@ FileView (tab) ──► CodeView (carets, IME, actions) ──► EditBuffer (E
   (`DocumentModel::view_count`); when the last tab closes the model leaves the registry and, unless another window or an
   agent holds the shared document, `DocumentStore::forget`s it, so reopening reloads from disk. No hot exit in 0.3.
 * **External changes** (`FileView::reload` from the watcher → `DocumentModel::file_changed_on_disk` → `DocHandle::check_disk`
-  on the background executor; Revert / Reload → `DocHandle::reload`): same stamp →
+  through the background bridge; Revert / Reload → `DocHandle::reload`): same stamp →
   ignored (our own save); clean buffer → `Buffer::replace_all` (carets kept) adopting the freshly parsed disk
   snapshot; dirty → `DiskConflict` banner: Reload (discard mine) / Keep Mine (next save overwrites) / Compare
   (`editor::compare::CompareItem`, unified disk ↔ buffer diff from `lector_diff` rows).
@@ -3322,7 +3478,7 @@ line, else the first changed line; a deleted file opens on the old side). `headl
 Riskiest: src/auth/session.rs — removes error handling (lines 40–52). Tests touched: 2 files." with variants for one file,
 only tests ("only test files"), and only generated or lock files. **No language model is involved:** the sentence is built
 from the diff, the risk analysis and a path heuristic, so it is deterministic and works offline. The Agent panel computes it
-on a background thread when a turn that changed files finishes and caches it per turn (turns that changed nothing get
+through the background bridge (`AgentContext`) when a turn that changed files finishes and caches it per turn (turns that changed nothing get
 nothing); it shows under the turn with clickable files (`AgentPanel::review_turn_at` opens the review tab at the evidence
 line), "Review changes" and "Undo turn". The same card is the header of the turn's review tab (`ReviewView::set_header_view`,
 `ReviewView::show_file_at`, `review_tab::open_review_view`). When `StructuralDiff.skipped` is not empty the diff shows
@@ -3467,8 +3623,8 @@ fills `packaging/{homebrew,winget,flatpak}` (cask, winget 1.6.0 manifests, Flatp
 ## Threading model (UI)
 
 * GPUI main thread owns entities (`Workspace`, `Pane`, `CodeView`, ...).
-* Expensive work goes through `cx.background_spawn` on snapshots; results are
-  applied with `this.update(cx, ..)` and `cx.notify()`.
+* Expensive work goes through `lector_ui::background::background(cx, key, priority, f)` on snapshots (never
+  `cx.background_spawn`, ADR 0003); results are applied with `this.update(cx, ..)` and `cx.notify()`.
 * Highlights are computed per visible range (+ margin) and cached per
   `(text.version(), row-chunk)`.
 
@@ -3492,8 +3648,9 @@ without a network and send nothing anywhere.
   panics, crash_free_rate = clean / (clean + abnormal) | None, by_version, last_crashes: Vec<CrashFile>, crash_reports,
   crash_dir }`. The GUI installs the hook first thing in `main` and begins the session after the start request is built;
   `end_clean` runs from `App::on_app_quit` (macOS exits inside `[NSApp terminate:]`) and again after `Application::run`. **Quit
-  order (v0.7):** save sessions → kill terminals → remove the askpass server → `Supervisor::shutdown` → `end_clean`, the last
-  two through `lector_ui::startup::on_quit_last(cx, work)`: GPUI runs every quit hook's synchronous part in registration
+  order (0.8):** save sessions → kill terminals → remove the askpass server → `lector_app::shutdown::shutdown`
+  (reads cancelled, writes drained ≤ 10 s / network writes ≤ 2 s, then `Supervisor::shutdown`, then
+  `Scheduler::shutdown`) → `end_clean`, the last two through `lector_ui::startup::on_quit_last(cx, work)`: GPUI runs every quit hook's synchronous part in registration
   order and awaits the returned futures afterwards, so `work` (run inside such a future) starts after every other hook
   finished, whenever the hook was registered (windows register theirs later than `main`);
   `lector_cli::run_args` installs the hook for the CLI and `lector mcp`, which never count as sessions. Killing the app

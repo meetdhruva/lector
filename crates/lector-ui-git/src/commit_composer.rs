@@ -10,6 +10,7 @@ use gpui::{
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_ui::actions::git as git_actions;
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use lector_ui::components::text_area::{first_line_chars, TextArea, TextAreaEvent};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
@@ -168,9 +169,10 @@ impl CommitComposer {
         let Some(repo) = self.store.read(cx).repo().cloned() else {
             return;
         };
-        let work = cx.background_spawn(async move { repo.identity() });
+        let key = view_key(JobKind::GitIdentity, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| repo.identity());
         self.identity_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let Ok(result) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.identity = match result {
                     Ok(Some((name, email))) => IdentityState::Known(name, email),
@@ -215,9 +217,12 @@ impl CommitComposer {
         };
         self.amend = true;
         self.saved_message = Some(self.editor.read(cx).text().to_string());
-        let work = cx.background_spawn(async move { repo.last_commit_message() });
+        let key = view_key(JobKind::GitCommitMessage, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
+            repo.last_commit_message()
+        });
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let Ok(result) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
                 if !this.amend {
                     return;
@@ -281,7 +286,9 @@ impl CommitComposer {
         let core = lector_ui::commands_bridge::core(cx);
         // The registry's `git.commit` (journaled like every write, ADR 0002). Its data has the
         // recorded subject and, for the toast's "Push" button (v0.7), the upstream state.
-        let work = cx.background_spawn(async move {
+        // A write the user asked for: never replaced, survives the composer closing.
+        let key = view_key(JobKind::GitWrite, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             Journal::install(&core);
             let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
             let outcome = core.registry().invoke("git.commit", args, &ctx)?;
@@ -297,7 +304,9 @@ impl CommitComposer {
         });
         let store = self.store.clone();
         self.commit_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work
+                .await
+                .unwrap_or_else(|e| Err(CommandError::Failed(e.into())));
             let _ = this.update(cx, |this, cx| {
                 this.committing = false;
                 match result {

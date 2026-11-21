@@ -21,6 +21,7 @@ pub mod model;
 pub mod signature_help;
 pub mod source;
 
+use crate::background::{background, view_key, JobKind, Priority};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -371,13 +372,12 @@ impl FileView {
                 let format = *format;
                 let size = doc.size();
                 self.image_task = Some(cx.spawn(async move |this, cx| {
-                    let info = cx
-                        .background_executor()
-                        .spawn({
-                            let path = path.clone();
-                            async move { ImageInfo::read(&path, format, size) }
-                        })
-                        .await;
+                    let read = path.clone();
+                    let key = view_key(JobKind::ImageDecode, this.entity_id());
+                    let info = background(cx, key, Priority::Visible, move |_| {
+                        ImageInfo::read(&read, format, size)
+                    });
+                    let Ok(info) = info.await else { return };
                     let _ = this.update(cx, |this, cx| {
                         match &this.content {
                             Content::Image(view) => view.update(cx, |v, cx| v.set_info(info, cx)),
@@ -845,29 +845,29 @@ impl FileView {
             .point_for_pos(Pos::new(word_start.row, word_start.column as usize))
             .unwrap_or(target.position);
         self.hover_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let md = lector_app::project::symbols::hover(&project, &doc, offset)
-                        .ok()
-                        .flatten()
-                        .map(|md| md.trim().to_string())
-                        .filter(|md| !md.is_empty());
-                    let why = why
-                        .map(|q| core.provenance().explain_all(&q))
-                        .map(|items| lector_app::provenance::explanation_markdown(&items))
-                        .filter(|md| !md.is_empty());
-                    let md = [diagnostics, md, why]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join("\n\n---\n\n");
-                    if md.is_empty() {
-                        return None;
-                    }
-                    Some(Arc::new(markdown::parse(&md)))
-                })
-                .await;
+            // Waits on the language server: a blocking-lane kind.
+            let key = view_key(JobKind::LspHover, this.entity_id());
+            let result = background(cx, key, Priority::Visible, move |_| {
+                let md = lector_app::project::symbols::hover(&project, &doc, offset)
+                    .ok()
+                    .flatten()
+                    .map(|md| md.trim().to_string())
+                    .filter(|md| !md.is_empty());
+                let why = why
+                    .map(|q| core.provenance().explain_all(&q))
+                    .map(|items| lector_app::provenance::explanation_markdown(&items))
+                    .filter(|md| !md.is_empty());
+                let md = [diagnostics, md, why]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n");
+                if md.is_empty() {
+                    return None;
+                }
+                Some(Arc::new(markdown::parse(&md)))
+            });
+            let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.hover = result.map(|blocks| HoverPopover {
                     word,

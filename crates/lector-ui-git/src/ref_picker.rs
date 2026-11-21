@@ -1,6 +1,8 @@
 //! A small fuzzy picker over git refs (branches, tags, recent commits) used
 //! by "Compare with…", "Branch vs base" and "Commit range".
 
+use crate::store::GitStore;
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -243,6 +245,31 @@ pub fn pick_ref(
     toggle_modal(&layer, window, cx, move |window, cx| {
         Picker::new(delegate, window, cx)
     });
+}
+
+/// Loads ref choices in the background, then shows a picker.
+pub fn pick_from_repo(
+    store: &Entity<GitStore>,
+    placeholder: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+    on_pick: impl Fn(crate::ref_picker::RefChoice, &mut Window, &mut App) + 'static,
+) {
+    let Some(repo) = store.read(cx).repo().cloned() else {
+        return;
+    };
+    let Some(ws) = store.read(cx).workspace.upgrade() else {
+        return;
+    };
+    let key = view_key(JobKind::GitRefs, store.entity_id());
+    let task = background(cx, key, Priority::Visible, move |_| ref_choices(&repo));
+    window
+        .spawn(cx, async move |cx| {
+            let Ok(choices) = task.await else { return };
+            let _ =
+                cx.update(|window, cx| pick_ref(&ws, placeholder, choices, on_pick, window, cx));
+        })
+        .detach();
 }
 
 #[cfg(test)]

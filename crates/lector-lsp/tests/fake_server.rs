@@ -26,8 +26,13 @@ fn config(extra: &[&str]) -> ServerConfig {
     }
 }
 
+/// Launches on their own threads, like the app's scheduler (the default runs them inline).
 fn fast() -> LspOptions {
     LspOptions {
+        launcher: Some(std::sync::Arc::new(|task| {
+            std::thread::spawn(task);
+            Ok(())
+        })),
         request_timeout: Duration::from_millis(600),
         init_timeout: Duration::from_secs(10),
         restart_base_delay: Duration::from_millis(50),

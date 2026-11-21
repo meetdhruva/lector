@@ -7,12 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::{select, Either};
 use lector_base::CancelToken;
 use lector_search::{search_project, CaseMode, SearchEvent, SearchQuery, WalkOptions};
 use lector_syntax::SymbolLocation;
 use lector_text::{Point, Text};
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 
 use crate::documents::Document;
 use crate::project::Project;
@@ -50,30 +49,30 @@ pub struct Target {
 /// (path, row, start column, end column, line text)
 type TextHit = (PathBuf, u32, usize, usize, String);
 
-/// Runs `fut` to completion, giving up after `dur`.
+/// Runs `fut` to completion on the calling thread, giving up after `dur`. No helper thread:
+/// the thread parks until the future's waker unparks it or the deadline passes.
 fn block_on_timeout<F: Future>(fut: F, dur: Duration) -> Option<F::Output> {
-    let (tx, rx) = futures::channel::oneshot::channel::<()>();
-    let gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let g2 = gate.clone();
-    std::thread::spawn(move || {
-        let (lock, cv) = &*g2;
-        let mut done = lock.lock();
-        let result = cv.wait_while_for(&mut done, |d| !*d, dur);
-        if result.timed_out() && !*done {
-            let _ = tx.send(());
+    use std::task::{Context, Poll, Wake, Waker};
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
         }
-    });
-    let out = futures::executor::block_on(async {
-        futures::pin_mut!(fut);
-        match select(fut, rx).await {
-            Either::Left((v, _)) => Some(v),
-            Either::Right(_) => None,
+    }
+    let deadline = std::time::Instant::now() + dur;
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+            return Some(v);
         }
-    });
-    let (lock, cv) = &*gate;
-    *lock.lock() = true;
-    cv.notify_all();
-    out
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        std::thread::park_timeout(left);
+    }
 }
 
 /// Loads and caches target texts within one call.
@@ -372,4 +371,32 @@ pub fn hover(project: &Project, doc: &Document, offset: usize) -> Result<Option<
 /// All known definitions for a symbol picker (tags index).
 pub fn project_symbols(project: &Project) -> Vec<SymbolLocation> {
     project.symbols().all_definitions()
+}
+
+#[cfg(test)]
+mod block_on_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn returns_a_ready_value_and_gives_up_on_a_pending_future_without_a_thread() {
+        assert_eq!(
+            block_on_timeout(async { 5 }, Duration::from_secs(1)),
+            Some(5)
+        );
+        let started = std::time::Instant::now();
+        let never = futures::future::pending::<()>();
+        assert_eq!(block_on_timeout(never, Duration::from_millis(50)), None);
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        // Woken from another thread: completes before the deadline.
+        let (tx, rx) = futures::channel::oneshot::channel::<u8>();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = tx.send(9);
+        });
+        assert_eq!(
+            block_on_timeout(rx, Duration::from_secs(5)).and_then(|r| r.ok()),
+            Some(9)
+        );
+        let _ = sender.join();
+    }
 }

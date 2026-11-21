@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use lector_base::thread::{spawn_named, ThreadKind};
 use zeroize::Zeroize as _;
+
+use lector_base::thread::TaskRunner;
 
 use super::protocol::{
     read_frame_until, same_bytes, write_frame, Conn, Endpoint, MAGIC, MAGIC_V1, MAX_FRAME,
@@ -114,15 +117,16 @@ impl AskpassServer {
     /// prompts at once.
     pub fn start(
         runtime_dir: &Path,
+        runner: TaskRunner,
         handler: impl Fn(PromptRequest) -> PromptReply + Send + Sync + 'static,
     ) -> Result<AskpassServer, AskpassError> {
         #[cfg(unix)]
         {
-            Self::start_unix(runtime_dir, handler)
+            Self::start_unix(runtime_dir, runner, handler)
         }
         #[cfg(not(unix))]
         {
-            let mut server = Self::start_tcp(handler)?;
+            let mut server = Self::start_tcp(runner, handler)?;
             // A private directory for the helper program (`helper_program`).
             let dir = private_dir(runtime_dir)?;
             if let Err(err) = write_pid_file(&dir) {
@@ -140,17 +144,25 @@ impl AskpassServer {
     /// Starts a server on a loopback TCP port (the Windows transport; the token is what
     /// keeps other local users out).
     pub fn start_tcp(
+        runner: TaskRunner,
         handler: impl Fn(PromptRequest) -> PromptReply + Send + Sync + 'static,
     ) -> Result<AskpassServer, AskpassError> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let endpoint = Endpoint::Tcp(listener.local_addr()?);
-        Self::serve(Listener::Tcp(listener), endpoint, None, Arc::new(handler))
+        Self::serve(
+            Listener::Tcp(listener),
+            endpoint,
+            None,
+            runner,
+            Arc::new(handler),
+        )
     }
 
     /// Starts a server on a Unix domain socket in a new private directory under `runtime_dir`.
     #[cfg(unix)]
     pub fn start_unix(
         runtime_dir: &Path,
+        runner: TaskRunner,
         handler: impl Fn(PromptRequest) -> PromptReply + Send + Sync + 'static,
     ) -> Result<AskpassServer, AskpassError> {
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -195,6 +207,7 @@ impl AskpassServer {
                             Listener::Unix(listener),
                             Endpoint::Unix(socket),
                             Some(dir),
+                            runner,
                             Arc::new(handler),
                         );
                     }
@@ -213,6 +226,7 @@ impl AskpassServer {
         listener: Listener,
         endpoint: Endpoint,
         dir: Option<PathBuf>,
+        runner: TaskRunner,
         handler: Handler,
     ) -> Result<AskpassServer, AskpassError> {
         listener.set_nonblocking()?;
@@ -221,9 +235,9 @@ impl AskpassServer {
         let thread = {
             let stop = stop.clone();
             let token = token.clone();
-            std::thread::Builder::new()
-                .name("lector-askpass".into())
-                .spawn(move || accept_loop(listener, token, handler, stop))?
+            spawn_named(ThreadKind::AskpassListener, "askpass", move || {
+                accept_loop(listener, token, runner, handler, stop)
+            })?
         };
         tracing::debug!("askpass server listening on {}", endpoint.to_env_value());
         Ok(AskpassServer {
@@ -299,7 +313,15 @@ impl Drop for AskpassServer {
     }
 }
 
-fn accept_loop(listener: Listener, token: Secret, handler: Handler, stop: Arc<AtomicBool>) {
+/// Accepts connections until `stop`; each connection (a handshake, then possibly a prompt
+/// that waits for the user) is handed to `runner`, which runs it elsewhere.
+fn accept_loop(
+    listener: Listener,
+    token: Secret,
+    runner: TaskRunner,
+    handler: Handler,
+    stop: Arc<AtomicBool>,
+) {
     let slots = Arc::new(Slots::default());
     while !stop.load(Ordering::SeqCst) {
         let conn = match listener.accept() {
@@ -321,15 +343,14 @@ fn accept_loop(listener: Listener, token: Secret, handler: Handler, stop: Arc<At
         let token = token.clone();
         let handler = handler.clone();
         let slots2 = slots.clone();
-        let spawned = std::thread::Builder::new()
-            .name("lector-askpass-conn".into())
-            .spawn(move || {
-                if let Err(err) = handle(conn, &token, &handler, &slots2, handshake) {
-                    tracing::debug!("askpass connection: {err}");
-                }
-            });
-        if let Err(err) = spawned {
-            tracing::warn!("askpass: cannot start a connection thread: {err}");
+        let task: lector_base::thread::RunnerTask = Box::new(move || {
+            if let Err(err) = handle(conn, &token, &handler, &slots2, handshake) {
+                tracing::debug!("askpass connection: {err}");
+            }
+        });
+        // Handed back (the app is stopping): serve it here rather than drop it.
+        if let Err(task) = runner(task) {
+            task();
         }
     }
 }
@@ -679,8 +700,10 @@ mod tests {
         let unknown = fake_dir(base.path(), "lector-askpass-00000000000u", None);
         let unknown2 = fake_dir(base.path(), "lector-askpass-000000000000", None);
         let foreign = fake_dir(base.path(), "something-else", Some(dead_pid()));
-        let server = AskpassServer::start(base.path(), |_| PromptReply::Cancel)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let server = AskpassServer::start(base.path(), crate::askpass::test_runner(), |_| {
+            PromptReply::Cancel
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
         let ours = server.private_dir().map(Path::to_path_buf);
         assert!(!dead.exists(), "a dead owner's directory is removed");
         assert!(live.exists() && foreign.exists() && unknown2.exists());

@@ -30,6 +30,7 @@ mod graph;
 mod log;
 mod oid;
 mod permalink;
+mod pipes;
 mod proc;
 mod repo;
 pub mod shadow;

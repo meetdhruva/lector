@@ -3,6 +3,7 @@
 //! `lector_search::search_project` on a background thread (debounced,
 //! cancelled on every new query), grouped by file with highlighted matches.
 
+use crate::background::{background, view_key, BackgroundTask, JobKind, Priority};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +16,6 @@ use gpui::{
     HighlightStyle, SharedString, StyledText, Subscription, Task, Window,
 };
 use lector_app::Project;
-use lector_base::CancelToken;
 use lector_search::{CaseMode, LineMatch, SearchEvent, SearchQuery, WalkOptions};
 
 use crate::actions::picker::{Confirm, SelectNext, SelectPrev};
@@ -114,7 +114,8 @@ pub struct SearchPanel {
     selected: Option<usize>,
     status: Status,
     match_count: usize,
-    cancel: Option<CancelToken>,
+    /// The running search; dropping it cancels the search.
+    search_job: Option<BackgroundTask<()>>,
     search_task: Option<Task<()>>,
     debounce_task: Option<Task<()>>,
     list: VirtualListState,
@@ -158,7 +159,7 @@ impl SearchPanel {
             selected: None,
             status: Status::Idle,
             match_count: 0,
-            cancel: None,
+            search_job: None,
             search_task: None,
             debounce_task: None,
             list: VirtualListState::new(),
@@ -191,9 +192,7 @@ impl SearchPanel {
     }
 
     fn schedule_search(&mut self, cx: &mut Context<Self>) {
-        if let Some(c) = self.cancel.take() {
-            c.cancel();
-        }
+        self.search_job = None;
         self.debounce_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
@@ -213,9 +212,7 @@ impl SearchPanel {
     }
 
     fn search(&mut self, cx: &mut Context<Self>) {
-        if let Some(c) = self.cancel.take() {
-            c.cancel();
-        }
+        self.search_job = None;
         let pattern = self.query.read(cx).text().to_string();
         self.results.clear();
         self.rows = Arc::new(Vec::new());
@@ -247,17 +244,17 @@ impl SearchPanel {
             exclude: settings.files.exclude.clone(),
             max_depth: None,
         };
-        let cancel = CancelToken::new();
-        self.cancel = Some(cancel.clone());
         self.status = Status::Searching;
         let root = self.project.root().to_path_buf();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<SearchEvent>();
         let started = Instant::now();
-        std::thread::spawn(move || {
-            let _ = lector_search::search_project(&root, &query, &walk, &cancel, |event| {
+        // Bounded file I/O on the compute lane; a newer search (same key) replaces this one.
+        let key = view_key(JobKind::ProjectSearch, cx.entity_id());
+        self.search_job = Some(background(cx, key, Priority::Visible, move |cancel| {
+            let _ = lector_search::search_project(&root, &query, &walk, cancel, |event| {
                 let _ = tx.unbounded_send(event);
             });
-        });
+        }));
         cx.notify();
         self.search_task = Some(cx.spawn(async move |this, cx| {
             while let Some(event) = rx.next().await {

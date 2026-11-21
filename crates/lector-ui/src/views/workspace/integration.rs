@@ -15,12 +15,12 @@ use gpui::{
 };
 use lector_app::project::{FileList, GitStatusMap, Location, NavHistory, Project};
 use lector_app::store::{PaneState, Session, TabKind, TabState};
-use lector_base::CancelToken;
 use lector_lsp::ServerState;
 
 use super::Workspace;
 use super::WorkspaceEvent;
 use crate::actions::{editor, workspace::*};
+use crate::background::{background, detach, view_key, JobKey, JobKind, Priority, Subject};
 use crate::code_view::Pos;
 use crate::components::picker::Picker;
 use crate::editor::{FileItem, FileView, FileViewEvent, Reveal};
@@ -96,7 +96,7 @@ impl Integration {
             session_task: None,
             nav_task: None,
             tasks: Vec::new(),
-            subscriptions: Vec::new(),
+            subscriptions: vec![crate::background::cancel_on_release(cx)],
             last_active: None,
         }
     }
@@ -226,19 +226,18 @@ impl Workspace {
     pub(super) fn rescan_files(&mut self, index_symbols: bool, cx: &mut gpui::Context<Self>) {
         let project = self.project.clone();
         self.integ.rescan_task = Some(cx.spawn(async move |this, cx| {
-            let (files, index) = cx
-                .background_executor()
-                .spawn(async move {
-                    let files = project.rescan_files(&CancelToken::new());
-                    let index = Arc::new(DirIndex::from_list(&files));
-                    (files, index)
-                })
-                .await;
+            let key = view_key(JobKind::FileRescan, this.entity_id());
+            let scan = background(cx, key, Priority::Background, move |cancel| {
+                let files = project.rescan_files(cancel);
+                let index = Arc::new(DirIndex::from_list(&files));
+                (files, index)
+            });
+            let Ok((files, ix)) = scan.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.integ.files = files;
                 let tree = this.sidebar.read(cx).file_tree().clone();
                 tree.update(cx, |t, cx| {
-                    t.delegate.set_index(index);
+                    t.delegate.set_index(ix);
                     t.refresh(cx);
                 });
                 if let Some(active) = this.active_path(cx) {
@@ -256,8 +255,9 @@ impl Workspace {
         let project = self.project.clone();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<(usize, usize)>();
         self.integ.index_progress = Some((0, 0));
-        let worker = cx.background_executor().spawn(async move {
-            project.index_symbols(&CancelToken::new(), |done, total| {
+        let key = view_key(JobKind::SymbolIndex, cx.entity_id());
+        let worker = background(cx, key, Priority::Idle, move |cancel| {
+            project.index_symbols(cancel, |done, total| {
                 let _ = tx.unbounded_send((done, total));
             });
         });
@@ -275,7 +275,7 @@ impl Workspace {
                     }
                 }
             };
-            futures::join!(worker, progress);
+            let _ = futures::join!(worker, progress);
             let _ = this.update(cx, |this, cx| {
                 this.integ.index_progress = None;
                 cx.notify();
@@ -338,13 +338,14 @@ impl Workspace {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<lector_fs::WatchEvent>();
         // Registering recursive watches walks the whole tree: off the main thread.
         let root = self.project.root().to_path_buf();
-        let setup = cx.background_executor().spawn(async move {
+        let key = view_key(JobKind::WatchRegister, cx.entity_id());
+        let setup = background(cx, key, Priority::Background, move |_| {
             lector_fs::watch(&root, Duration::from_millis(120), move |ev| {
                 let _ = tx.unbounded_send(ev);
             })
         });
         self.integ.tasks.push(cx.spawn(async move |this, cx| {
-            let watcher = setup.await;
+            let Ok(watcher) = setup.await else { return };
             let ok = this.update(cx, |this, _| match watcher {
                 Ok(w) => this.integ.watcher = Some(w),
                 Err(err) => tracing::warn!("file watcher unavailable: {err}"),
@@ -427,13 +428,12 @@ impl Workspace {
                 self.reload_previews(&set, cx);
                 let project = self.project.clone();
                 let reindex = changed.clone();
-                cx.background_executor()
-                    .spawn(async move {
-                        for path in reindex {
-                            project.reindex_file(&path);
-                        }
-                    })
-                    .detach();
+                let key = view_key(JobKind::Reindex, cx.entity_id());
+                detach(cx, key, Priority::Background, move |_| {
+                    for path in reindex {
+                        project.reindex_file(&path);
+                    }
+                });
                 if structural {
                     self.rescan_files(false, cx);
                 }
@@ -774,12 +774,12 @@ impl Workspace {
             return;
         }
         let path = doc.path().to_path_buf();
-        cx.background_executor()
-            .spawn(async move {
-                let tag = text.version();
-                lsp.open_document_tagged(&path, &lang.name, &text.to_string(), tag)
-            })
-            .detach();
+        // Per file: a newer text of the same file replaces an older one still queued.
+        let key = JobKey::new(JobKind::LspSync, Subject::path(&path));
+        detach(cx, key, Priority::Background, move |_| {
+            let tag = text.version();
+            lsp.open_document_tagged(&path, &lang.name, &text.to_string(), tag);
+        });
     }
 
     fn active_item_changed(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) {
@@ -937,6 +937,7 @@ impl Workspace {
                         ws.open_path_with(path, false, reveal, true, window, cx);
                     });
                 },
+                cx,
             );
             Picker::new(delegate, window, cx)
         });
@@ -1022,31 +1023,30 @@ impl Workspace {
         let this = cx.entity().downgrade();
         cx.spawn_in(window, async move |_, cx| {
             let root = project.root().to_path_buf();
-            let entries = cx
-                .background_executor()
-                .spawn(async move {
-                    lector_app::project::symbols::project_symbols(&project)
-                        .into_iter()
-                        .map(|s| {
-                            let rel = s
-                                .path
-                                .strip_prefix(&root)
-                                .unwrap_or(&s.path)
-                                .display()
-                                .to_string();
-                            SymbolEntry {
-                                name: s.name.into(),
-                                kind: Some(s.kind),
-                                detail: rel.into(),
-                                depth: 0,
-                                path: s.path,
-                                row: s.point.row,
-                                cols: s.point.column as usize..s.point.column as usize,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
+            let key = view_key(JobKind::ProjectSymbols, this.entity_id());
+            let entries = background(cx, key, Priority::Visible, move |_| {
+                lector_app::project::symbols::project_symbols(&project)
+                    .into_iter()
+                    .map(|s| {
+                        let rel = s
+                            .path
+                            .strip_prefix(&root)
+                            .unwrap_or(&s.path)
+                            .display()
+                            .to_string();
+                        SymbolEntry {
+                            name: s.name.into(),
+                            kind: Some(s.kind),
+                            detail: rel.into(),
+                            depth: 0,
+                            path: s.path,
+                            row: s.point.row,
+                            cols: s.point.column as usize..s.point.column as usize,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let Ok(entries) = entries.await else { return };
             let _ = this.update_in(cx, |ws, window, cx| {
                 let weak = cx.entity().downgrade();
                 ws.toggle_modal(window, cx, move |window, cx| {
@@ -1088,13 +1088,12 @@ impl Workspace {
         };
         let project = self.project.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let targets =
-                cx.background_executor()
-                    .spawn(async move {
-                        lector_app::project::symbols::definitions(&project, &doc, offset)
-                    })
-                    .await
-                    .unwrap_or_default();
+            let key = view_key(JobKind::LspDefinitions, this.entity_id());
+            let targets = background(cx, key, Priority::Visible, move |_| {
+                lector_app::project::symbols::definitions(&project, &doc, offset)
+            });
+            let Ok(targets) = targets.await else { return };
+            let targets = targets.unwrap_or_default();
             let _ = this.update_in(cx, |ws, window, cx| {
                 ws.show_targets(targets, "Definitions", window, cx)
             });

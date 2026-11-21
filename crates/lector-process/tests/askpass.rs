@@ -81,7 +81,7 @@ fn round_trip(server: AskpassServer, seen: Arc<Mutex<Vec<PromptRequest>>>) {
 #[test]
 fn tcp_round_trip_and_token_check() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let server = AskpassServer::start_tcp(threads(), answering(seen.clone())).unwrap();
     assert!(matches!(server.endpoint(), Endpoint::Tcp(a) if a.ip().is_loopback()));
     round_trip(server, seen);
 }
@@ -90,7 +90,7 @@ fn tcp_round_trip_and_token_check() {
 fn platform_server_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let server = AskpassServer::start(dir.path(), answering(seen.clone())).unwrap();
+    let server = AskpassServer::start(dir.path(), threads(), answering(seen.clone())).unwrap();
     round_trip(server, seen);
 }
 
@@ -99,7 +99,7 @@ fn platform_server_round_trip() {
 fn unix_socket_is_private_and_removed_on_drop() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().unwrap();
-    let server = AskpassServer::start_unix(dir.path(), |_| PromptReply::Cancel).unwrap();
+    let server = AskpassServer::start_unix(dir.path(), threads(), |_| PromptReply::Cancel).unwrap();
     let Endpoint::Unix(socket) = server.endpoint().clone() else {
         panic!("expected a unix socket");
     };
@@ -161,7 +161,7 @@ fn prompts_are_served_concurrently() {
     // The first prompt blocks until the second one arrived: both must be in flight at once.
     let gate = Arc::new((Mutex::new(0usize), std::sync::Condvar::new()));
     let g = gate.clone();
-    let server = AskpassServer::start_tcp(move |req| {
+    let server = AskpassServer::start_tcp(threads(), move |req| {
         let (lock, cv) = &*g;
         let mut n = lock.lock().unwrap();
         *n += 1;
@@ -194,14 +194,14 @@ fn prompts_are_served_concurrently() {
 
 #[test]
 fn a_panicking_handler_cancels() {
-    let server = AskpassServer::start_tcp(|_| panic!("boom")).unwrap();
+    let server = AskpassServer::start_tcp(threads(), |_| panic!("boom")).unwrap();
     let token = token_of(&server);
     assert_eq!(ask(&server, &token, "Password: ").unwrap(), None);
 }
 
 #[test]
 fn client_without_a_server_fails_cleanly() {
-    let server = AskpassServer::start_tcp(|_| PromptReply::Cancel).unwrap();
+    let server = AskpassServer::start_tcp(threads(), |_| PromptReply::Cancel).unwrap();
     let endpoint = server.endpoint().clone();
     drop(server);
     let err = run_askpass_client_with("Password: ", &endpoint, "t", &mut Vec::new()).unwrap_err();
@@ -217,7 +217,7 @@ fn client_without_a_server_fails_cleanly() {
 #[test]
 fn operation_ids_reach_the_handler() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let server = AskpassServer::start_tcp(threads(), answering(seen.clone())).unwrap();
     let token = token_of(&server);
     let mut out = Vec::new();
     let answered = lector_process::askpass::run_askpass_client_for_op(
@@ -244,7 +244,7 @@ fn frame(payload: &[u8]) -> Vec<u8> {
 fn version_1_requests_are_still_answered() {
     use std::io::{Read as _, Write as _};
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let server = AskpassServer::start_tcp(threads(), answering(seen.clone())).unwrap();
     let token = token_of(&server);
     let Endpoint::Tcp(addr) = server.endpoint().clone() else {
         panic!("tcp");
@@ -264,7 +264,7 @@ fn version_1_requests_are_still_answered() {
 fn idle_unauthenticated_connections_neither_take_prompt_slots_nor_linger() {
     use std::io::Read as _;
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let server = AskpassServer::start_tcp(answering(seen.clone())).unwrap();
+    let server = AskpassServer::start_tcp(threads(), answering(seen.clone())).unwrap();
     let token = token_of(&server);
     let Endpoint::Tcp(addr) = server.endpoint().clone() else {
         panic!("tcp");
@@ -296,4 +296,12 @@ fn idle_unauthenticated_connections_neither_take_prompt_slots_nor_linger() {
         assert!(closed, "idle connection still open");
     }
     assert!(started.elapsed() < Duration::from_secs(8));
+}
+
+/// Runs each askpass connection on its own thread (the app uses the scheduler).
+fn threads() -> lector_base::thread::TaskRunner {
+    std::sync::Arc::new(|task| {
+        std::thread::spawn(task);
+        Ok(())
+    })
 }

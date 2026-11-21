@@ -2,6 +2,7 @@
 //! `render.rs`). Talks to [`lector_agent::AgentSession`] off the main thread; session
 //! events arrive through a channel and are coalesced into one refresh per frame-ish.
 
+use lector_ui::background::{background, detach, view_key, JobKind, Priority};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -294,10 +295,16 @@ impl AgentPanel {
         self.error = None;
         cx.notify();
         let (core, project) = (self.core.clone(), self.project.clone());
-        let work = cx
-            .background_spawn(async move { AgentManager::of(&core).start(&core, &project, &cfg) });
+        // Spawns the agent and waits for its handshake: the blocking lane.
+        let key = view_key(JobKind::AgentStart, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
+            AgentManager::of(&core).start(&core, &project, &cfg)
+        });
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = match work.await {
+                Ok(started) => started.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
             let _ = this.update(cx, |this, cx| {
                 this.starting = false;
                 match result {
@@ -412,9 +419,13 @@ impl AgentPanel {
         self.starting = true;
         self.error = None;
         cx.notify();
-        let work = cx.background_spawn(async move { s.restart() });
+        let key = view_key(JobKind::AgentStart, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| s.restart());
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = match work.await {
+                Ok(restarted) => restarted.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
             let _ = this.update(cx, |this, cx| {
                 this.starting = false;
                 if let Err(e) = result {
@@ -461,7 +472,8 @@ impl AgentPanel {
     /// Stops the current turn.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = self.session.clone() {
-            cx.background_spawn(async move { s.cancel() }).detach();
+            let key = view_key(JobKind::AgentControl, cx.entity_id());
+            detach(cx, key, Priority::Visible, move |_| s.cancel());
         }
     }
 
@@ -584,7 +596,8 @@ impl AgentPanel {
             let key = (session_id, id);
             self.summaries.insert(key, SummaryState::Computing);
             let project = self.project.clone();
-            let work = cx.background_spawn(async move {
+            let job = view_key(JobKind::AgentContext, cx.entity_id());
+            let work = background(cx, job, Priority::Background, move |_| {
                 let repo = project.repo()?;
                 lector_agent::summary::TurnSummary::compute(
                     repo,
@@ -595,7 +608,7 @@ impl AgentPanel {
                 .ok()
             });
             cx.spawn(async move |this, cx| {
-                let result = work.await;
+                let result = work.await.ok().flatten();
                 let _ = this.update(cx, |this, cx| {
                     this.summaries.insert(
                         key,
@@ -637,9 +650,15 @@ impl AgentPanel {
         }
         cx.notify();
         let worker = session.clone();
-        let work = cx.background_spawn(async move { worker.undo_turn(id, force, Source::Ui) });
+        // A write the user asked for (and talks to the agent): never replaced or dropped.
+        let key = view_key(JobKind::AgentControl, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
+            worker.undo_turn(id, force, Source::Ui)
+        });
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work
+                .await
+                .unwrap_or_else(|e| Err(AgentError::NotUndoable(e.to_string())));
             let _ = this.update(cx, |this, cx| {
                 // The panel may have moved on to another session while this ran.
                 let current = this.session.as_ref() == Some(&session);
@@ -760,7 +779,8 @@ impl AgentPanel {
         let ctx = lector_ui::commands_bridge::command_context(ws.read(cx), cx);
         let only = ws.read(cx).active_path(cx).map(|p| self.rel(&p));
         let core = self.core.clone();
-        let work = cx.background_spawn(async move {
+        let key = view_key(JobKind::AgentContext, cx.entity_id());
+        let work = background(cx, key, Priority::Visible, move |_| {
             let mut args = json!({ "changeset": "worktree", "max_files": 30 });
             if let Some(p) = &only {
                 args["path"] = json!(p);
@@ -777,7 +797,7 @@ impl AgentPanel {
                 .map_err(|e| e.to_string())
         });
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok((label, text)) if !text.is_empty() => this.push_chip(Chip {
