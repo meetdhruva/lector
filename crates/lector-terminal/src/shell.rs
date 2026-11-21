@@ -470,10 +470,11 @@ fn write_if_changed(path: &Path, content: &str) -> Result<(), TerminalError> {
         path: path.to_path_buf(),
         source,
     };
+    // Lector's data directory: owner-only (ADR 0010); the shells only read these files.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(err)?;
+        lector_base::private::create_dir_all(parent).map_err(err)?;
     }
-    std::fs::write(path, content).map_err(err)
+    lector_base::private::write(path, content.as_bytes()).map_err(err)
 }
 
 /// Writes the integration files under `dir` (only files whose content differs).

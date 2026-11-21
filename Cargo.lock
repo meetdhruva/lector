@@ -4484,6 +4484,7 @@ dependencies = [
  "dunce",
  "futures",
  "lector-app",
+ "lector-base",
  "lector-cli",
  "lector-config",
  "lector-process",

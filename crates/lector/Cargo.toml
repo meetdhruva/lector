@@ -27,6 +27,7 @@ lector-theme.workspace = true
 lector-config.workspace = true
 lector-cli.workspace = true
 lector-app.workspace = true
+lector-base.workspace = true
 lector-process.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

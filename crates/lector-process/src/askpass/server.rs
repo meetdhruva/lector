@@ -170,7 +170,7 @@ impl AskpassServer {
         const MAX_SOCKET_PATH: usize = 100;
         let mut last_err = io::Error::other("no usable directory for the askpass socket");
         for base in [runtime_dir.to_path_buf(), std::env::temp_dir()] {
-            if let Err(err) = std::fs::create_dir_all(&base) {
+            if let Err(err) = lector_base::private::create_dir_all(&base) {
                 last_err = err;
                 continue;
             }
@@ -455,7 +455,7 @@ fn handle(
 /// Creates a fresh private directory `lector-askpass-<random>` under `base`.
 #[cfg(not(unix))]
 fn private_dir(base: &Path) -> Result<PathBuf, AskpassError> {
-    std::fs::create_dir_all(base)?;
+    lector_base::private::create_dir_all(base)?;
     for _ in 0..4 {
         let dir = base.join(format!("{DIR_PREFIX}{}", hex(&random_bytes::<6>()?)));
         match std::fs::create_dir(&dir) {

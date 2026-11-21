@@ -31,7 +31,7 @@ use crate::views::window_controls::{self, caption_style, CaptionStyle};
 /// open (Lector's own data dir; empty, never scanned or watched).
 pub fn no_folder_root() -> PathBuf {
     let dir = lector_config::paths::data_dir().join("no-folder");
-    match std::fs::create_dir_all(&dir) {
+    match lector_base::private::create_dir_all(&dir) {
         Ok(()) => dir,
         Err(err) => {
             tracing::warn!("cannot create {}: {err}", dir.display());
