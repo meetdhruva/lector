@@ -17,11 +17,17 @@
 //! lines and marks the session crashed (`restart` starts a new process and ACP session, keeping
 //! the history); a cancel not confirmed within `cancel_grace` (10 s) or no traffic for
 //! `turn_idle_timeout` (15 min) also ends the turn. Cancel sends `session/cancel` and answers
-//! pending permission requests `cancelled`. `fs/write_text_file` replaces the text of the open
-//! document and saves it (no hooks or cleanup; refused when the tab is locked read-only or the
-//! file changed on disk), or writes files that are not open with `lector_fs::write_atomic`;
+//! pending permission requests `cancelled`. Both file requests are confined by
+//! [`crate::paths::confine`] (`lector_fs::confine`: inside the project, outside git directories
+//! and Lector's data, symlinks resolved; a write never goes through a final-component link).
+//! `fs/read_text_file` serves the open document or reads the file without following a link that
+//! appeared after the check. `fs/write_text_file` replaces the text of the open document and
+//! saves it (no hooks or cleanup; confined save; refused when the tab is locked read-only or the
+//! file changed on disk), or writes files that are not open with `lector_fs::Confined::write`;
 //! when the turn has no checkpoint, or the file is git-ignored (checkpoints leave those out),
-//! the file is backed up first so its `agent.write_file` entry is undoable on its own.
+//! the file is backed up first so its `agent.write_file` entry is undoable on its own. A write
+//! whose backup cannot be taken (the backup fails, or the folder is not a git repository and has
+//! no shadow repository) is refused: every agent write stays undoable (ADR 0010, item 6).
 
 use lector_process::{ChildHandle, ProcessCommand, ProcessKind, StdinMode, Supervisor};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -46,8 +52,9 @@ use crate::config::AgentConfig;
 use crate::context::build_prompt;
 use crate::error::AgentError;
 use crate::model::*;
-use crate::paths::{relative, resolve_in_root};
+use crate::paths::confine;
 use crate::rpc::{self, Connection, Handler, RpcError};
+use lector_fs::{Access, CreateDirs};
 
 /// ACP protocol version Lector speaks.
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -1013,8 +1020,9 @@ impl Shared {
 
     fn read_text_file(&self, params: &Value) -> Result<Value, RpcError> {
         let path = params.get("path").and_then(Value::as_str).unwrap_or("");
-        let abs = resolve_in_root(self.project.root(), path)
-            .map_err(|e| RpcError::remote(rpc::INVALID_PARAMS, e))?;
+        let target = confine(&self.core, self.project.root(), path, Access::Read)
+            .map_err(|e| RpcError::remote(rpc::INVALID_PARAMS, format!("refused: {e}")))?;
+        let abs = target.path();
         let store = DocumentStore::for_core(&self.core);
         let text = match store.get(&abs).and_then(|h| {
             let snap = h.snapshot();
@@ -1023,8 +1031,9 @@ impl Shared {
         }) {
             Some(text) => text,
             None => {
-                let bytes = std::fs::read(&abs)
-                    .map_err(|e| RpcError::remote(rpc::INTERNAL_ERROR, format!("{path}: {e}")))?;
+                let bytes = target
+                    .read()
+                    .map_err(|e| RpcError::remote(rpc::INTERNAL_ERROR, e.to_string()))?;
                 String::from_utf8(bytes).map_err(|_| {
                     RpcError::remote(rpc::INTERNAL_ERROR, format!("{path} is not UTF-8 text"))
                 })?
@@ -1053,9 +1062,14 @@ impl Shared {
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::remote(rpc::INVALID_PARAMS, "missing content"))?;
         let root = self.project.root();
-        let abs = resolve_in_root(root, path)
-            .map_err(|e| RpcError::remote(rpc::INVALID_PARAMS, format!("refused: {e}")))?;
-        let rel = relative(root, &abs);
+        let refused = |e: String| RpcError::remote(rpc::INVALID_PARAMS, format!("refused: {e}"));
+        let confinement = lector_app::commands::confinement(&self.core, root)
+            .map_err(|e| refused(e.to_string()))?;
+        let target = confinement
+            .write(path)
+            .map_err(|e| refused(e.to_string()))?;
+        let abs = target.path();
+        let rel = target.relative_slash();
         let (turn, has_checkpoint) = {
             let st = self.state.lock();
             let turn = st.current;
@@ -1064,16 +1078,29 @@ impl Shared {
                 .is_some_and(|t| t.before.is_some());
             (turn, has)
         };
-        // Without a turn checkpoint, back the file up on its own so the write is undoable.
-        // Checkpoints leave ignored files out (`.env`, build output...): back those up too.
-        let covered = has_checkpoint && !self.shadow().is_some_and(|s| s.is_ignored(&rel));
+        // A write that cannot be undone is refused (ADR 0010, item 6). The turn checkpoint
+        // covers the file unless it is ignored (`.env`, build output...: checkpoints leave those
+        // out); otherwise the file is backed up on its own first, and a failed backup, or a
+        // folder without git (no shadow repository), refuses the write.
+        let shadow = self.shadow();
+        let covered = has_checkpoint && shadow.as_ref().is_some_and(|s| !s.is_ignored(&rel));
         let backup = if covered {
             None
         } else {
-            self.shadow().and_then(|s| {
-                s.snapshot_paths(&[rel.as_str()], "Before an agent write")
-                    .ok()
-            })
+            let shadow = shadow.ok_or_else(|| {
+                refused(format!(
+                    "{rel}: Lector cannot back this file up here (the folder is not a git repository), so the write could not be undone"
+                ))
+            })?;
+            Some(
+                shadow
+                    .snapshot_paths(&[rel.as_str()], "Before an agent write")
+                    .map_err(|e| {
+                        refused(format!(
+                            "{rel}: the backup that makes this write undoable failed ({e})"
+                        ))
+                    })?,
+            )
         };
         let err = |e: String| RpcError::remote(rpc::INTERNAL_ERROR, format!("{rel}: {e}"));
         let store = DocumentStore::for_core(&self.core);
@@ -1092,16 +1119,13 @@ impl Shared {
                         ensure_final_newline: false,
                         run_hooks: false,
                         path: None,
+                        confine: Some(confinement.clone()),
                     })
                     .map_err(|e| err(e.to_string()))?;
             }
-            None => {
-                if let Some(parent) = abs.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| err(e.to_string()))?;
-                }
-                lector_fs::write_atomic(&abs, content.as_bytes())
-                    .map_err(|e| err(e.to_string()))?;
-            }
+            None => target
+                .write(content.as_bytes(), CreateDirs::Yes)
+                .map_err(|e| err(e.to_string()))?,
         }
         self.update_turn(|t| {
             if !t.written.contains(&rel) {
@@ -1217,9 +1241,9 @@ impl Shared {
                 .and_then(Value::as_array)
                 .map(|locs| {
                     locs.iter().all(|l| {
-                        l.get("path")
-                            .and_then(Value::as_str)
-                            .is_some_and(|p| resolve_in_root(self.project.root(), p).is_ok())
+                        l.get("path").and_then(Value::as_str).is_some_and(|p| {
+                            confine(&self.core, self.project.root(), p, Access::Read).is_ok()
+                        })
                     })
                 })
                 .unwrap_or(true);

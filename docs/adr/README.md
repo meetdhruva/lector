@@ -18,6 +18,7 @@ and how the result is checked automatically (`scripts/arch-check`, see `arch/`).
 | [0007](0007-architecture-doc.md) | The architecture document describes the present and is checked | Accepted |
 | [0008](0008-guardrails.md) | Structural rules are enforced by a ratchet in CI | Accepted |
 | [0009](0009-security-posture.md) | Security posture carried over from 0.1–0.7 (write policy, agents, updates) | Accepted |
+| [0010](0010-audit-corrections.md) | Corrections after the independent audit (confinement, tokens, command sources, write jobs, guardrails) | Accepted |
 
 ## How work is done
 

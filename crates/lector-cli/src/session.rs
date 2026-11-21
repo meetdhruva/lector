@@ -22,8 +22,10 @@ pub fn open_core() -> AppCore {
         core.store()
             .on_read_only_write(move || eprintln!("{warning}"));
     }
-    // Agent sessions (`agent.*`) are part of the headless API too: scripts and MCP
-    // clients can start a session, prompt, list turns and undo a turn.
+    // Agent sessions (`agent.*`) are part of the headless API too: `lector run` can start a
+    // session, prompt and cancel (`Sources::Interactive`: never MCP clients), and every
+    // front-end with write access can list turns and undo a turn. Answering a permission
+    // request is the window's alone (`Sources::UiOnly`).
     lector_agent::commands::register(&core);
     core
 }

@@ -4,9 +4,10 @@
 //! 1. [`Scheduler::begin_quit`]: everything that is not a write is cancelled at once (reads,
 //!    computations, debounces), so the writes get the workers.
 //! 2. [`Scheduler::drain`]: writes ([`AtQuit::Drain`]: saves, git writes, writing commands,
-//!    session saves, terminal kill escalation) finish, queued ones run, up to
-//!    [`QuitBounds::drain`]; network writes ([`AtQuit::DrainBriefly`]: push and other sync
-//!    commands, forge comments, agent cancel/undo) only up to [`QuitBounds::network_grace`],
+//!    session saves, terminal kill escalation, undoing an agent turn) finish, queued ones run
+//!    (git writes still one per repository, in order), up to [`QuitBounds::drain`]; network
+//!    writes ([`AtQuit::DrainBriefly`]: push and other sync commands, forge comments, stopping
+//!    an agent turn) only up to [`QuitBounds::network_grace`],
 //!    since they can hang. Child processes are still alive here, so a `git commit` is not
 //!    killed halfway.
 //! 3. Every supervised child process tree is stopped (`TERM`, `KILL` after
@@ -14,7 +15,10 @@
 //! 4. [`Scheduler::shutdown`] cancels what is left and waits [`QuitBounds::scheduler`] for its
 //!    threads.
 //!
-//! Writes given up on are logged and written to the crash log (`lector health`). Owner threads
+//! Writes given up on are logged and written to the crash log (`lector health`) with their kind,
+//! what they were (the command, e.g. `git.commit`) and their repository, and whether they were
+//! still running (a commit whose hook was still running may land after the process exits, so
+//! the next start can tell the user to check). Owner threads
 //! made with `lector_base::thread::spawn_named` end with the resource they own; the ones still
 //! alive are reported.
 
@@ -23,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lector_base::thread::{threads, ThreadInfo};
 
-use crate::scheduler::{AtQuit, JobKind, Scheduler};
+use crate::scheduler::{AbandonedWrite, Scheduler};
 
 /// How long each step of [`shutdown`] may take. The worst case is the sum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +60,7 @@ pub struct ShutdownReport {
     pub cancelled: usize,
     /// Writes given up on (one entry per job): still running or queued at the drain bound, or
     /// network writes past their grace.
-    pub abandoned: Vec<JobKind>,
+    pub abandoned: Vec<AbandonedWrite>,
     /// Whether every scheduler thread exited within [`QuitBounds::scheduler`].
     pub scheduler_stopped: bool,
     /// Owner threads still alive afterwards (diagnostics; the process exits anyway).
@@ -107,20 +111,13 @@ pub fn shutdown_with(
 }
 
 /// Logs the writes given up on at quit and records them in the crash log.
-fn report_abandoned(kinds: &[JobKind], crash_dir: Option<&Path>) {
-    let list = kinds
+fn report_abandoned(writes: &[AbandonedWrite], crash_dir: Option<&Path>) {
+    let list = writes
         .iter()
-        .map(|k| {
-            let how = if k.at_quit() == AtQuit::DrainBriefly {
-                "network grace"
-            } else {
-                "drain bound"
-            };
-            format!("{k:?} ({how})")
-        })
+        .map(AbandonedWrite::to_string)
         .collect::<Vec<_>>()
-        .join(", ");
-    let message = format!("quit gave up on {} write(s): {list}", kinds.len());
+        .join("; ");
+    let message = format!("quit gave up on {} write(s): {list}", writes.len());
     tracing::error!("{message}");
     let Some(dir) = crash_dir else {
         return;

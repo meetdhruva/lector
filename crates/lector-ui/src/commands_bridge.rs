@@ -177,7 +177,7 @@ pub fn palette_entries(ctx: &CommandContext) -> Vec<PaletteEntry> {
         .filter_map(|c| {
             let spec = c.spec();
             // A UI flow, or a UI-only command its own view fronts, is not a palette row.
-            if spec.ui_flow.is_some() || spec.sources == Sources::UiOnly {
+            if spec.ui_flow.is_some() || spec.allowed_sources() == Sources::UiOnly {
                 return None;
             }
             let needs_args = spec

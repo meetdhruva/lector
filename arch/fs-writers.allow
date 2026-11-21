@@ -1,0 +1,9 @@
+# Files of the UI crates, lector-mcp, lector-cli and lector-agent that write files themselves
+# (`fs::write`, `File::create`, `OpenOptions`, `lector_fs::write_atomic`, the confined write of
+# `lector_fs::confine`) instead of going through a lector-app command (ADR 0002, ADR 0010 item 8).
+# Each entry needs a reason; an entry that exempts nothing is an error.
+#
+# Agent writes are the known second write path of ADR 0010 ("Not decided here": saving a document
+# and agent file writes are write paths beside the command registry, with their own backup and
+# journal logic). They are listed so that they stay visible and are counted in the rule output.
+crates/lector-agent/src/session.rs   # fs/write_text_file: confined, backed up and journaled; ADR 0010 known gap

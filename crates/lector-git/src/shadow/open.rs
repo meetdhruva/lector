@@ -25,15 +25,19 @@ impl ShadowRepo {
                 )));
             }
         }
+        // Private (ADR 0010): the shadow holds backups of git-ignored files such as `.env`.
+        // Directories are created `0700`, and `core.sharedRepository=0600` makes git itself
+        // create every later file `0600` and directory `0700`, whatever the umask.
         if !self.git_dir.join("HEAD").is_file() {
             if let Some(parent) = self.git_dir.parent() {
-                fs::create_dir_all(parent)?;
+                lector_base::private::create_dir_all(parent)?;
             }
             let mut cmd = self.base_command();
-            cmd.args(["init", "--bare", "-q", "--template="])
+            cmd.args(["init", "--bare", "-q", "--template=", "--shared=0600"])
                 .arg(&self.git_dir);
             exec(cmd, "git init", None)?;
         }
+        self.ensure_private()?;
         // Alternates: the user's objects are read-only here; keep the file in sync with
         // where the objects are now (the repository may have moved).
         let alternates = self.git_dir.join("objects").join("info").join("alternates");
@@ -44,14 +48,38 @@ impl ShadowRepo {
         let wanted = format!("{}\n", alternates_entry(&user_objects));
         if fs::read_to_string(&alternates).ok().as_deref() != Some(wanted.as_str()) {
             if let Some(parent) = alternates.parent() {
-                fs::create_dir_all(parent)?;
+                lector_base::private::create_dir_all(parent)?;
             }
-            fs::write(&alternates, wanted)?;
+            lector_base::private::write(&alternates, wanted.as_bytes())?;
         }
         let marker = self.git_dir.join("lector-workdir");
         let workdir_line = format!("{}\n", self.workdir.display());
         if fs::read_to_string(&marker).ok().as_deref() != Some(workdir_line.as_str()) {
-            fs::write(&marker, workdir_line)?;
+            lector_base::private::write(&marker, workdir_line.as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+impl ShadowRepo {
+    /// Makes a shadow repository created by an older Lector private: sets
+    /// `core.sharedRepository=0600` when it is missing and narrows the repository directory
+    /// (and its parent, `<data dir>/shadow`) to `0700`. Objects written before keep their mode
+    /// but are unreachable for other users through the narrowed directory.
+    fn ensure_private(&self) -> Result<()> {
+        let config = fs::read_to_string(self.git_dir.join("config")).unwrap_or_default();
+        if !config.contains("sharedRepository = 0600")
+            && !config.contains("sharedrepository = 0600")
+        {
+            let mut cmd = self.shadow_git();
+            cmd.args(["config", "core.sharedRepository", "0600"]);
+            exec(cmd, "git config", None)?;
+        }
+        for dir in [Some(self.git_dir.as_path()), self.git_dir.parent()]
+            .into_iter()
+            .flatten()
+        {
+            lector_base::private::narrow_dir(dir)?;
         }
         Ok(())
     }

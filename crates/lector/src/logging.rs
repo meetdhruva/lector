@@ -3,7 +3,7 @@
 //! [`MAX_LOG_BYTES`] it is renamed to `lector.log.old` (replacing the previous
 //! one) and a fresh file is started, at startup and while running.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,14 +21,15 @@ pub struct LogFile {
 impl LogFile {
     /// Opens (appending) `path`, rotating it first if it is already too big.
     pub fn open(path: PathBuf, max_bytes: u64) -> io::Result<LogFile> {
+        // Owner-only (ADR 0010): `lector_base::private` creates the directory 0700, the log 0600.
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            lector_base::private::create_dir_all(dir)?;
         }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         if size >= max_bytes {
             rotate(&path)?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = lector_base::private::open_append(&path)?;
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(LogFile {
             path,
@@ -44,12 +45,8 @@ impl LogFile {
         if let Some((_, size)) = state.as_ref() {
             if size + buf.len() as u64 > self.max_bytes {
                 *state = None;
-                let reopened = rotate(&self.path).and_then(|()| {
-                    OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&self.path)
-                });
+                let reopened =
+                    rotate(&self.path).and_then(|()| lector_base::private::open_append(&self.path));
                 if let Ok(file) = reopened {
                     *state = Some((file, 0));
                 }

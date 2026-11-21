@@ -68,6 +68,31 @@ impl std::fmt::Debug for AppCore {
     }
 }
 
+/// Narrows Lector's data directory `dir` and the directories directly in it (shadow
+/// repositories, health, crash reports, askpass...) to owner-only (`0700`) where they are wider,
+/// logging each one (`lector_base::private::narrow_dir`). Nothing is created.
+pub(crate) fn narrow_data_dir(dir: &std::path::Path) {
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        dirs.extend(
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path()),
+        );
+    }
+    for d in dirs {
+        match lector_base::private::narrow_dir(&d) {
+            Ok(true) => tracing::info!(
+                "{} was readable by other users; narrowed to owner-only (0700)",
+                d.display()
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("cannot make {} owner-only: {e}", d.display()),
+        }
+    }
+}
+
 impl AppCore {
     /// The process-wide core (GUI): global scheduler, the user's database.
     pub fn global() -> AppCore {
@@ -109,6 +134,16 @@ impl AppCore {
                 extensions: RwLock::new(HashMap::new()),
             }),
         };
+        // Lector's data is private (ADR 0010): a data directory left wider by an older version
+        // or a 022 umask is narrowed to owner-only, once, with a log line.
+        let data_dir = match (&opts.data_dir, opts.in_memory_db) {
+            (Some(dir), _) => Some(dir.clone()),
+            (None, false) => Some(lector_config::paths::data_dir()),
+            (None, true) => None,
+        };
+        if let Some(dir) = data_dir {
+            narrow_data_dir(&dir);
+        }
         // The activity journal records every write command.
         match (opts.data_dir, opts.in_memory_db) {
             (Some(dir), _) => {

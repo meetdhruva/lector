@@ -94,11 +94,7 @@ impl ShadowRepo {
         let path = self.git_dir.join("lector.lock");
         let started = std::time::Instant::now();
         loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
+            match lector_base::private::create_new(&path) {
                 Ok(mut file) => {
                     let _ = writeln!(file, "{}", std::process::id());
                     return Ok(LockGuard(path));

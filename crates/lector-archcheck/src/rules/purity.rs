@@ -3,10 +3,14 @@
 //! Applies to the non-test code of `crates/lector-review` once it exists (until then the rule
 //! prints a notice and finds nothing). Flags:
 //!
-//! * `static mut`,
-//! * any `static` item whose name is not in `arch/review-statics.allow` (regex and
-//!   tree-sitter query tables in `OnceLock` are allowed by name), and `OnceLock`, `LazyLock`,
-//!   `Lazy`, `OnceCell` or `LazyCell` anywhere outside such an allowed item,
+//! * **every `static` item**, `static mut` and `static ref` (`lazy_static!`) and the statics
+//!   inside `thread_local!` included, whatever its type (`OnceLock`, `LazyLock`, `Mutex`,
+//!   `RwLock`, atomics, `Cell`, a plain `u32`): it needs an entry `NAME: Type` in
+//!   `arch/review-statics.allow`, and **both the name and the type must match** (types compare
+//!   without whitespace), so a second static reusing an allowed name, or an allowed name whose
+//!   type was changed to something mutable, is reported. An entry that matches no static is a
+//!   violation too. `OnceLock`, `LazyLock`, `Lazy`, `OnceCell` or `LazyCell` anywhere outside an
+//!   allowed item are reported as before,
 //! * `thread::spawn`, `thread::Builder`, `.spawn_scoped(`,
 //! * **writes through a handle** (step 2), in three sub-rules:
 //!   * (a) a call of the `lector-git` write API: the list `writes --list-api` prints, matched by
@@ -29,20 +33,21 @@
 //!
 //! What it cannot see: state hidden in a dependency, interior mutability in a `const`, a write
 //! through a trait object or a closure stored in a variable, `write_all` on a file handle that
-//! was opened elsewhere (opening for write is flagged where it happens), and calls renamed on
-//! import (`use x as y`). Reading through the `lector-git`/`lector-fs` handles is allowed by
+//! was opened elsewhere (opening for write is flagged where it happens), and calls hidden by a
+//! macro. Calls renamed on import (`use x as y`) are resolved (see `crate::alias`). Reading through the `lector-git`/`lector-fs` handles is allowed by
 //! the ADR. Test code is skipped; when the lexer cannot tell whether code is test-only it is
 //! treated as production.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::alias::{Globals, Resolver};
 use crate::config::{AllowList, Config};
 use crate::lexer::TokKind;
 use crate::report::{RuleOutput, Unit, Violation};
-use crate::rules::thread_spawn_at;
+use crate::rules::detect::{fs_writes, process_uses, thread_spawns, ProcessUse};
 use crate::rules::writes::{
-    arg_count, derive_write_api, git_write_calls, param_count, process_uses,
-    receiver_name_contains, takes_self, ProcessUse, WriteApi,
+    arg_count, derive_write_api, git_write_calls, param_count, receiver_name_contains, takes_self,
+    WriteApi,
 };
 use crate::source::SourceFile;
 
@@ -52,20 +57,6 @@ pub const RULE: &str = "purity";
 /// Directory of the crate the rule applies to.
 pub const CRATE_DIR: &str = "crates/lector-review/";
 
-const FS_WRITES: &[&str] = &[
-    "write",
-    "remove_file",
-    "remove_dir",
-    "remove_dir_all",
-    "rename",
-    "copy",
-    "create_dir",
-    "create_dir_all",
-    "hard_link",
-    "soft_link",
-    "symlink",
-    "set_permissions",
-];
 const LAZY_TYPES: &[&str] = &["OnceLock", "LazyLock", "Lazy", "OnceCell", "LazyCell"];
 
 /// Receiver names (substrings) that make a call of an ambiguous store-writing name a hit.
@@ -103,7 +94,7 @@ pub struct StoreApi {
 /// Everything `purity` needs besides the file itself.
 #[derive(Debug, Clone, Default)]
 pub struct PurityApis {
-    /// Statics `lector-review` may declare, by name.
+    /// Statics `lector-review` may declare: `NAME: Type` entries.
     pub statics: AllowList,
     /// The `lector-git` write API (the `writes` rule's).
     pub git: WriteApi,
@@ -236,16 +227,63 @@ pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
         );
     }
     let apis = PurityApis::derive(files, cfg);
-    let found = files
+    let globals = Globals::build(files);
+    let mut found: Vec<Violation> = files
         .iter()
         .filter(|f| f.path.starts_with(CRATE_DIR))
-        .flat_map(|f| scan_file(f, &apis))
+        .flat_map(|f| scan_file_with(f, &apis, &globals))
         .collect();
+    found.extend(apis.statics.stale_violations(RULE, &|_| false));
     RuleOutput::new(RULE, found, Unit::Count)
 }
 
-/// Findings in one file of the review crate.
+/// Findings in one file of the review crate (only the file's own names resolve).
 pub fn scan_file(f: &SourceFile, apis: &PurityApis) -> Vec<Violation> {
+    scan_file_with(f, apis, &Globals::default())
+}
+
+fn normalize_type(s: &str) -> String {
+    s.split_whitespace().collect()
+}
+
+/// The declared type of the `static` whose name is at `name_idx` (tokens after `:` up to the `=`
+/// or `;`), and the index of the token that ends the item (`;`, at brace depth zero).
+fn static_type_and_end(f: &SourceFile, name_idx: usize) -> (String, usize) {
+    let n = f.tokens().len();
+    let mut j = name_idx + 1;
+    let mut ty = String::new();
+    if f.tok(j) == ":" {
+        j += 1;
+        let mut angle = 0usize;
+        while j < n {
+            match f.tok(j) {
+                "<" => angle += 1,
+                ">" => angle = angle.saturating_sub(1),
+                "=" if angle == 0 => break,
+                ";" => break,
+                _ => {}
+            }
+            ty.push_str(f.tok(j));
+            ty.push(' ');
+            j += 1;
+        }
+    }
+    let mut depth = 0usize;
+    while j < n {
+        match f.tok(j) {
+            "{" | "(" | "[" => depth += 1,
+            "}" | ")" | "]" => depth = depth.saturating_sub(1),
+            ";" if depth == 0 => break,
+            _ => {}
+        }
+        j += 1;
+    }
+    (normalize_type(&ty), j)
+}
+
+/// Findings in one file of the review crate, with the workspace's re-export table.
+pub fn scan_file_with(f: &SourceFile, apis: &PurityApis, globals: &Globals) -> Vec<Violation> {
+    let r = Resolver::new(f, globals);
     let mut out = Vec::new();
     let n = f.tokens().len();
     let mut i = 0;
@@ -257,47 +295,30 @@ pub fn scan_file(f: &SourceFile, apis: &PurityApis) -> Vec<Violation> {
         let t = f.tok(i);
         let mut v = |what: String| out.push(Violation::new(RULE, &f.path, f.line(i), what));
         if t == "static" && f.tokens()[i].kind == TokKind::Ident {
-            if f.tok(i + 1) == "mut" {
-                v("`static mut` in lector-review (ADR 0001)".to_string());
+            let mut j = i + 1;
+            let is_mut = f.tok(j) == "mut";
+            if is_mut || f.tok(j) == "ref" {
+                j += 1;
+            }
+            let name = f.tok(j).to_string();
+            let (ty, end) = static_type_and_end(f, j);
+            let listed = apis
+                .statics
+                .pairs()
+                .iter()
+                .any(|(n2, t2)| *n2 == name && normalize_type(t2) == ty);
+            if listed {
+                apis.statics.mark_pair(&name, &ty);
+                // Skip the whole allowed item, including its type and initialiser.
+                i = end;
             } else {
-                let name = f.tok(i + 1).to_string();
-                if apis.statics.contains(&name) {
-                    // Skip the whole allowed item, including its `OnceLock` type.
-                    while i < n && f.tok(i) != ";" {
-                        i += 1;
-                    }
-                } else {
-                    v(format!("`static {name}` in lector-review; the crate is stateless (ADR 0001); allow immutable tables by name in arch/review-statics.allow"));
-                }
+                let kind = if is_mut { "static mut" } else { "static" };
+                v(format!("`{kind} {name}: {ty}` in lector-review; the crate is stateless (ADR 0001); an immutable table needs the entry `{name}: {ty}` (name and type) in arch/review-statics.allow"));
             }
         } else if LAZY_TYPES.contains(&t) {
             v(format!(
                 "`{t}` in lector-review outside an allowed static (ADR 0001)"
             ));
-        } else if let Some(what) = thread_spawn_at(f, i) {
-            v(format!("`{what}` in lector-review: no threads (ADR 0001)"));
-        } else if f.seq(i, &["fs", "::"]) && FS_WRITES.contains(&f.tok(i + 2)) {
-            v(format!(
-                "`fs::{}` in lector-review: no writes (ADR 0001)",
-                f.tok(i + 2)
-            ));
-        } else if f.seq(i, &["fs", "::", "{"]) {
-            let close = f.close_of(i + 2);
-            if let Some(k) = (i + 3..close).find(|k| FS_WRITES.contains(&f.tok(*k))) {
-                v(format!(
-                    "`fs::{}` imported in lector-review: no writes (ADR 0001)",
-                    f.tok(k)
-                ));
-            }
-        } else if f.seq(i, &["File", "::"])
-            && matches!(f.tok(i + 2), "create" | "create_new" | "options")
-        {
-            v(format!(
-                "`File::{}` in lector-review: no writes (ADR 0001)",
-                f.tok(i + 2)
-            ));
-        } else if t == "OpenOptions" {
-            v("`OpenOptions` in lector-review: no writes (ADR 0001)".to_string());
         } else if apis.store.types.contains(t) && f.tokens()[i].kind == TokKind::Ident {
             v(format!(
                 "`{t}` in lector-review: a store handle can write; viewed marks and settings come in as values (ADR 0001)"
@@ -327,7 +348,23 @@ pub fn scan_file(f: &SourceFile, apis: &PurityApis) -> Vec<Violation> {
         }
         i += 1;
     }
-    for (i, name) in git_write_calls(f, &apis.git, &apis.git_ambiguous) {
+    for h in thread_spawns(f, &r) {
+        out.push(Violation::new(
+            RULE,
+            &f.path,
+            f.line(h.tok),
+            format!("{} in lector-review: no threads (ADR 0001)", h.describe()),
+        ));
+    }
+    for h in fs_writes(f, &r, true) {
+        out.push(Violation::new(
+            RULE,
+            &f.path,
+            f.line(h.tok),
+            format!("{} in lector-review: no writes (ADR 0001)", h.describe()),
+        ));
+    }
+    for (i, name) in git_write_calls(f, &apis.git, &apis.git_ambiguous, &r) {
         out.push(Violation::new(
             RULE,
             &f.path,
@@ -335,16 +372,21 @@ pub fn scan_file(f: &SourceFile, apis: &PurityApis) -> Vec<Violation> {
             format!("`{name}(` is a lector-git write; lector-review computes, lector-app applies (ADR 0001, ADR 0002)"),
         ));
     }
-    for (i, hit) in process_uses(f) {
+    for (i, hit, guess) in process_uses(f, &r) {
         let what = match hit {
             ProcessUse::Process(t) => t,
             ProcessUse::StdCommand => "std::process::Command".to_string(),
+        };
+        let note = if guess {
+            " (unresolved name, treated as a hit)"
+        } else {
+            ""
         };
         out.push(Violation::new(
             RULE,
             &f.path,
             f.line(i),
-            format!("`{what}` in lector-review: no processes (ADR 0001)"),
+            format!("`{what}`{note} in lector-review: no processes (ADR 0001)"),
         ));
     }
     out.sort_by_key(|v| v.line);
@@ -413,7 +455,7 @@ mod tests {
     #[test]
     fn statics_and_lazy_state() {
         let src = "static mut COUNTER: u32 = 0;\nstatic RE: OnceLock<Regex> = OnceLock::new();\nstatic CACHE: LazyLock<Mutex<Map>> = LazyLock::new(|| m());\nfn f() { let c = OnceLock::new(); }\nconst K: u8 = 1;\nfn g(x: &'static str) {}";
-        let v = run(src, &["RE"]);
+        let v = run(src, &["RE: OnceLock<Regex>"]);
         assert_eq!(
             v.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
             [1, 3, 3, 3, 4]
@@ -521,5 +563,81 @@ mod tests {
         assert!(run(src, &[]).is_empty());
         let src = "#[cfg(test)] fn a() {}\nfn b() { fs::write(p, b); }";
         assert_eq!(lines(src), [2]);
+    }
+
+    // Static allowances are `NAME: Type`; every static needs one.
+
+    fn statics_run(src: &str, entries: &[&str]) -> Vec<(u32, String)> {
+        let mut a = apis(&[]);
+        a.statics = AllowList::from_entries(entries.iter().copied());
+        scan_file(&file("crates/lector-review/src/a.rs", src), &a)
+            .into_iter()
+            .map(|v| (v.line, v.message))
+            .collect()
+    }
+
+    #[test]
+    fn a_static_needs_its_name_and_its_type() {
+        let src = "static RE: OnceLock<Regex> = OnceLock::new();";
+        assert!(statics_run(src, &["RE: OnceLock<Regex>"]).is_empty());
+        // whitespace in the entry does not matter
+        assert!(statics_run(src, &["RE:   OnceLock < Regex >"]).is_empty());
+        // right name, wrong type: a mutable static reusing an allowed name
+        let v = statics_run(
+            "static RE: Mutex<Vec<String>> = Mutex::new(Vec::new());",
+            &["RE: OnceLock<Regex>"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].1.contains("RE: Mutex<Vec<String>>"), "{}", v[0].1);
+        // right type, wrong name
+        let wrong_name = statics_run(src, &["OTHER: OnceLock<Regex>"]);
+        assert!(
+            wrong_name.iter().any(|(_, m)| m.contains("static RE")),
+            "{wrong_name:?}"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_static_needs_an_entry() {
+        let src = "static A: AtomicU32 = AtomicU32::new(0);\nstatic mut B: u8 = 0;\nstatic C: RwLock<u8> = RwLock::new(0);\nstatic D: Cell<u8> = x;\nthread_local! { static E: RefCell<u8> = RefCell::new(0); }\nlazy_static! { static ref F: Mutex<u8> = Mutex::new(0); }\nstatic G: u32 = 1;";
+        let v = statics_run(src, &[]);
+        let lines: Vec<u32> = v.iter().map(|(l, _)| *l).collect();
+        assert_eq!(lines, [1, 2, 3, 4, 5, 6, 7], "{v:?}");
+        let ok = statics_run(
+            "static A: AtomicU32 = AtomicU32::new(0);\nthread_local! { static E: RefCell<u8> = RefCell::new(0); }",
+            &["A: AtomicU32", "E: RefCell<u8>"],
+        );
+        assert!(ok.is_empty(), "{ok:?}");
+    }
+
+    #[test]
+    fn an_entry_that_matches_no_static_is_a_violation() {
+        let files = [file(
+            "crates/lector-review/src/a.rs",
+            "static RE: OnceLock<Regex> = OnceLock::new();",
+        )];
+        let mut cfg = Config::default();
+        cfg.set_allow(
+            "review-statics",
+            AllowList::from_entries([
+                "RE: OnceLock<Regex>",
+                "GONE: OnceLock<Regex>",
+                "RE: OnceLock<Other>",
+            ]),
+        );
+        let out = check(&files, &cfg);
+        assert_eq!(out.violations.len(), 2, "{:?}", out.violations);
+        assert!(out
+            .violations
+            .iter()
+            .all(|v| v.message.contains("stale allowance")));
+    }
+
+    // Alias bypasses.
+
+    #[test]
+    fn bypass_renamed_imports_in_the_review_crate() {
+        let src = "use std::fs as f;\nuse std::thread as t;\nuse std::process as p;\nfn g() {\n f::write(a, b);\n t::spawn(h);\n p::Command::new(\"x\");\n}";
+        assert_eq!(lines(src), [5, 6, 7]);
     }
 }

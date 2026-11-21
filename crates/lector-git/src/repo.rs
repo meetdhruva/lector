@@ -114,6 +114,15 @@ impl Repo {
         repo
     }
 
+    /// `user.name` from the repository's configuration (with the user's global and system
+    /// configuration, as git resolves it), read through gix: no process, no lock. `None` when it
+    /// is not set or empty.
+    pub fn user_name(&self) -> Option<String> {
+        let name = self.local().config_snapshot().string("user.name")?;
+        let name = name.to_str_lossy().trim().to_owned();
+        (!name.is_empty()).then_some(name)
+    }
+
     /// Error unless a working tree is present.
     pub(crate) fn require_workdir(&self) -> Result<&Path> {
         if self.inner.bare {

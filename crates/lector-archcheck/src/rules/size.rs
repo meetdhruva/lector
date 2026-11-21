@@ -20,7 +20,7 @@ pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
     let mut found = Vec::new();
     for f in files {
         let lines = f.line_count();
-        if lines > LIMIT && !generated.matches_path(&f.path) {
+        if lines > LIMIT && !generated.exempt_path(&f.path) {
             found.push(
                 Violation::new(
                     RULE,
@@ -32,6 +32,7 @@ pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
             );
         }
     }
+    found.extend(generated.stale_violations(RULE, &|_| false));
     RuleOutput::new(RULE, found, Unit::Files)
 }
 

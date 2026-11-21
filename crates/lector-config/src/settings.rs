@@ -478,6 +478,9 @@ impl Default for UiSettings {
 /// Code hosts (v0.6, `lector-forge`): which hosts are GitHub Enterprise / self-hosted GitLab,
 /// API URL overrides and the default pull-request filter. Only the user's own settings file
 /// may set it (a project's `.lector/settings.toml` could otherwise send tokens elsewhere).
+/// Only `github.com` / `gitlab.com` and the hosts listed here are forges; a listed host gets
+/// only its own token (`LECTOR_FORGE_TOKEN_<HOST>`, `gh` / `glab` for that host, or its keychain
+/// entry), never `GITHUB_TOKEN` / `GITLAB_TOKEN` (see `lector_forge::auth_token`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ForgeSettings {
@@ -792,9 +795,13 @@ auto_allow_reads = true
 # env = { GEMINI_API_KEY = "..." }
 
 [forge]
-# Pull requests (GitHub) and merge requests (GitLab). github.com and gitlab.com are always
-# known; list GitHub Enterprise and self-hosted GitLab hosts here. Tokens come from
-# GITHUB_TOKEN / GH_TOKEN / GITLAB_TOKEN, then `gh` / `glab`, then the OS keychain.
+# Pull requests (GitHub) and merge requests (GitLab). Only github.com and gitlab.com are known
+# without listing; a host is never guessed from its name. List GitHub Enterprise and
+# self-hosted GitLab hosts here. Tokens: github.com reads GITHUB_TOKEN / GH_TOKEN, gitlab.com
+# GITLAB_TOKEN / GITLAB_PRIVATE_TOKEN, then `gh` / `glab`, then the OS keychain. A host listed
+# here never gets those variables: it needs its own token, from LECTOR_FORGE_TOKEN_<HOST>
+# (e.g. LECTOR_FORGE_TOKEN_CODE_EXAMPLE_COM for code.example.com), `gh` / `glab` logged in to
+# that host, or the keychain entry for that host. Tokens travel only over HTTPS.
 # Only your own settings file may set [forge].
 github_hosts = []
 gitlab_hosts = []

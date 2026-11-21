@@ -175,17 +175,22 @@ fn read_commands_write_nothing() {
         if spec.writes {
             continue;
         }
-        // UI-only commands (fronted by a view) are not listed for, and refused to, every
-        // other caller, whatever the arguments.
-        if spec.sources != Sources::All {
+        // Restricted commands (UI-only, or interactive: network, credentials, agents) are not
+        // listed for, and refused to, every caller their sources exclude, whatever the
+        // arguments.
+        let sources = spec.allowed_sources();
+        if sources != Sources::All {
             for source in [Source::Internal, Source::Cli, Source::Mcp, Source::Agent] {
+                if sources.allows(source) {
+                    continue;
+                }
                 assert!(
                     !core
                         .registry()
                         .list_for(source)
                         .iter()
                         .any(|c| c.spec().id == spec.id),
-                    "UI-only `{}` is listed for {source:?}",
+                    "restricted `{}` is listed for {source:?}",
                     spec.id
                 );
                 let cx = CommandContext::new(core.clone(), Some(project.clone()), source);
@@ -194,7 +199,7 @@ fn read_commands_write_nothing() {
                         core.registry().invoke(spec.id, json!({}), &cx),
                         Err(CommandError::Unavailable(_))
                     ),
-                    "UI-only `{}` ran for {source:?}",
+                    "restricted `{}` ran for {source:?}",
                     spec.id
                 );
             }

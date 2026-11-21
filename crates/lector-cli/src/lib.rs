@@ -51,7 +51,9 @@
 //!             moved?: [{old, new, reindented}]],
 //!            moves?: [{from: {path, lines}, to: {path, lines}, reindented}]}  // only with --moved
 //! commands  {commands: [CommandSpec::to_json(): id, title, category, args (JSON Schema), writes?,
-//!            destructive?, undoable?, ui_action?]}
+//!            destructive?, undoable?, not_undoable?, ui_action?, ui_flow?,
+//!            sources: all|interactive|ui_only, network?, credentials?, steers_agent?,
+//!            answers_for_user?]}   // only commands the CLI may run (`list_for(Source::Cli)`)
 //! run       {ok, command, summary, data, paths, journal_id?, undoable?}
 //! activity  {entries: [{id, time (RFC 3339 UTC), command, source: ui|cli|mcp|agent|internal, summary,
 //!             repo, paths, args, undoable, undone, undo_of?, undone_by?}]}  // newest first; current repo unless --all

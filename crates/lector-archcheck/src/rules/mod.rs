@@ -3,6 +3,7 @@
 
 pub mod background;
 pub mod deps;
+pub mod detect;
 pub mod dupes;
 pub mod graph;
 pub mod hygiene;
@@ -12,28 +13,12 @@ pub mod state;
 pub mod threads;
 pub mod writes;
 
-use crate::source::SourceFile;
-
 /// `crates/lector-ui*/src/**`: the UI crates' own sources.
 pub fn is_ui_src(path: &str) -> bool {
     let mut parts = path.split('/');
     parts.next() == Some("crates")
         && parts.next().is_some_and(|c| c.starts_with("lector-ui"))
         && parts.next() == Some("src")
-}
-
-/// If a thread-spawning construct starts at token `i`, say which: `thread::spawn`,
-/// `thread::Builder` or `.spawn_scoped(`.
-pub fn thread_spawn_at(f: &SourceFile, i: usize) -> Option<&'static str> {
-    if f.seq(i, &["thread", "::", "spawn"]) {
-        Some("thread::spawn")
-    } else if f.seq(i, &["thread", "::", "Builder"]) {
-        Some("thread::Builder")
-    } else if f.seq(i, &[".", "spawn_scoped", "("]) {
-        Some(".spawn_scoped(")
-    } else {
-        None
-    }
 }
 
 /// Text of a string token without its quotes and prefix (escapes are left as written).
@@ -48,8 +33,8 @@ pub fn str_value(text: &str) -> &str {
 }
 
 #[cfg(test)]
-pub(crate) fn file(path: &str, src: &str) -> SourceFile {
-    SourceFile::new(path, src)
+pub(crate) fn file(path: &str, src: &str) -> crate::source::SourceFile {
+    crate::source::SourceFile::new(path, src)
 }
 
 #[cfg(test)]

@@ -9,8 +9,12 @@
 //! * [`watch`] reports debounced file changes and git state changes.
 //!
 //! * [`write_atomic`] saves bytes atomically; [`stamp`] detects changes on disk.
+//! * [`confine`] is the one check that a caller-supplied path lies inside a root (agents, MCP,
+//!   command path arguments), and reads or writes such a path without following a link that
+//!   appeared after the check.
 //!
-//! Nothing but [`write_atomic`] writes, and it only runs on an explicit save.
+//! Nothing but [`write_atomic`] and [`confine::Confined::write`] writes, and both run only on an
+//! explicit request (a save, an agent's or a command's write).
 //!
 //! [`load_file`] refuses non-regular files (FIFOs, sockets, devices) with
 //! `InvalidInput` instead of blocking on them. The watcher does not follow symlinks (like
@@ -20,12 +24,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod confine;
 mod decode;
 mod kind;
 mod load;
 mod watch;
 mod write;
 
+pub use confine::{Access, ConfineError, Confined, Confinement, CreateDirs};
 pub use decode::{decode, UTF_8};
 pub use kind::{detect_kind, has_utf16_bom, is_binary, FileKind, ImageFormat, SNIFF_LEN};
 pub use load::{load_file, LoadedFile, BINARY};

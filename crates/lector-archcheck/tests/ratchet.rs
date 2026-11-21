@@ -68,6 +68,14 @@ pub fn bg(cx: &Cx) {
 }
 ";
 
+const ONE_IMPL: &str = r#"
+[[concept]]
+name = "cancel token"
+adr = "0005"
+owner = ["crates/lector-base/**"]
+struct = ["CancelToken"]
+"#;
+
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let r = dir.path();
@@ -94,6 +102,7 @@ fn fixture() -> tempfile::TempDir {
         &"pub fn f() {}\n".repeat(1501),
     );
     write(r, "arch/layers.toml", LAYERS);
+    write(r, "arch/one-impl.toml", ONE_IMPL);
     write(
         r,
         "docs/ARCHITECTURE.md",

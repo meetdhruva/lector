@@ -8,9 +8,11 @@
 //! [`run`] is the whole command line; `src/main.rs` only forwards `std::env::args`.
 #![forbid(unsafe_code)]
 
+pub mod alias;
 pub mod baseline;
 pub mod config;
 pub mod error;
+pub mod items;
 pub mod lexer;
 pub mod meta;
 pub mod report;
@@ -242,9 +244,8 @@ fn execute(cli: &Cli, out: &mut dyn Write) -> Result<i32> {
     let cfg = Config::load(&root)?;
     if cli.list_api {
         let files = source::load_sources(&root)?;
-        let api = rules::writes::derive_write_api(&files, &cfg.allow("git-read"));
-        for name in api.names.keys() {
-            emit(out, name)?;
+        for line in rules::writes::list_api(&files, &cfg) {
+            emit(out, &line)?;
         }
         return Ok(0);
     }
@@ -358,7 +359,10 @@ fn run_rule(name: &str, inputs: &mut Inputs<'_>) -> Result<RuleOutput> {
         }
         "writes" => rules::writes::check(inputs.files()?, cfg),
         "threads" => rules::threads::check(inputs.files()?, cfg),
-        "background" => rules::background::check(inputs.files()?, cfg),
+        "background" => {
+            let ws = inputs.workspace()?.clone();
+            rules::background::check(inputs.files()?, cfg, Some(&ws))
+        }
         "state" => rules::state::check(inputs.files()?, cfg),
         "dupes" => rules::dupes::check(inputs.files()?, cfg),
         "size" => rules::size::check(inputs.files()?, cfg),

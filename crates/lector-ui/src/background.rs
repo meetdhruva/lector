@@ -10,6 +10,12 @@
 //!   next polled): the job's [`CancelToken`] is set, a job that has not started never runs, a
 //!   running one sees the token. Keep the task in a field to keep the work alive;
 //!   [`BackgroundTask::detach`] lets the work finish without anyone waiting.
+//! * **Except for writes** ([`JobKind::is_write`]: a save, a stage, a commit, a discard, an
+//!   undo...): dropping their task detaches the job, which runs (or keeps running) to the end
+//!   with its result dropped, so closing the panel, tab or window that started a write the
+//!   user asked for never loses it (ADR 0010). Only
+//!   [`Scheduler::cancel_key`](lector_app::scheduler::Scheduler::cancel_key) cancels a queued
+//!   write.
 //! * **A result is delivered only if it is still wanted**: the task resolves to
 //!   `Err(JobError::Cancelled)` when the job was replaced by a newer one with the same key, its
 //!   subject was cancelled ([`cancel_subject`]) or the task was asked to stop, even if the job
@@ -91,8 +97,9 @@ pub fn view_key(kind: JobKind, id: EntityId) -> JobKey {
 }
 
 /// Runs `f` on the scheduler (lane by `key.kind`, `prio` as allowed for the kind) and
-/// delivers its result on the main thread. Dropping the returned task cancels the job; a
-/// replaced or cancelled job's result is never delivered (see the module docs).
+/// delivers its result on the main thread. Dropping the returned task cancels the job (a write
+/// is detached instead); a replaced or cancelled job's result is never delivered (see the
+/// module docs).
 pub fn background<C, T>(
     cx: &C,
     key: JobKey,
@@ -103,7 +110,57 @@ where
     C: BridgeContext + ?Sized,
     T: Send + 'static,
 {
+    let kind = key.kind;
     let handle = scheduler_for(&cx.background_executor_handle()).spawn(key, prio, f);
+    deliver_on_main(cx, kind, handle)
+}
+
+/// [`background`] for a write, with what it does (a command id such as `"git.commit"`): if
+/// quit has to give up on it, the crash log names it and its repository.
+pub fn background_described<C, T>(
+    cx: &C,
+    key: JobKey,
+    prio: Priority,
+    what: impl Into<String>,
+    f: impl FnOnce(&CancelToken) -> T + Send + 'static,
+) -> BackgroundTask<T>
+where
+    C: BridgeContext + ?Sized,
+    T: Send + 'static,
+{
+    let kind = key.kind;
+    let scheduler = scheduler_for(&cx.background_executor_handle());
+    let handle = scheduler.spawn_described(key, prio, what, f);
+    deliver_on_main(cx, kind, handle)
+}
+
+/// [`background`] on an explicit scheduler (tests that need real threads under GPUI's test
+/// dispatcher).
+#[cfg(any(test, feature = "test-support"))]
+pub fn background_on<C, T>(
+    scheduler: &Scheduler,
+    cx: &C,
+    key: JobKey,
+    prio: Priority,
+    f: impl FnOnce(&CancelToken) -> T + Send + 'static,
+) -> BackgroundTask<T>
+where
+    C: BridgeContext + ?Sized,
+    T: Send + 'static,
+{
+    let kind = key.kind;
+    deliver_on_main(cx, kind, scheduler.spawn(key, prio, f))
+}
+
+fn deliver_on_main<C, T>(
+    cx: &C,
+    kind: JobKind,
+    handle: lector_app::scheduler::JobHandle<T>,
+) -> BackgroundTask<T>
+where
+    C: BridgeContext + ?Sized,
+    T: Send + 'static,
+{
     let token = handle.token().clone();
     let task = cx.foreground_executor_handle().spawn(Delivery {
         token: token.clone(),
@@ -113,18 +170,22 @@ where
         token,
         task: Box::pin(task),
         done: false,
+        detach_on_drop: kind.detaches_on_drop(),
     }
 }
 
 /// The main-thread end of a job started with [`background`]: await it for the result.
-/// Dropping it before it resolved cancels the job immediately.
-#[must_use = "dropping a BackgroundTask cancels its job; keep it or detach() it"]
+/// Dropping it before it resolved cancels the job immediately, unless the job is a
+/// [write](JobKind::detaches_on_drop), which is detached.
+#[must_use = "dropping a BackgroundTask cancels its job (unless it writes); keep it or detach() it"]
 pub struct BackgroundTask<T> {
     token: CancelToken,
     /// Delivers the outcome on the main thread. Dropping it does not cancel the job (a dropped
     /// handle never does); this task's own `Drop` does, unless detached.
     task: Pin<Box<Task<Result<T, JobError>>>>,
     done: bool,
+    /// The job writes: dropping the task detaches it.
+    detach_on_drop: bool,
 }
 
 impl<T> BackgroundTask<T> {
@@ -150,7 +211,7 @@ impl<T> Future for BackgroundTask<T> {
 
 impl<T> Drop for BackgroundTask<T> {
     fn drop(&mut self) {
-        if !self.done {
+        if !self.done && !self.detach_on_drop {
             self.token.cancel();
         }
     }
@@ -344,6 +405,38 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    /// ADR 0010 item 4: a write whose task is dropped before it ran (its view closed) still
+    /// runs; a read dropped the same way does not.
+    #[gpui::test]
+    fn dropping_a_writes_task_detaches_it(cx: &mut TestAppContext) {
+        let wrote = Arc::new(AtomicUsize::new(0));
+        let read = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            for kind in [
+                JobKind::GitWrite,
+                JobKind::DocumentSave,
+                JobKind::ForgeWrite,
+            ] {
+                let w = wrote.clone();
+                drop(background(cx, key(kind, 1), Priority::Visible, move |_| {
+                    w.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            let r = read.clone();
+            drop(background(
+                cx,
+                key(JobKind::GitChangeset, 1),
+                Priority::Visible,
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+            ));
+        });
+        cx.run_until_parked();
+        assert_eq!(wrote.load(Ordering::SeqCst), 3, "every write ran");
+        assert_eq!(read.load(Ordering::SeqCst), 0, "the read was cancelled");
     }
 
     struct Probe(Subscription);

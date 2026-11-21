@@ -1128,19 +1128,12 @@ pub fn thread_json(t: &Thread) -> Value {
     })
 }
 
-/// The user's git name (read-only `git config`), or "you".
+/// The user's git name (`user.name`, read through `lector_git::Repo::user_name`: gix, no
+/// process), or "you".
 pub fn local_author(repo: &Path) -> String {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["config", "user.name"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
+    Repo::discover(repo)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|r| r.user_name())
         .unwrap_or_else(|| "you".into())
 }
 

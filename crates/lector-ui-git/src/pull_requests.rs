@@ -112,9 +112,9 @@ impl PrSession {
             "refspecs": forge.fetch_refspecs(&pr),
             "have": [pr.head_sha, pr.base_sha],
         });
-        if let Some(header) = token
-            .filter(|_| remote.remote_url.starts_with("http"))
-            .map(|t| lector_forge::git_auth_header(remote.kind, t))
+        // Only for the host the token belongs to, over HTTPS (ADR 0010).
+        let hosts = forge_hosts(&project.settings());
+        if let Some(header) = token.and_then(|t| lector_forge::fetch_auth_header(remote, &hosts, t))
         {
             args["http_header"] = serde_json::json!(header);
         }

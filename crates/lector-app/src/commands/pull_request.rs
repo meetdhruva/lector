@@ -186,7 +186,9 @@ fn fetch_pull_request() -> FnCommand {
                 &["url", "refspecs"],
             ),
         )
-        .ui_only(),
+        .ui_only()
+        .uses_network()
+        .uses_credentials(),
         |cx, args| {
             let repo = cx.require_repo()?;
             let url = args.get("url").and_then(Value::as_str).unwrap_or_default();

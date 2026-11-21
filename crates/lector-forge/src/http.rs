@@ -35,6 +35,9 @@ impl Client {
             .timeout_global(Some(Duration::from_secs(30)))
             .http_status_as_error(false)
             .user_agent(concat!("lector/", env!("CARGO_PKG_VERSION")))
+            // Never carry the token along a redirect (to any host). This is ureq's default;
+            // stated here so an upgrade cannot change it silently (pinned by a test).
+            .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .tls_config(
                 ureq::tls::TlsConfig::builder()
                     .root_certs(ureq::tls::RootCerts::PlatformVerifier)
@@ -129,6 +132,15 @@ impl Client {
                 host: self.host.clone(),
                 message,
                 help: match self.kind {
+                    _ if !crate::remote::is_public_forge_host(&self.host) => format!(
+                        "Set {} or run `{} auth login --hostname {}`.",
+                        crate::auth::host_env_var(&self.host),
+                        match self.kind {
+                            ForgeKind::Github => "gh",
+                            ForgeKind::Gitlab => "glab",
+                        },
+                        self.host.split(':').next().unwrap_or(&self.host)
+                    ),
                     ForgeKind::Github => "Set GITHUB_TOKEN or run `gh auth login`.".into(),
                     ForgeKind::Gitlab => "Set GITLAB_TOKEN or run `glab auth login`.".into(),
                 },
@@ -136,6 +148,17 @@ impl Client {
             404 => ForgeError::NotFound(what.to_string()),
             _ => ForgeError::Http { status, message },
         })
+    }
+
+    /// The token travels only over HTTPS, or to a loopback address (tests, local proxies).
+    fn check_transport(&self, url: &str) -> Result<()> {
+        if url.starts_with("https://") || is_loopback(url) {
+            return Ok(());
+        }
+        Err(ForgeError::Unsupported(format!(
+            "refusing to send a token over plain HTTP ({})",
+            origin(url)
+        )))
     }
 
     pub(crate) fn get(&self, path: &str) -> Result<Response> {
@@ -146,7 +169,9 @@ impl Client {
                 origin(path)
             )));
         }
-        let req = self.with_headers(self.agent.get(&self.url(path)));
+        let url = self.url(path);
+        self.check_transport(&url)?;
+        let req = self.with_headers(self.agent.get(&url));
         self.finish(path, req.call())
     }
 
@@ -179,6 +204,7 @@ impl Client {
 
     pub(crate) fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
         let url = self.url(path);
+        self.check_transport(&url)?;
         let payload = body.map(Value::to_string).unwrap_or_default();
         let result = match method {
             "POST" => self
@@ -318,6 +344,66 @@ mod tests {
             }
             other => panic!("expected a refusal, got {:?}", other.map(|r| r.json)),
         }
+    }
+
+    /// ADR 0010, item 2: a redirect never carries the `Authorization` header (ureq 3.5's
+    /// `RedirectAuthHeaders::Never`, set explicitly in [`Client::new`]), neither to another
+    /// server nor back to the same one.
+    #[test]
+    fn redirects_drop_the_authorization_header() {
+        use crate::mock::{MockServer, Route};
+        let other = MockServer::start(0, vec![Route::json("GET", "/landing", "{\"ok\":true}")])
+            .expect("mock");
+        let api = MockServer::start(
+            0,
+            vec![
+                Route::json("GET", "/away", "")
+                    .status(302)
+                    .header("Location", &format!("{}/landing", other.url())),
+                Route::json("GET", "/here", "")
+                    .status(307)
+                    .header("Location", "/same"),
+                Route::json("GET", "/same", "{\"ok\":true}"),
+            ],
+        )
+        .expect("mock");
+        let c = Client::new(
+            api.url(),
+            "github.com".into(),
+            ForgeKind::Github,
+            Token::new("s3cret"),
+        );
+        assert_eq!(c.get_json("/away").expect("followed")["ok"], true);
+        assert_eq!(c.get_json("/here").expect("followed")["ok"], true);
+        let first = api.requests();
+        assert!(first
+            .iter()
+            .filter(|r| r.target != "/same")
+            .all(|r| r.header("authorization") == Some("Bearer s3cret")));
+        let landed = other.requests();
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].header("authorization"), None);
+        let same = first.iter().find(|r| r.target == "/same").expect("same");
+        assert_eq!(same.header("authorization"), None);
+    }
+
+    /// The token is never sent over plain HTTP to a non-loopback host.
+    #[test]
+    fn tokens_need_https() {
+        let c = Client::new(
+            "http://code.corp/api/v3".into(),
+            "code.corp".into(),
+            ForgeKind::Github,
+            Token::new("secret"),
+        );
+        match c.get("/user") {
+            Err(ForgeError::Unsupported(m)) => assert!(m.contains("plain HTTP"), "{m}"),
+            other => panic!("expected a refusal, got {:?}", other.map(|r| r.json)),
+        }
+        assert!(matches!(
+            c.send("POST", "/x", None),
+            Err(ForgeError::Unsupported(_))
+        ));
     }
 
     #[test]

@@ -279,3 +279,15 @@ fn not_a_repository() {
     let err = lector_git::Repo::discover(&dir.path().join("missing")).unwrap_err();
     assert!(matches!(err, lector_git::Error::NotARepository(_)));
 }
+
+/// `user.name` comes from the repository configuration through the read API (gix), and a
+/// changed configuration is seen (ADR 0010: comment authors no longer spawn `git config`).
+#[test]
+fn user_name_is_read_from_the_configuration() {
+    let fx = Fixture::new();
+    let repo = fx.repo();
+    fx.git(&["config", "user.name", "Ada Lovelace"]);
+    assert_eq!(repo.user_name().as_deref(), Some("Ada Lovelace"));
+    fx.git(&["config", "user.name", "  "]);
+    assert_eq!(repo.user_name(), None);
+}

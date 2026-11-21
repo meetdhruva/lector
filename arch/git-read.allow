@@ -1,41 +1,114 @@
-# Public `self` methods of lector-git's Repo / ShadowRepo (write.rs, sync.rs, branch.rs,
-# conflict.rs, shadow.rs) that only READ. Everything else the `writes` rule derives from those
-# files is a write and may be called from a lector-app registry command only (ADR 0002).
-# Reviewed against the 0.7.1 source (each body read; none changes files, index, refs,
-# stashes, config or remotes of the user's repository).
+# Classification of the public surface of lector-git (ADR 0002, ADR 0010 item 8).
+#
+# `arch-check writes` scans ALL of crates/lector-git/src. Every `pub fn` of a handle type (methods,
+# associated functions, trait impl methods) and every `pub fn` free function is a WRITE unless it
+# is listed here as a read, as `Type::name`, `free::name` or a bare `name` (any type). A new
+# function therefore fails closed: callers outside lector-app command modules are reported until a
+# reviewer reads the body and lists it. Reviewed against the source of this tree (each body read;
+# none changes files, index, refs, stashes, config or remotes of the user's repository, and none
+# writes below the data dir). An entry for a function that no longer exists is stale and fails.
+#
+# `handle:Type` declares a type whose methods can act on a repository; `value:Type` declares a data
+# type with `pub fn`s that only compute from their fields (an inherent `impl` with `pub fn`s on a
+# type that is neither is reported, so a new handle type cannot slip in unclassified).
+# `crates/lector-git/src/shadow.rs` no longer has to hold every public method: any file below
+# lector-git/src is scanned.
 
-# write.rs / sync.rs / branch.rs / conflict.rs: Repo reads
-identity
-last_commit_message
-push_remote_for
-upstream_status
-branch_tip
-branch_upstream
-stash_at
-stash_index_of
-stash_paths
-stash_apply_paths
-operation
-merge_message
-conflicts
-conflict_stage
+handle:Repo   # the user's repository
+handle:ShadowRepo   # Lector's shadow repository of a worktree (its restore_* write the user's files)
 
-# shadow.rs: ShadowRepo reads (nothing is written; fingerprints hash the worktree only)
-note_of
-git_dir
-workdir
-snapshots
-contains
-kind
-entries
-index_entries
-file_at
-changes_between
-changes_to_worktree
-load
-fingerprints
-fingerprint_worktree
-index_fingerprints
-is_ignored
-resolve
-merge_base
+# Repo reads
+Repo::fmt   # Debug
+Repo::discover   # opens an existing repository, never creates one
+Repo::workdir
+Repo::is_bare
+Repo::git_dir
+Repo::head
+Repo::resolve
+Repo::merge_base
+Repo::load
+Repo::detect_binary
+Repo::file_at
+Repo::head_text
+Repo::remotes
+Repo::status
+Repo::changes
+Repo::permalink
+Repo::log
+Repo::commit
+Repo::commit_infos
+Repo::branches
+Repo::tags
+Repo::stashes
+Repo::blame
+Repo::line_history
+Repo::file_history
+Repo::operation
+Repo::merge_message
+Repo::conflicts
+Repo::conflict_stage
+Repo::identity
+Repo::user_name   # reads user.name from a gix config snapshot; no process, no lock, no write
+Repo::last_commit_message
+Repo::push_remote_for
+Repo::upstream_status
+Repo::branch_tip
+Repo::branch_upstream
+Repo::stash_at
+Repo::stash_index_of
+Repo::stash_paths
+Repo::stash_apply_paths   # computes the paths a stash apply would touch; applies nothing
+
+# `open` creates or opens Lector's own shadow store under the data dir (the same kind of write as
+# the state store, which `arch-check state` covers); it never touches the user's repository or
+# files. Everything that changes the user's files (restore_*) or the shadow store's contents
+# (snapshot_*, fetch*, prune*) stays a write.
+ShadowRepo::open
+
+# ShadowRepo reads (nothing is written; fingerprints hash the worktree only)
+ShadowRepo::path_for   # computes a path, touches nothing
+ShadowRepo::note_of
+ShadowRepo::known_note
+ShadowRepo::known_for
+ShadowRepo::git_dir
+ShadowRepo::workdir
+ShadowRepo::snapshots
+ShadowRepo::contains
+ShadowRepo::kind
+ShadowRepo::entries
+ShadowRepo::index_entries
+ShadowRepo::file_at
+ShadowRepo::changes_between
+ShadowRepo::changes_to_worktree
+ShadowRepo::load
+ShadowRepo::fingerprints
+ShadowRepo::fingerprint_worktree
+ShadowRepo::index_fingerprints
+ShadowRepo::is_ignored
+ShadowRepo::resolve
+ShadowRepo::merge_base
+
+# Free functions: pure parsing and formatting
+free::parse_progress
+free::redact_credentials
+free::classify_failure
+free::parse_push_porcelain
+free::strip_message_comments
+free::merged_name_from_message
+free::graph
+free::parse_remote_url
+free::detect_forge
+free::build_permalink
+free::is_binary
+
+# Data types with `pub fn`s that only compute from their own fields (no repository access).
+value:Oid
+value:OperationKind
+value:RepoOperation
+value:ConflictKind
+value:ConflictEntry
+value:SnapshotEntry
+value:SyncOptions
+value:SyncErrorKind
+value:SyncError
+value:FileChange
