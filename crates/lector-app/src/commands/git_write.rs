@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _};
 use lector_diff::Algorithm;
 use lector_git::{
-    Changeset, CommitOptions, OperationKind, Repo, ShadowRepo, ShadowSnapshot, StatusEntry,
+    ChangeKind, Changeset, CommitOptions, OperationKind, Repo, ShadowRepo, ShadowSnapshot,
+    StatusEntry,
 };
 use lector_review::conflicts::{self, Resolution};
 use lector_review::review::{self, HunkAction, LineSelection};
@@ -36,7 +37,7 @@ use super::{
     Availability, CommandContext, CommandRegistry, CommandSpec, FnCommand, Outcome, UiRequest,
 };
 use crate::core::AppCore;
-use crate::journal::{Journal, UndoRecord};
+use crate::journal::UndoRecord;
 
 /// The backup that makes a destructive command undoable could not be taken. Downcast the
 /// command's error to it: ask the user to confirm, then retry with
@@ -44,6 +45,9 @@ use crate::journal::{Journal, UndoRecord};
 #[derive(Debug, thiserror::Error)]
 #[error("Lector cannot back up your changes first: {0}")]
 pub struct BackupUnavailable(pub String);
+
+/// Why `git.commit` is not undoable (also the journal's tooltip).
+pub const COMMIT_NOT_UNDOABLE: &str = "Commits cannot be undone from here yet. Use `git reset --soft HEAD~1` in a terminal to take the last commit back.";
 
 /// Registers the git write commands.
 pub fn register(r: &CommandRegistry) {
@@ -95,9 +99,7 @@ fn open_shadow(core: &AppCore, repo: &Repo) -> Result<ShadowRepo, lector_git::Er
 }
 
 fn data_dir(core: &AppCore) -> PathBuf {
-    Journal::of(core)
-        .map(|j| j.data_dir().to_path_buf())
-        .unwrap_or_else(lector_config::paths::data_dir)
+    super::pull_request::shadow_data_dir(core)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -347,9 +349,15 @@ fn stage() -> FnCommand {
             let rels = path_args(cx, repo, args)?;
             let status = repo.status()?;
             // The inverse is `unstage` only if nothing was staged for these paths before (and none
-            // is conflicted: unstaging would drop its conflict stages).
+            // is conflicted: unstaging would drop its conflict stages; nor intent-to-add:
+            // unstaging would drop the entry, which the index backup keeps).
             let simple = rels.iter().all(|p| match status_of(&status, p) {
-                Some(e) => e.staged.is_none() && e.renamed_from.is_none() && !e.conflicted,
+                Some(e) => {
+                    e.staged.is_none()
+                        && e.renamed_from.is_none()
+                        && !e.conflicted
+                        && e.unstaged != Some(ChangeKind::Added)
+                }
                 None => !any_below(&status, p),
             });
             let backup = if simple {
@@ -511,22 +519,30 @@ fn unstage_all() -> FnCommand {
             if rels.is_empty() {
                 return Ok(Outcome::new("Nothing to unstage"));
             }
-            let backup = backup_index(
-                cx,
-                repo,
-                &rels,
-                &format!("Before unstaging {}", files_phrase(&rels)),
-            );
-            repo.unstage_all()?;
             let summary = format!(
                 "Unstaged all changes ({})",
                 plural(rels.len(), "file", "files")
             );
+            // Resetting the index also drops intent-to-add entries: back them up too.
+            let mut touched = rels.clone();
+            touched.extend(
+                status
+                    .iter()
+                    .filter(|e| e.unstaged == Some(ChangeKind::Added) && !rels.contains(&e.path))
+                    .map(|e| e.path.clone()),
+            );
+            let backup = backup_index(
+                cx,
+                repo,
+                &touched,
+                &format!("Before unstaging {}", files_phrase(&rels)),
+            );
+            repo.unstage_all()?;
             Ok(finish(
                 Outcome::new(summary),
-                index_undo(backup, &rels),
+                index_undo(backup, &touched),
                 repo,
-                &rels,
+                &touched,
             ))
         },
     )
@@ -764,7 +780,7 @@ fn apply_hunk(cx: &CommandContext, args: &Value, action: HunkAction) -> anyhow::
         )?,
         _ => backup_index(cx, repo, &rels, &format!("Before: {summary}")),
     };
-    let applied = review::apply_hunk_action_if_unchanged(
+    let applied = crate::review_service::apply::apply_hunk_action_if_unchanged(
         repo,
         &changeset,
         &change,
@@ -854,6 +870,20 @@ fn discard_hunk() -> FnCommand {
 // Commit
 // ---------------------------------------------------------------------------------------------
 
+/// The first non-blank line of a commit message, trimmed.
+fn commit_subject(message: &str) -> &str {
+    message
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+}
+
+/// `git.commit`: creates a commit from the index (`amend` replaces the tip, `sign_off` adds the
+/// trailer). Hooks run as usual; a failing hook fails the command with git's output as a
+/// [`lector_git::Error`]. `data`: `oid`, `subject` (as git recorded it) and `upstream` (the
+/// branch's [`lector_git::UpstreamStatus`] afterwards, `null` when it cannot be read) — all
+/// the commit composer needs.
 fn commit() -> FnCommand {
     FnCommand::new(
         CommandSpec::write(
@@ -869,6 +899,7 @@ fn commit() -> FnCommand {
                 &["message"],
             ),
         )
+        .not_undoable(COMMIT_NOT_UNDOABLE)
         .with_ui_flow("git::Commit"),
         |cx, args| {
             let repo = cx.require_repo()?;
@@ -881,13 +912,21 @@ fn commit() -> FnCommand {
                 amend: flag(args, "amend"),
                 sign_off: flag(args, "sign_off"),
             })?;
-            let subject = message.lines().next().unwrap_or("").trim();
+            // The subject git recorded (it drops leading blank lines), else the message's.
+            let recorded = repo.last_commit_message().ok().flatten();
+            let subject = commit_subject(recorded.as_deref().unwrap_or(message));
             let verb = if flag(args, "amend") { "Amended" } else { "Committed" };
+            // Where the branch stands now, for the UI's "Push" / "Publish" offer.
+            let upstream = repo
+                .upstream_status()
+                .ok()
+                .and_then(|st| serde_json::to_value(st).ok())
+                .unwrap_or(Value::Null);
             Ok(Outcome::new(format!(
                 "{verb} {} {subject} (commits cannot be undone here; `git reset --soft HEAD~1` takes it back)",
                 oid.short()
             ))
-            .with_data(json!({ "oid": oid.to_string(), "subject": subject }))
+            .with_data(json!({ "oid": oid.to_string(), "subject": subject, "upstream": upstream }))
             .with_ui(UiRequest::Refresh))
         },
     )
@@ -1085,6 +1124,7 @@ fn continue_operation() -> FnCommand {
             "Git",
             object(&[("kind", kind_schema())], &[]),
         )
+        .not_undoable("Continuing creates commits and ends the operation; git has no inverse of `--continue`.")
         .with_ui_flow("git::ContinueOperation"),
         |cx, args| {
             let repo = cx.require_repo()?;
@@ -1106,6 +1146,7 @@ fn abort_operation() -> FnCommand {
             object(&[("kind", kind_schema())], &[]),
         )
         .destructive()
+        .not_undoable("Aborting throws away the operation's state and its conflict resolutions; git cannot restart it where it was.")
         .with_ui_flow("git::AbortOperation"),
         |cx, args| {
             let repo = cx.require_repo()?;

@@ -13,9 +13,10 @@
 use std::sync::Arc;
 
 use lector_app::review_queue::{analyze, AnalysisOptions, QueueGroup};
+use lector_app::review_service::{CancelToken, ReviewService};
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, Changeset, Repo};
-use lector_review::review::{self, DiffKind, FileDiff};
+use lector_review::review::{DiffKind, FileDiff};
 use lector_review::risk::{self, EvidenceSide, RiskKind, RiskLevel};
 use lector_syntax::LanguageRegistry;
 
@@ -124,19 +125,12 @@ impl TurnSummary {
             .changes(cs)
             .map_err(|e| SummaryError::Git(e.to_string()))?;
         let unanalyzed = changes.len().saturating_sub(MAX_SUMMARY_FILES);
+        let service = ReviewService::without_marks();
+        let cancel = CancelToken::new();
         let diffs: Vec<Arc<FileDiff>> = changes
             .iter()
             .take(MAX_SUMMARY_FILES)
-            .filter_map(|c| {
-                review::load_file_diff_with(
-                    repo,
-                    languages,
-                    c,
-                    opts,
-                    lector_app::content_cache::ContentCache::global(),
-                )
-                .ok()
-            })
+            .filter_map(|c| service.file_diff(repo, languages, c, opts, &cancel).ok())
             .map(Arc::new)
             .collect();
         let mut summary = TurnSummary::from_diffs(&diffs);

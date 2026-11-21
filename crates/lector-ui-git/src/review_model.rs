@@ -14,9 +14,10 @@ use gpui::{Context, EventEmitter, Task};
 use lector_app::review_queue::{
     analyze, AnalysisOptions, ChangesetAnalysis, FileMoves, HunkFingerprint, QueueEntry, QueueGroup,
 };
+use lector_app::review_service::{CancelToken, ReviewService};
 use lector_diff::DiffOptions;
 use lector_git::{Changeset, FileChange, Repo, StatusEntry};
-use lector_review::review::{self, FileDiff};
+use lector_review::review::FileDiff;
 use lector_review::risk::RiskLevel;
 use lector_syntax::LanguageRegistry;
 
@@ -89,6 +90,7 @@ impl ChangesAnalysis {
 /// Diffs every change and runs the review-queue analysis (blocking; call from a background
 /// thread). Files that cannot be read are left out.
 pub fn analyze_changes(
+    service: &ReviewService,
     repo: &Repo,
     languages: &LanguageRegistry,
     changes: &[FileChange],
@@ -98,17 +100,13 @@ pub fn analyze_changes(
     if changes.len() > MAX_ANALYZED_FILES {
         return ChangesAnalysis::default();
     }
+    let cancel = CancelToken::new();
     let diffs: Vec<Arc<FileDiff>> = changes
         .iter()
         .filter_map(|c| {
-            review::load_file_diff_with(
-                repo,
-                languages,
-                c,
-                diff_options,
-                lector_app::content_cache::ContentCache::global(),
-            )
-            .ok()
+            service
+                .file_diff(repo, languages, c, diff_options, &cancel)
+                .ok()
         })
         .map(Arc::new)
         .collect();
@@ -279,6 +277,7 @@ impl ReviewModel {
                 cx.notify();
             });
         }));
+        let service = lector_ui::commands_bridge::core(cx).review();
         self.analysis_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ANALYSIS_DELAY).await;
             let result = cx
@@ -286,6 +285,7 @@ impl ReviewModel {
                 .spawn(async move {
                     let changes = inputs.repo.changes(&Changeset::WorkingTree).ok()?;
                     Some(analyze_changes(
+                        &service,
                         &inputs.repo,
                         &inputs.languages,
                         &changes,
@@ -371,6 +371,7 @@ mod tests {
         let repo = Repo::discover(root).expect("repo");
         let changes = repo.changes(&Changeset::WorkingTree).expect("changes");
         let analysis = analyze_changes(
+            &ReviewService::without_marks(),
             &repo,
             &LanguageRegistry::new(),
             &changes,

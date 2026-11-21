@@ -185,6 +185,7 @@ fn register_into(r: &CommandRegistry) {
                     &[],
                 ),
             )
+            .not_undoable("Starting a session launches the agent process; end it from the agent panel.")
             .with_ui_flow("agent::NewSession"),
             |cx, args| {
                 let project = cx.require_project()?;
@@ -222,7 +223,8 @@ fn register_into(r: &CommandRegistry) {
                     ],
                     &["text"],
                 ),
-            ),
+            )
+            .not_undoable("A prompt goes to the agent process; undo the edits of the turn it starts with agent.undo_turn."),
             |cx, args| {
                 let session = session_of(cx)?;
                 let text = args["text"].as_str().unwrap_or_default().to_string();
@@ -323,6 +325,7 @@ fn register_into(r: &CommandRegistry) {
                 ),
             )
             .destructive()
+            .not_undoable("It is an undo itself: the journal entry it records (journal.undo) carries the redo; undo that entry to restore the turn's edits.")
             .with_ui_flow("agent::UndoLastTurn"),
             |cx, args| {
                 let session = session_of(cx)?;
@@ -355,7 +358,8 @@ fn register_into(r: &CommandRegistry) {
                     ],
                     &["id", "choice"],
                 ),
-            ),
+            )
+            .not_undoable("The answer goes to the agent process, which acts on it at once."),
             |cx, args| {
                 let session = session_of(cx)?;
                 let id = PermissionRequestId(args["id"].as_u64().unwrap_or(0));
@@ -386,6 +390,7 @@ fn register_into(r: &CommandRegistry) {
                     &[],
                 ),
             )
+            .not_undoable("Feedback goes to the agent as a prompt; undo the edits of the turn it starts with agent.undo_turn.")
             .with_ui_flow("agent::SendFeedback"),
             |cx, args| {
                 let session = session_of(cx)?;

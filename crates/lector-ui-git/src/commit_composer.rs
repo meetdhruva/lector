@@ -7,7 +7,8 @@ use gpui::{
     div, prelude::*, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, Hsla, SharedString, Subscription, Task, Window,
 };
-use lector_git::CommitOptions;
+use lector_app::commands::{CommandContext, CommandError, Source};
+use lector_app::journal::Journal;
 use lector_ui::actions::git as git_actions;
 use lector_ui::components::text_area::{first_line_chars, TextArea, TextAreaEvent};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
@@ -16,7 +17,7 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
 
-use crate::staging::{git_error_text, notify_repo_changed};
+use crate::staging::{command_error_text, git_error_text, notify_repo_changed};
 use crate::store::{GitStore, GitStoreEvent};
 
 /// Conventional subject length (soft limit) and hard limit.
@@ -266,27 +267,33 @@ impl CommitComposer {
             }
             return;
         }
-        let Some(repo) = self.store.read(cx).repo().cloned() else {
-            return;
+        let project = match self.store.read(cx).project() {
+            Some(p) if p.repo().is_some() => p.clone(),
+            _ => return,
         };
-        let opts = CommitOptions {
-            message: self.editor.read(cx).text().to_string(),
-            amend: self.amend,
-            sign_off: self.sign_off,
-        };
+        let args = serde_json::json!({
+            "message": self.editor.read(cx).text().to_string(),
+            "amend": self.amend,
+            "sign_off": self.sign_off,
+        });
         self.committing = true;
         self.error = None;
+        let core = lector_ui::commands_bridge::core(cx);
+        // The registry's `git.commit` (journaled like every write, ADR 0002). Its data has the
+        // recorded subject and, for the toast's "Push" button (v0.7), the upstream state.
         let work = cx.background_spawn(async move {
-            let oid = repo.create_commit(&opts)?;
-            let summary = repo
-                .last_commit_message()
-                .ok()
-                .flatten()
-                .and_then(|m| m.lines().next().map(str::to_string))
+            Journal::install(&core);
+            let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
+            let outcome = core.registry().invoke("git.commit", args, &ctx)?;
+            let data = &outcome.data;
+            let short = data["oid"]
+                .as_str()
+                .map(|o| o.chars().take(7).collect::<String>())
                 .unwrap_or_default();
-            // For the toast's "Push" button (v0.7): is the branch ahead of its upstream?
-            let upstream = repo.upstream_status().ok();
-            Ok::<_, lector_git::Error>((oid, summary, upstream))
+            let summary = data["subject"].as_str().unwrap_or_default().to_string();
+            let upstream =
+                serde_json::from_value::<lector_git::UpstreamStatus>(data["upstream"].clone()).ok();
+            Ok::<_, CommandError>((short, summary, upstream))
         });
         let store = self.store.clone();
         self.commit_task = Some(cx.spawn(async move |this, cx| {
@@ -294,8 +301,7 @@ impl CommitComposer {
             let _ = this.update(cx, |this, cx| {
                 this.committing = false;
                 match result {
-                    Ok((oid, summary, upstream)) => {
-                        let short = oid.short();
+                    Ok((short, summary, upstream)) => {
                         let verb = if this.amend { "Amended" } else { "Committed" };
                         this.amend = false;
                         this.saved_message = None;
@@ -319,7 +325,7 @@ impl CommitComposer {
                         cx.emit(CommitComposerEvent::Committed(short));
                     }
                     Err(e) => {
-                        let text = git_error_text(&e);
+                        let text = command_error_text(&e);
                         if text.contains("tell me who you are") {
                             this.identity = IdentityState::Missing;
                         }

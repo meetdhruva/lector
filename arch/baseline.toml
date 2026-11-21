@@ -93,12 +93,12 @@
 "crates/lector-buffer/src/tests.rs" = 3092
 "crates/lector-forge/src/releases.rs" = 1917
 "crates/lector-git/src/shadow.rs" = 2302
-"crates/lector-review/src/review.rs" = 1743
+"crates/lector-review/src/review.rs" = 1586
 "crates/lector-review/src/risk.rs" = 2696
 "crates/lector-review/src/structural.rs" = 1750
 "crates/lector-text/src/rope.rs" = 1541
-"crates/lector-ui-git/src/changes_panel.rs" = 1694
-"crates/lector-ui-git/src/diff_view.rs" = 1992
+"crates/lector-ui-git/src/changes_panel.rs" = 1680
+"crates/lector-ui-git/src/diff_view.rs" = 1938
 "crates/lector-ui-git/src/diff_view/comments.rs" = 1520
 "crates/lector-ui-git/src/sync.rs" = 1944
 "crates/lector-ui-git/src/sync_model.rs" = 1702

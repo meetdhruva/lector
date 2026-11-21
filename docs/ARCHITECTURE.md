@@ -60,8 +60,8 @@ L6 frontend
   lector-cli         -> lector-agent, lector-app, lector-config, lector-diff, lector-git,
                         lector-mcp, lector-process, lector-review
   lector-ui-git      -> lector-app, lector-buffer, lector-config, lector-diff, lector-forge,
-                        lector-fs, lector-git, lector-icons, lector-process, lector-review,
-                        lector-syntax, lector-text, lector-theme, lector-ui
+                        lector-fs, lector-git, lector-icons, lector-review, lector-syntax,
+                        lector-text, lector-theme, lector-ui
   lector-ui-terminal -> lector-config, lector-terminal, lector-theme, lector-ui
 L5 client
   lector-agent       -> lector-app, lector-buffer, lector-config, lector-diff, lector-fs,
@@ -894,6 +894,7 @@ Until 0.7 this was one crate; ADR 0001 split it. Paths now: `project` → `lecto
 `risk`, `structural`, `conflicts` → the stateless crate `lector_review`. `load_changeset` / `load_file_diff` (the
 `Project` wrappers) are `lector_app::project::{load_changeset, load_file_diff}`; the `lector_review::review::*_with`
 functions, `diff_bytes` and `side_from_bytes` take a trailing `cache: &dyn lector_review::DerivedCache` (see "Caches").
+UI code gets review data from `lector_app::review_service::ReviewService` (below), not from the loaders.
 ```rust
 pub mod project {
   pub struct Project;  // Clone (Arc), Send + Sync
@@ -959,7 +960,7 @@ pub mod review {   // lector_review::review (the two Project wrappers are in lec
 ```
 
 Notes (as implemented): `lector_app::project::{ProjectError, Result}` (`Io`, `Git`, `Syntax`, `Lsp`, `NotARepository`, `Other`;
-`From<lector_review::Error>` maps `Io`/`Git`/`Other` one to one) and `lector_review::{Error, Result}` (`Io`, `Git`, `Other`). `Project::open` canonicalizes the root and fails only if it is not a
+`From<lector_review::Error>` maps `Io`/`Git`/`Other` one to one, `Cancelled` to `Other("cancelled")`) and `lector_review::{Error, Result}` (`Io`, `Git`, `Cancelled`, `Other`). `Project::open` canonicalizes the root and fails only if it is not a
 directory; if the root is a subfolder of a repo, status/blame/gutter paths are mapped (`Project::repo_path(rel)`).
 Additions: `Project::{is_ignored, file_state, reindex_file(abs), repo_path}`, `FileList::{is_ignored, contains}`
 (ignored files are only listed — and flagged — when `files.show_ignored`; they come from a second walk without gitignore),
@@ -973,13 +974,18 @@ proximity, indexes the open document on demand, and falls back to tags when LSP 
 `NavHistory` also has `new`, `clear`; `back`/`forward` skip entries within 3 rows of `current`.
 
 Notes on `review` (as implemented): every function has a `*_with(repo, ..)` variant over the core services
-(`load_changeset_with(repo, cs, store, opts)`, `load_file_diff_with(repo, languages, change, opts)`); the `Project`
+(`load_changeset_with(repo, cs, viewed, opts)`, `load_file_diff_with(repo, languages, change, opts, cache)`); the `Project`
 versions use `settings.diff` (`diff_options(&DiffSettings)`: ignore_whitespace → `Whitespace::IgnoreAll`).
+`lector-review` writes nothing (checked by `arch-check purity`): the viewed marks come in as a read-only input,
+`viewed: &dyn ViewedMarks` (`is_viewed(changeset_key, path, content_hash)`; any `Fn(&str, &str, &str) -> bool` is one,
+`NoMarks` has none), and `load_changeset_cancellable` / `load_vs_workdir_cancellable` take a `lector_search::CancelToken`
+(`Error::Cancelled`, checked between files).
 * Keys (`changeset_key`, inverse `parse_changeset_key`): `worktree`, `staged`, `unstaged`, `untracked`, `commit:<sha>`,
   `range:<from>..<to>`, `branch:<base>...<branch>`. Titles (`changeset_title`): "Working tree", "abc1234 Fix parser",
   "main…feature", "a..b".
 * `ReviewFile.content_hash` = sha256 of both sides' identities (blob oid, or content hash for index/workdir sides), so a
-  `ReviewStore` mark stops counting when either side changes; `set_viewed_with(store, root, key, &mut file, bool)`.
+  `ReviewStore` mark stops counting when either side changes; the mark is written by
+  `ReviewService::set_viewed(root, key, &mut file, bool)` (lector-app; same store and `review.json` format as 0.7.1).
   Stats are computed eagerly on up to 4 threads for changesets ≤ `MAX_EAGER_STATS` (3000 files; 500 files ≈ 30 ms).
 * `FileDiff { change, kind: DiffKind::{Text, Binary, Image(ImageFormat), TooLarge}, old/new: DiffSide, diff, split,
   unified, options }`; `DiffSide { path, exists, size, text, bytes (images), language, syntax, encoding }` with
@@ -1157,8 +1163,10 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
     agent / key files for SSH remotes) → Retry; HostKeyUnknown / NetworkUnreachable / RemoteNotFound / HookDeclined /
     Other → Retry; HostKeyChanged → a warning and no way around it; DetachedHead → New Branch…. Cancelled → toast.
     Background (auto-fetch) failures never open a dialog: they show in the control's tooltip.
-  * Credential prompts (`askpass_ui`): one `AskpassServer` per process, started lazily by the first network operation
-    (runtime dir = `paths::data_dir()`), env installed with `SyncHost::set_askpass_env`; stopped on app quit. The handler
+  * Credential prompts (`askpass_ui`): one `AskpassServer` per process, owned by `lector-app`
+    (`SyncHost::start_askpass(runtime_dir, handler)`, ADR 0002), started lazily by the first network operation
+    (runtime dir = `paths::data_dir()`); `askpass_ui` supplies the handler and shows the dialogs; stopped on app quit
+    (`SyncHost::shutdown_askpass`). The handler
     posts to the GPUI thread and blocks ≤ 10 min (`PROMPT_TIMEOUT`); prompts queue and show one at a time as a
     `PromptDialog` in the window whose operation is running ("Operation: Pushing main → origin/main", "Remote:
     https://***@host/…"). Kinds (`prompt_spec`): username; password / token (masked `TextInput::set_masked`, never
@@ -1394,8 +1402,10 @@ swapped(), is_empty()}`; `CONTEXT_LINES = 3`.
 **Partial staging** (`lector_review::review`): `HunkAction::{Stage, Unstage, Discard}`,
 `HunkAction::available_for(&Changeset)` (Unstaged → Stage + Discard, Staged → Unstage, others → none),
 `FileDiff::{hunk_selection(ix), hunk_at(old, new)}`, `hunk_patch(repo, &changeset, &change, action, &selection, algorithm)
--> Result<Option<(Vec<u8>, PatchTarget)>>` and `apply_hunk_action(..) -> Result<bool>` (false = nothing to apply).
-`apply_hunk_action_if_unchanged(.., expected_content_id: &str)` (used by the UI) first checks that both sides still match
+-> Result<Option<(Vec<u8>, PatchTarget)>>` (pure: computes the patch, applies nothing) and
+`hunk_patch_if_unchanged(.., expected_content_id: &str)`; applying is `lector_app::review_service::apply::
+{apply_hunk_action(..) -> Result<bool> (false = nothing to apply), apply_hunk_action_if_unchanged(..)}`, called by the
+`git.*_hunk` commands only. `apply_hunk_action_if_unchanged(.., expected_content_id: &str)` first checks that both sides still match
 `FileDiff::content_id()` of the diff the rows were selected in (blob ids / content hashes, working copy normalized as
 below) and otherwise refuses with an error and writes nothing — rows of a stale diff never stage or discard other lines.
 Stage applies `index → worktree` to the index; Unstage builds `index → HEAD` and Discard `worktree → index` with the
@@ -1403,9 +1413,38 @@ selection swapped and applies them forwards, so context always comes from the co
 unselected changes and staged+unstaged mixes never break it). Working-tree bytes are compared in git's normalized form
 (CRLF → LF when the index has LF), which is what `git apply` reads after its clean filter (autocrlf round-trips).
 Tests: `crates/lector-git/tests/write.rs` (paths, unborn HEAD, literal pathspecs, discard incl. untracked, apply, commit,
-amend, sign-off, hooks, identity, index.lock, renames), `crates/lector-review/tests/staging.rs` (hunk stage/unstage/
+amend, sign-off, hooks, identity, index.lock, renames), `crates/lector-app/tests/staging.rs` (hunk stage/unstage/
 discard round trips checked with `git diff --cached`, line selections, file edges, staged+unstaged in one file, missing
 final newline, CRLF, autocrlf, deleted/added files), proptests in `lector_diff::patch`.
+
+### lector-app `review_service` (ADR 0001, ADR 0002; all methods blocking, run on background threads)
+The one way views, the CLI and agents get review data: `AppCore::review() -> ReviewService` (cheap to clone; holds the
+`ReviewStore` of the core's database and the process-wide `ContentCache`, which is the `DerivedCache` of every call;
+`ReviewService::{new(store), with_cache(store, cache), without_marks()}`). Every analysis method takes a
+`&CancelToken` (`lector_app::review_service::CancelToken` = `lector_search::CancelToken`) and returns
+`lector_review::Error::Cancelled` (`None` for `default_base`) once it is set; results are the plain `lector-review` types.
+```rust
+impl ReviewService {
+  pub fn changeset(&self, repo: &Repo, cs: &Changeset, opts: &DiffOptions, cancel: &CancelToken) -> Result<ChangesetView>;
+  pub fn changeset_vs_workdir(&self, repo: &Repo, rev: &str, opts: &DiffOptions, cancel: &CancelToken) -> Result<ChangesetView>;
+  pub fn default_base(&self, repo: &Repo, branch: &str, cancel: &CancelToken) -> Option<String>;
+  pub fn changeset_title(&self, repo: Option<&Repo>, cs: &Changeset) -> String;
+  pub fn file_diff(&self, repo: &Repo, languages: &LanguageRegistry, change: &FileChange, opts: &DiffOptions, cancel: &CancelToken) -> Result<FileDiff>;
+  pub fn file_vs_revision(&self, repo: &Repo, languages: &LanguageRegistry, rel_path: &str, rev: &str, opts: &DiffOptions, cancel: &CancelToken) -> Result<FileDiff>;
+  pub fn file_summary(&self, repo: &Repo, change: &FileChange, opts: &DiffOptions, cancel: &CancelToken) -> Result<(Option<DiffStats>, bool, String)>;
+  pub fn is_viewed(&self, repo_root: &Path, changeset_key: &str, path: &str, content_hash: &str) -> bool;
+  pub fn set_viewed(&self, repo_root: &Path, changeset_key: &str, file: &mut ReviewFile, viewed: bool) -> io::Result<()>; // the only review-state write
+}
+pub mod apply { // writes a hunk patch computed by lector_review::review::hunk_patch*
+  pub fn apply_hunk_action(repo, changeset, change, action, selection, algorithm) -> lector_review::Result<bool>;
+  pub fn apply_hunk_action_if_unchanged(repo, changeset, change, action, selection, algorithm, expected_content_id) -> lector_review::Result<bool>;
+}
+```
+The repository is passed in (a window's repo, or a pull request's shadow repo); the viewed marks keep their 0.7.1 store
+and file format (`review.json` / the database backend) until ADR 0004 moves them. `arch-check purity` keeps
+`crates/lector-review` free of writes (git write API, `lector-config` stores, processes, file writes). Tests:
+`crates/lector-app/tests/review_service.rs` (equals the direct loaders cold and warm, viewed round trip, the 0.7.1
+`review.json` fixture, cancellation).
 
 ### Merge conflicts (v0.3) — lector-git, lector-review — as implemented
 ```rust
@@ -1483,6 +1522,13 @@ wrong"*. Foundations so every later feature is cheap:
 6. **Embedded database** (redb) for review state, comments, sessions, recents, caches.
 7. **Content-addressed caching** keyed by git blob id / content hash.
 
+### lector-app `os` (ADR 0002)
+Processes the UI needs that are not writes, so plain functions rather than registry commands, built on `lector-process`
+(own process tree; no console window on Windows): `os::reveal_in_file_manager(&core, path)` (`open -R` / `explorer
+/select,` / `xdg-open <dir>`, run on the core's scheduler, returns at once; `REVEAL_LABEL`), `os::detect_os_reduce_motion()
+-> Option<bool>` (blocking; `LECTOR_REDUCE_MOTION`, macOS `defaults`, GNOME `gsettings`, 5 s limit). `lector_ui::os` and
+`lector_ui::a11y` call these; UI crates start no processes (ADR 0002).
+
 ### lector-app (v0.4; UI-free, no GPUI, no tokio)
 ```rust
 // scheduler.rs (Agent APP)
@@ -1500,6 +1546,8 @@ pub struct JobHandle<T>;   // cancel(), is_finished(), try_take(), into_future()
 pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'static str, pub category: &'static str,
                          pub args_schema: serde_json::Value /* JSON Schema */, pub writes: bool /* journaled */,
                          pub destructive: bool, pub undoable: bool,
+                         pub undo: UndoPolicy /* ADR 0002: Undoable | NotUndoable(reason) | NothingToUndo (reads) |
+                                                 Undeclared (a write that did not declare: undo_roundtrip fails) */,
                          pub ui_action: Option<&'static str> /* "git::Stage" — the GPUI action that dispatches it */,
                          pub ui_flow: Option<&'static str> /* v0.7: "git::DropStash" — the UI action that is the interactive
                                                               entry point; the palette lists that action, not this command */ }
@@ -1564,9 +1612,13 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   and runs it as a keyed job `delay` after the last call; `cancel_key`, `pending()`, `wait_idle(timeout)`; panics in
   jobs are caught (handle → `None`). `JobHandle::{cancel, token, is_finished, try_take, into_future, wait}` (`wait` blocks;
   never from a worker). Workers stop when the last `Scheduler` clone drops. `CancelToken` = `lector_search::CancelToken`.
-* **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, ui_action, ui_flow }` built with
-  `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.with_ui_flow(..)`, `.destructive()`, `.undoable()`;
-  `to_json()` is the MCP/CLI description (`ui_flow` is added next to `ui_action`). **`ui_action` vs `ui_flow` (v0.7):**
+* **Commands**: `CommandSpec { id, title, category, args_schema, writes, destructive, undoable, undo, ui_action, ui_flow }` built with
+  `CommandSpec::read(..)` / `::write(..)` + `.with_ui_action(..)`, `.with_ui_flow(..)`, `.destructive()`, `.undoable()`,
+  `.not_undoable(reason)`; `to_json()` is the MCP/CLI description (`ui_flow` is added next to `ui_action`; a write declared
+  not undoable adds `"not_undoable": reason`). Every write command declares its undo (ADR 0002): `.undoable()` with a
+  scenario in `crates/lector-app/tests/undo_roundtrip.rs` (state → command → journal undo → state, then redo), or
+  `.not_undoable(reason)`; that test enumerates the registry and fails for a write with neither (agent commands:
+  `crates/lector-agent/tests/undo_declarations.rs`). **`ui_action` vs `ui_flow` (v0.7):**
   `ui_action` means "the bridge registers this GPUI action and it runs the command"; `ui_flow` names a UI action that
   already has its own handler (lector-ui-git sync, branch and stash flows; the agent panel) which asks, shows progress and
   offers Undo, and that handler calls the command itself. The bridge registers nothing for a `ui_flow` and the palette omits
@@ -1600,7 +1652,7 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   (lock held by an incompatible process, corruption) `open_or_fallback` uses a private temp copy (deleted on drop), then
   memory — `Db::mode() -> DbMode::{File, TempCopy, Memory}`. `import_v03(data_dir)` imports review.json, sessions/*.json and
   recent.json once (flag in `meta`; files are kept). Stores: `Db::review_store()` → `lector_config::ReviewStore::with_backend`
-  (new `ReviewBackend` trait in lector-config, so `lector_review::review` keeps taking `&ReviewStore`),
+  (new `ReviewBackend` trait in lector-config; since step 2 `lector-review` no longer sees the store: `ReviewService` reads and writes it),
   `Db::session_store() -> DbSessionStore { load, save }`, `Db::recent_projects() -> DbRecentProjects { list,
   most_recent_existing, record, remove }`. The JSON `SessionStore::new` / `RecentProjects::new` are `#[deprecated]`;
   `ReviewStore::open` stays for tests/import.
@@ -1745,14 +1797,18 @@ operation, plus round trips (binary, empty, symlink, exec bit, deleted, nested, 
   recorded `after` fingerprints with the present state and refuse with `UndoError::Changed { id, paths }` (nothing
   written); `Force` ("Restore anyway") proceeds. Before overwriting, the current state is backed up again and stored in
   the undo's own journal entry, so an undo is undoable (redo) and so is "Restore anyway". `Invoke` runs the inverse
-  command through the registry (its own entry is the undo entry); `Multi` undoes last first. Errors: `UndoError::
+  command through the registry (for a record that is a single `Invoke`, the inverse command's own entry is the undo
+  entry); `Multi` undoes last first, and its redo is a `Multi` of each part's redo — an inverse command run inside a
+  `Multi` contributes its own undo record and its entry becomes part of the undo (`undo_of`, no undo of its own), so
+  redo repeats every part (e.g. the redo of an undone stash pop drops the stash again). Errors: `UndoError::
   {NotFound, AlreadyUndone, NotUndoable(reason), Changed, BackupGone, Failed}` — every refusal writes nothing.
 * **Git write commands** (`commands::git_write`, JSON schemas, `Outcome { summary, undo }`, none sets `ui_action`; v0.7 stash commands set `ui_flow`):
   `git.stage {paths}`, `git.unstage {paths}`, `git.discard {paths, allow_without_backup?}` (restores tracked paths from
   the index, deletes untracked ones; backed up first), `git.stage_hunk` / `git.unstage_hunk` / `git.discard_hunk {path,
   changeset?, hunk? | old_lines/new_lines?, content_id?, allow_without_backup?}` (a stale `content_id` is refused),
   `git.stage_all`, `git.unstage_all`, `git.discard_all {scope?: unstaged|untracked|all}`, `git.commit {message, amend?,
-  sign_off?}` (not undoable: the journal records it), `git.accept_file {path?, side: ours|theirs}`, `git.mark_resolved {path?}`,
+  sign_off?}` (not undoable: the journal records it; `data { oid, subject (as recorded), upstream: UpstreamStatus|null }`
+  is all the commit composer needs — the composer runs this command, ADR 0002), `git.accept_file {path?, side: ours|theirs}`, `git.mark_resolved {path?}`,
   `git.resolve_delete {path}` (undo = `Multi`), `git.continue_operation {kind}`, `git.abort_operation {kind}`
   (irreversible, `undo: None`). Destructive commands that cannot take their backup fail with
   `BackupUnavailable` unless `allow_without_backup` is set; `backup_available(core, repo)` lets the UI ask beforehand.
@@ -1953,11 +2009,17 @@ pub enum SyncErrorKind { NoUpstream, NoRemote, DetachedHead, Rejected /* hint "P
   restore …"); a failed apply puts back what git changed from that backup before returning the error; undo =
   `Multi[RestoreIndex, RestoreFiles(, git.stash_store)]`; data adds `index_restored`, `restore_index`, `not_backed_up`), `git.stash_drop {index?|oid?}`
   (destructive, undo = `git.stash_store`), `git.stash_store {oid, message?}`, `git.restore_ref {ref, expected, target,
-  upstream?}` (refuses unless the ref is at `expected`; itself undoable). All are `writes` (MCP lists them only with
+  upstream?}` (refuses unless the ref is at `expected`; removing a branch also removes its upstream setting, which the inverse
+  puts back; itself undoable). All are `writes` (MCP lists them only with
   `--allow-writes`). Errors keep their type: downcast `CommandError::Failed(anyhow)` to `lector_git::Error::Sync`.
-* **`SyncHost`** (`SyncHost::of(&core)`, an `AppCore` extension): `set_askpass_env(Vec<(OsString, OsString)>)` — the UI
-  starts one `AskpassServer` per process (handler = its prompt dialog) and installs
-  `server.env(&server.helper_program(&current_exe()?)?)` here; `subscribe(cb: Fn(&SyncProgress { op, repo, command, event }))` → `SyncSubscription` (drop =
+* **`SyncHost`** (`SyncHost::of(&core)`, an `AppCore` extension) owns credential prompts and progress (ADR 0002):
+  `start_askpass(runtime_dir, handler: Fn(PromptRequest) -> PromptReply)` registers the prompt handler (each call
+  replaces it) and starts one `AskpassServer` per host on first use, installing
+  `server.env(&server.helper_program(&current_exe()?)?)` via `set_askpass_env(Vec<(OsString, OsString)>)`;
+  `askpass_running()`, `askpass_start_error()`, `shutdown_askpass()`; `git_sync::askpass` re-exports the prompt types
+  and pure prompt-text helpers (`PromptRequest`, `PromptReply`, `PromptKind`, `Secret`, `parse_prompt`,
+  `sanitize_prompt_text`, `classify_prompt`) so UI crates need no `lector-process`; `git_sync::credential_helpers(workdir)`
+  reads `credential.helper` for the authentication-failure dialog; `subscribe(cb: Fn(&SyncProgress { op, repo, command, event }))` → `SyncSubscription` (drop =
   unsubscribe; called on worker threads); `running() -> Vec<RunningSync { id, repo, command }>`; `cancel(id)`,
   `cancel_repo(workdir)` (kills git, ssh and helpers).
 * Tests: `crates/lector-git/tests/sync.rs` (bare remote + two clones: fetch incl. tags and prune, ff pull + restore_ref,
@@ -2505,8 +2567,11 @@ Submitting a review is an explicit user action, irreversible → confirmation di
   Resolved / Re-anchored n% / GitHub badges, collapse; folds containing a thread open), scrollbar marks,
   `review::NextComment` / `PrevComment`. `DiffView::set_review_context(ReviewContext { key, repo /* shadow */, drafts,
   pr })`. `review_tab/comments.rs` — Files | Comments switch, the comments list (jump, "Copy as Markdown", "Send to
-  agent"), pull-request header with "Submit review (n)". `pull_requests.rs` — `PrSession::open` (details, fetch into
-  the shadow unless head and base are already reachable there, merge base, `Changeset::Range` read from the shadow
+  agent"), pull-request header with "Submit review (n)". `pull_requests.rs` — `PrSession::open(core, project, ..)` (details;
+  fetch into the shadow unless head and base are already reachable there, through the `review.fetch_pull_request
+  {url, refspecs, have?, http_header?}` command — `writes: false`: it writes only Lector's shadow repository, not the
+  user's; sandboxed callers may only fetch from a configured remote URL; `commands::pull_request::shadow_data_dir(core)`
+  is the data dir every shadow user shares — merge base, `Changeset::Range` read from the shadow
   `Repo`), `sync_threads` (remote threads → `CommentStore`, origin github/gitlab, anchored at head / merge base),
   `submit` (draft replies to remote threads are posted as replies; draft threads become one review's inline
   comments; published drafts are replaced by the host's threads), the **Pull Requests** sidebar panel

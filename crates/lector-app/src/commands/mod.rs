@@ -12,7 +12,8 @@
 //!
 //! Read/navigation commands live in [`read`]; git writes in `git_write` (Agent SAFE), git
 //! network / branch / stash commands in [`git_sync`] (v0.7),
-//! document commands in `documents` (Agent DOCS).
+//! document commands in `documents` (Agent DOCS), the pull request fetch into Lector's shadow
+//! repository in [`pull_request`].
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -32,6 +33,7 @@ pub use crate::journal::UndoRecord;
 pub mod documents;
 pub mod git_sync;
 pub mod git_write;
+pub mod pull_request;
 pub mod read;
 pub mod schema;
 
@@ -41,6 +43,7 @@ pub fn register_builtin(registry: &CommandRegistry) {
     documents::register(registry);
     git_write::register(registry);
     git_sync::register(registry);
+    pull_request::register(registry);
     crate::comments::register_commands(registry);
 }
 
@@ -60,8 +63,14 @@ pub struct CommandSpec {
     pub writes: bool,
     /// Loses data unless undone (discard, delete).
     pub destructive: bool,
-    /// [`Outcome::undo`] is filled on success.
+    /// [`Outcome::undo`] is filled on success. Always equal to
+    /// `undo == UndoPolicy::Undoable`; kept for existing readers of the spec.
     pub undoable: bool,
+    /// The undo declaration (ADR 0002): every command that writes says whether the journal can
+    /// undo it, and if not, why. Set with [`CommandSpec::undoable`] /
+    /// [`CommandSpec::not_undoable`]; a write left [`UndoPolicy::Undeclared`] fails the
+    /// `undo_roundtrip` test.
+    pub undo: UndoPolicy,
     /// The GPUI action ("git::Stage") that dispatches this command, if any. The generic
     /// action bridge registers a handler that runs the command as is.
     pub ui_action: Option<&'static str>,
@@ -87,6 +96,7 @@ impl CommandSpec {
             writes: false,
             destructive: false,
             undoable: false,
+            undo: UndoPolicy::NothingToUndo,
             ui_action: None,
             ui_flow: None,
         }
@@ -101,6 +111,7 @@ impl CommandSpec {
     ) -> Self {
         CommandSpec {
             writes: true,
+            undo: UndoPolicy::Undeclared,
             ..Self::read(id, title, category, args_schema)
         }
     }
@@ -123,9 +134,19 @@ impl CommandSpec {
         self
     }
 
-    /// Marks the command undoable.
+    /// Marks the command undoable: [`Outcome::undo`] is filled on success (unless there was
+    /// nothing to do).
     pub fn undoable(mut self) -> Self {
         self.undoable = true;
+        self.undo = UndoPolicy::Undoable;
+        self
+    }
+
+    /// Declares that the journal cannot undo the command, and why (shown to agents and in
+    /// `commands.list`).
+    pub fn not_undoable(mut self, reason: &'static str) -> Self {
+        self.undoable = false;
+        self.undo = UndoPolicy::NotUndoable(reason);
         self
     }
 
@@ -147,6 +168,9 @@ impl CommandSpec {
         if self.undoable {
             v["undoable"] = json!(true);
         }
+        if let UndoPolicy::NotUndoable(reason) = self.undo {
+            v["not_undoable"] = json!(reason);
+        }
         if let Some(a) = self.ui_action {
             v["ui_action"] = json!(a);
         }
@@ -155,6 +179,20 @@ impl CommandSpec {
         }
         v
     }
+}
+
+/// Whether the activity journal can undo a command ([`CommandSpec::undo`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndoPolicy {
+    /// Its [`Outcome::undo`] is filled on success; the journal's Undo reverses it.
+    Undoable,
+    /// The journal cannot undo it; the text says why (pushes are public, a commit is taken
+    /// back with `git reset`, ...).
+    NotUndoable(&'static str),
+    /// A read: it changes nothing, so there is nothing to undo.
+    NothingToUndo,
+    /// A write that did not declare its undo yet (the `undo_roundtrip` test rejects it).
+    Undeclared,
 }
 
 /// Whether a command can run in a context.

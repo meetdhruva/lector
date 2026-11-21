@@ -144,6 +144,13 @@ fn args_for(id: &str, head: &str) -> Vec<Value> {
             json!({"thread": 1}),
             json!({"thread": 1, "resolved": false}),
         ],
+        // Fetches into Lector's shadow repository only; the commit is already reachable
+        // there (the user's objects), so nothing is fetched.
+        "review.fetch_pull_request" => vec![json!({
+            "url": "unused",
+            "refspecs": ["+refs/heads/main:refs/lector/pr/1/head"],
+            "have": [head],
+        })],
         "comments.export" => vec![
             json!({}),
             json!({"format": "json", "include_resolved": true}),

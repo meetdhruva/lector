@@ -17,6 +17,7 @@ scripts/arch-check graph               # print the crate graph
 scripts/arch-check graph --write       # put it into docs/ARCHITECTURE.md between the markers
 scripts/arch-check graph --check       # fail when the committed graph is stale
 scripts/arch-check --update            # lower the baseline; refuses to raise anything
+scripts/arch-check --update --moved <old>=<new>   # a file was renamed: carry its entries over
 ```
 
 Run `scripts/arch-check all` before pushing. It takes a couple of seconds once built.
@@ -36,6 +37,7 @@ also protected by the test suite.
 | `review-statics.allow` | Statics, by name, that `lector-review` may declare (ADR 0001). |
 | `git-read.allow` | Public `lector-git` methods that only read. `writes` derives the write API from the source of `crates/lector-git/src/{write,sync,branch,conflict,shadow}.rs` and subtracts this list, so a new `pub fn` there counts as a write until it is listed here. |
 | `git-ambiguous.allow` | Write-API names that are also common method names (`push`); only flagged when the receiver's name contains `repo`, `git` or `shadow`. |
+| `store-ambiguous.allow` | `lector-config` write-method names that are also common method names (`remove`, `set`, `clear`); `purity` flags them in `lector-review` only when the receiver's name contains `store`, `config`, `settings`, `session`, `recent` or `backend`. |
 | `unsafe.allow` | `crate:` names exempt from `#![forbid(unsafe_code)]` (only `lector-text`); every `unsafe` block there needs a `// SAFETY:` comment. |
 
 ## Lowering the baseline
@@ -46,6 +48,16 @@ When you fix violations the check reports `STALE` and prints
 if it would, it lists them and exits non-zero. **Never raise the baseline.** Fix the code, or write
 an ADR that supersedes the rule. (`--update --allow-increase "<reason>"` exists for the one-time
 creation of the baseline; it prints the reason and every raised entry.)
+
+**Renaming or moving a file** that has baseline entries: run
+`scripts/arch-check --update --moved crates/a/src/old.rs=crates/a/src/new.rs` (repeatable, one pair
+per file, forward slashes). In every rule that ran, the entry of `old` becomes the entry of `new`
+with the same count, and the usual comparison follows: if `new` has more violations (or, for
+`size`, more lines) than `old` had, the update is refused like any other raise; if it has fewer,
+the entry is lowered (and dropped at zero). An `old` with no entry in the rules that ran, or a
+`new` that already has one, is an error (exit 2), so a typo cannot silently pass. Without
+`--moved`, a rename looks like a new file and `--update` refuses it. The step that moves a file
+and the step that fixes its violations stay separate.
 
 When a rule's section is empty the rule is absolute; delete nothing, the empty section stays.
 
@@ -69,6 +81,21 @@ work, the feature belongs on the scheduler instead.
 
 Changing a layer, a `[[forbid]]` entry or a closure list in `layers.toml` is a change to the
 architecture: it needs an ADR, not just a reviewer.
+
+## `purity`
+
+`crates/lector-review` is stateless and writes nothing (ADR 0001, 0002), with no baseline: the
+rule is absolute (0). In its non-test code it flags `static`/lazy state and detached threads, and
+four kinds of write: (a) a call of the `lector-git` write API (the list `writes --list-api`
+prints, same name-and-argument-count matching), (b) any `lector-config` store handle
+(`ReviewStore`, `SessionStore`, `RecentProjects`, `ReviewBackend`: types derived from
+`crates/lector-config/src` that have a writing method) or a call of a derived store-writing method
+(`&mut self`, or named `save*`, `write*`, `set*`, `remove*`, `clear*`, `delete*`, `put*`,
+`insert*`, `persist*`, `record*`, `add*`), (c) `std::process::Command`, `ProcessCommand`,
+`Supervisor`, (d) `fs::write`/`remove_*`/`rename`/`copy`/`create_dir*`/`hard_link`/`symlink`/
+`set_permissions` (as call, import or value), `File::create`/`create_new`/`options` and any
+`OpenOptions`. Computing a patch is allowed; applying it is `lector-app`'s
+(`review_service::apply`).
 
 ## What the rules can and cannot see
 

@@ -1,9 +1,10 @@
 //! Git sync commands (v0.7): fetch / pull / push, upstream state, branches and stash.
 //!
 //! All of them go through the git CLI (`lector_git::sync`, `lector_git` branch API) under
-//! `lector-process`. Network commands run with the askpass environment the UI installs on
-//! the [`SyncHost`] and can be cancelled through it; their progress is published to its
-//! subscribers. Failures keep their type: downcast a command error to
+//! `lector-process`. The [`SyncHost`] owns credential prompts and progress (ADR 0002): it hosts
+//! the askpass server ([`SyncHost::start_askpass`]; the UI only supplies the prompt handler),
+//! network commands run with its askpass environment and can be cancelled through it, and their
+//! progress is published to its subscribers. Failures keep their type: downcast a command error to
 //! [`lector_git::Error`] and match `Error::Sync(SyncError { kind, hint, paths,
 //! hook_output, alternatives, .. })`.
 //!
@@ -76,6 +77,7 @@ type Listener = Arc<dyn Fn(&SyncProgress) + Send + Sync>;
 #[derive(Default)]
 pub struct SyncHost {
     env: RwLock<Vec<(OsString, OsString)>>,
+    askpass: Mutex<AskpassState>,
     running: Mutex<BTreeMap<u64, (RunningSync, CancelToken)>>,
     listeners: Mutex<Vec<(u64, Listener)>>,
     next: AtomicU64,
@@ -88,6 +90,28 @@ impl std::fmt::Debug for SyncHost {
             .finish_non_exhaustive()
     }
 }
+
+/// Credential prompts from git and ssh (askpass): the request / reply types a prompt handler
+/// passed to [`SyncHost::start_askpass`] works with, and the pure prompt-text helpers. UI
+/// crates use these instead of depending on `lector-process` (ADR 0002).
+pub mod askpass {
+    pub use lector_process::askpass::{
+        classify_prompt, parse_prompt, sanitize_prompt_text, ParsedPrompt, PromptKind, PromptReply,
+        PromptRequest, Secret,
+    };
+}
+
+/// The askpass server [`SyncHost`] owns, or why it could not start.
+#[derive(Default)]
+struct AskpassState {
+    server: Option<lector_process::askpass::AskpassServer>,
+    start_error: Option<String>,
+    /// The handler the running server delegates to (replaced by each `start_askpass`).
+    handler: Arc<RwLock<Option<PromptHandler>>>,
+}
+
+type PromptHandler =
+    Arc<dyn Fn(askpass::PromptRequest) -> askpass::PromptReply + Send + Sync + 'static>;
 
 /// Keeps a [`SyncHost::subscribe`] callback registered; dropping it unsubscribes.
 pub struct SyncSubscription {
@@ -139,6 +163,83 @@ impl SyncHost {
     /// Never contains credentials themselves, only how to ask for them.
     pub fn set_askpass_env(&self, env: Vec<(OsString, OsString)>) {
         *self.env.write() = env;
+    }
+
+    /// Registers `handler` as the answer to credential prompts and starts the askpass server
+    /// once per host, installing its environment for network git commands
+    /// ([`SyncHost::set_askpass_env`]). Later calls only replace the handler and return the
+    /// first start's result. `handler` runs on the server's connection thread and may block
+    /// until the user answers; without one, prompts are cancelled. Its socket and helper program live in a private
+    /// directory under `runtime_dir` (Lector's data directory in the app). A prompt names the
+    /// operation that asked through [`askpass::PromptRequest::op`]: the id of a
+    /// [`SyncHost::running`] operation, which the host tags each network command with.
+    ///
+    /// Failing to start is not fatal: git then fails with an authentication error where it
+    /// would have prompted; [`SyncHost::askpass_start_error`] says why.
+    pub fn start_askpass(
+        &self,
+        runtime_dir: &Path,
+        handler: impl Fn(askpass::PromptRequest) -> askpass::PromptReply + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        use lector_process::askpass::{AskpassError, AskpassServer};
+        let mut state = self.askpass.lock();
+        *state.handler.write() = Some(Arc::new(handler));
+        if state.server.is_some() {
+            return Ok(());
+        }
+        if let Some(err) = &state.start_error {
+            return Err(err.clone());
+        }
+        let current = state.handler.clone();
+        let delegate = move |request: askpass::PromptRequest| -> askpass::PromptReply {
+            let handler = current.read().clone();
+            match handler {
+                Some(h) => h(request),
+                None => askpass::PromptReply::Cancel,
+            }
+        };
+        let started = AskpassServer::start(runtime_dir, delegate).and_then(|server| {
+            let exe = std::env::current_exe().map_err(AskpassError::Io)?;
+            let helper = server.helper_program(&exe).map_err(AskpassError::Io)?;
+            Ok((server.env(&helper), server))
+        });
+        match started {
+            Ok((env, server)) => {
+                self.set_askpass_env(env);
+                state.server = Some(server);
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!("askpass: {err}; git cannot ask for credentials in this session");
+                state.start_error = Some(err.to_string());
+                Err(err.to_string())
+            }
+        }
+    }
+
+    /// Whether the askpass server runs.
+    pub fn askpass_running(&self) -> bool {
+        self.askpass.lock().server.is_some()
+    }
+
+    /// Why the askpass server could not start, if it failed.
+    pub fn askpass_start_error(&self) -> Option<String> {
+        self.askpass.lock().start_error.clone()
+    }
+
+    /// Stops the askpass server and removes its private directory (socket, helper program);
+    /// network commands started afterwards get no askpass environment. Called when the app
+    /// quits.
+    pub fn shutdown_askpass(&self) {
+        let server = {
+            let mut state = self.askpass.lock();
+            *state.handler.write() = None;
+            state.server.take()
+        };
+        if let Some(server) = server {
+            self.set_askpass_env(Vec::new());
+            server.shutdown();
+        }
     }
 
     /// Calls `cb` for every progress event of every sync command (on worker threads).
@@ -225,6 +326,33 @@ impl SyncHost {
                 })
                 .with_cancel(token),
         }
+    }
+}
+
+/// The credential helpers git is configured with in `workdir` (`credential.helper`, every
+/// value), for explaining an authentication failure. Empty when there are none or git cannot
+/// tell within a few seconds. Blocking (runs `git config`).
+pub fn credential_helpers(workdir: &Path) -> Vec<String> {
+    let cmd = lector_process::ProcessCommand::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(["config", "--get-all", "credential.helper"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .kind(lector_process::ProcessKind::Git)
+        .label("git config credential.helper");
+    let opts = lector_process::RunOptions {
+        timeout: Some(std::time::Duration::from_secs(5)),
+        ..Default::default()
+    };
+    match lector_process::run(&cmd, &opts) {
+        Ok(out) if out.success() => out
+            .stdout_text()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -401,6 +529,7 @@ fn fetch() -> FnCommand {
                 &[],
             ),
         )
+        .not_undoable("Fetching only moves remote-tracking branches to where the remote has them; the next fetch would move them again.")
         .with_ui_flow("git::Fetch"),
         |cx, args| {
             let repo = cx.require_repo()?;
@@ -523,6 +652,7 @@ fn push() -> FnCommand {
                 &[],
             ),
         )
+        .not_undoable("A push changes the remote, which others may already have fetched.")
         .with_ui_flow("git::Push"),
         |cx, args| {
             let repo = cx.require_repo()?;
@@ -857,8 +987,19 @@ fn restore_ref() -> FnCommand {
             let refname = str_arg(args, "ref").unwrap_or_default();
             let expected = oid_arg(args, "expected")?;
             let target = oid_arg(args, "target")?;
-            repo.restore_ref(refname, expected, target)?;
             let branch = refname.strip_prefix("refs/heads/").unwrap_or(refname);
+            // Removing a branch removes its upstream setting too, as `git branch -d` does, and
+            // the inverse puts it back; `update-ref -d` alone would leave it in the config.
+            let mut removed_upstream = None;
+            if target.is_none() && expected.is_some() && repo.branch_tip(branch)? == expected {
+                removed_upstream = repo.set_upstream(branch, None)?;
+            }
+            if let Err(err) = repo.restore_ref(refname, expected, target) {
+                if let Some(up) = &removed_upstream {
+                    let _ = repo.set_upstream(branch, Some(up));
+                }
+                return Err(err.into());
+            }
             if let (Some(up), Some(_)) = (str_arg(args, "upstream"), target) {
                 if let Err(e) = repo.set_upstream(branch, Some(up)) {
                     tracing::warn!("restored {branch} without its upstream {up}: {e}");
@@ -868,12 +1009,13 @@ fn restore_ref() -> FnCommand {
                 Some(t) => format!("Restored {branch} to {}", t.short()),
                 None => format!("Removed branch {branch}"),
             };
+            let mut undo_args = json!({ "ref": refname, "expected": oid_json(target), "target": oid_json(expected) });
+            if let Some(up) = &removed_upstream {
+                undo_args["upstream"] = json!(up);
+            }
             Ok(Outcome::new(summary)
                 .with_data(json!({ "ref": refname, "from": oid_json(expected), "to": oid_json(target) }))
-                .with_undo(invoke(
-                    "git.restore_ref",
-                    json!({ "ref": refname, "expected": oid_json(target), "target": oid_json(expected) }),
-                ))
+                .with_undo(invoke("git.restore_ref", undo_args))
                 .with_paths(vec![repo.workdir().to_path_buf()])
                 .with_ui(UiRequest::Refresh))
         },

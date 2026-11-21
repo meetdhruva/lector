@@ -1,4 +1,5 @@
-//! Partial staging round trips (`review::apply_hunk_action`) on fixture repositories:
+//! Partial staging round trips (`review_service::apply::apply_hunk_action`, the patch from
+//! `lector_review::review::hunk_patch`) on fixture repositories:
 //! stage / unstage / discard one hunk or a line selection, checked with git itself.
 #![allow(clippy::single_range_in_vec_init)]
 
@@ -6,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Once;
 
+use lector_app::review_service::apply;
 use lector_diff::{Algorithm, DiffOptions};
 use lector_git::{Changeset, FileChange, Repo};
 use lector_review::review::{self, FileDiff, HunkAction, LineSelection};
@@ -123,7 +125,7 @@ impl Fx {
     fn select(&self, cs: &Changeset, rel: &str, action: HunkAction, sel: &LineSelection) {
         let change = self.change(cs, rel);
         let applied =
-            review::apply_hunk_action(&self.repo(), cs, &change, action, sel, Algorithm::Histogram)
+            apply::apply_hunk_action(&self.repo(), cs, &change, action, sel, Algorithm::Histogram)
                 .unwrap();
         assert!(applied, "nothing applied");
     }
@@ -357,7 +359,7 @@ fn wrong_changeset_is_refused() {
     fx.commit("f.txt", b"a\n");
     fx.write("f.txt", b"b\n");
     let change = fx.change(&Changeset::Unstaged, "f.txt");
-    let err = review::apply_hunk_action(
+    let err = apply::apply_hunk_action(
         &fx.repo(),
         &Changeset::WorkingTree,
         &change,
@@ -386,7 +388,7 @@ fn stale_diff_is_refused_and_writes_nothing() {
     // The file changes on disk: a new line is inserted at the top.
     fx.write("f.txt", format!("NEW\n{TWO_HUNKS}").as_bytes());
     for action in [HunkAction::Stage, HunkAction::Discard] {
-        let err = review::apply_hunk_action_if_unchanged(
+        let err = apply::apply_hunk_action_if_unchanged(
             &fx.repo(),
             &Changeset::Unstaged,
             &change,
@@ -403,7 +405,7 @@ fn stale_diff_is_refused_and_writes_nothing() {
     // With a fresh diff the same call goes through.
     let fresh = fx.diff(&Changeset::Unstaged, "f.txt");
     let sel = fresh.hunk_selection(1).expect("hunk 1");
-    let applied = review::apply_hunk_action_if_unchanged(
+    let applied = apply::apply_hunk_action_if_unchanged(
         &fx.repo(),
         &Changeset::Unstaged,
         &change,
@@ -430,7 +432,7 @@ fn content_id_matches_for_unchanged_staged_and_crlf_files() {
     fx.write("f.txt", TWO_HUNKS.replace('\n', "\r\n").as_bytes());
     let d = fx.diff(&Changeset::Unstaged, "f.txt");
     let change = fx.change(&Changeset::Unstaged, "f.txt");
-    assert!(review::apply_hunk_action_if_unchanged(
+    assert!(apply::apply_hunk_action_if_unchanged(
         &fx.repo(),
         &Changeset::Unstaged,
         &change,
@@ -442,7 +444,7 @@ fn content_id_matches_for_unchanged_staged_and_crlf_files() {
     .unwrap());
     let s = fx.diff(&Changeset::Staged, "f.txt");
     let change = fx.change(&Changeset::Staged, "f.txt");
-    assert!(review::apply_hunk_action_if_unchanged(
+    assert!(apply::apply_hunk_action_if_unchanged(
         &fx.repo(),
         &Changeset::Staged,
         &change,

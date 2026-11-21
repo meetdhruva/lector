@@ -117,7 +117,7 @@ fn impl_bodies(f: &SourceFile) -> Vec<(usize, usize)> {
 }
 
 /// Number of parameters after `self` of the parameter list opening at `open`.
-fn param_count(f: &SourceFile, open: usize) -> usize {
+pub(crate) fn param_count(f: &SourceFile, open: usize) -> usize {
     let close = f.close_of(open);
     let (mut depth, mut angle) = (0usize, 0usize);
     let mut segments = 0usize;
@@ -144,7 +144,7 @@ fn param_count(f: &SourceFile, open: usize) -> usize {
 
 /// Number of arguments of the call whose `(` is at `open` (closure parameter lists and nested
 /// brackets do not split arguments).
-fn arg_count(f: &SourceFile, open: usize) -> usize {
+pub(crate) fn arg_count(f: &SourceFile, open: usize) -> usize {
     let close = f.close_of(open);
     let mut depth = 0usize;
     let mut args = 0usize;
@@ -179,7 +179,7 @@ fn arg_count(f: &SourceFile, open: usize) -> usize {
 }
 
 /// True when the parameter list opening at `open` starts with `self`, `&self`, `&mut self`.
-fn takes_self(f: &SourceFile, open: usize) -> bool {
+pub(crate) fn takes_self(f: &SourceFile, open: usize) -> bool {
     let mut j = open + 1;
     if f.tok(j) == "&" {
         j += 1;
@@ -193,15 +193,16 @@ fn takes_self(f: &SourceFile, open: usize) -> bool {
     f.tok(j) == "self"
 }
 
-/// Findings in one file (a no-op outside UI crates' non-test sources).
-pub fn scan_file(f: &SourceFile, api: &WriteApi, ambiguous: &AllowList) -> Vec<Violation> {
-    if !is_ui_src(&f.path) {
-        return Vec::new();
-    }
+/// Calls of the write API in the non-test code of `f`: the token index of the called name and
+/// the name. Matching is by name and argument count; ambiguous names also need a repo-like
+/// receiver (see the module docs). Shared with the `purity` rule.
+pub(crate) fn git_write_calls(
+    f: &SourceFile,
+    api: &WriteApi,
+    ambiguous: &AllowList,
+) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    let n = f.tokens().len();
-    let mut imports_command = false;
-    for i in 0..n {
+    for i in 0..f.tokens().len() {
         if f.is_test(i) {
             continue;
         }
@@ -210,16 +211,39 @@ pub fn scan_file(f: &SourceFile, api: &WriteApi, ambiguous: &AllowList) -> Vec<V
         if t == "." && f.tok(i + 2) == "(" && api.has(f.tok(i + 1), arg_count(f, i + 2)) {
             let name = f.tok(i + 1);
             if !ambiguous.contains(name) || receiver_looks_like_repo(f, i) {
-                out.push(write_call(f, i + 1, name));
+                out.push((i + 1, name.to_string()));
             }
         } else if RECEIVER_TYPES.contains(&t)
             && f.tok(i + 1) == "::"
             && f.tok(i + 3) == "("
             && api.has(f.tok(i + 2), arg_count(f, i + 3).saturating_sub(1))
         {
-            out.push(write_call(f, i + 2, f.tok(i + 2)));
+            out.push((i + 2, f.tok(i + 2).to_string()));
         }
-        // lector_process types
+    }
+    out
+}
+
+/// A process-spawning construct found by [`process_uses`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessUse {
+    /// `ProcessCommand` or `Supervisor` (from `lector_process`).
+    Process(String),
+    /// `std::process::Command` (path, import, or `Command::new(` when it is imported).
+    StdCommand,
+}
+
+/// Process-spawning constructs in the non-test code of `f`, with their token index. Shared with
+/// the `purity` rule.
+pub(crate) fn process_uses(f: &SourceFile) -> Vec<(usize, ProcessUse)> {
+    let mut out = Vec::new();
+    let n = f.tokens().len();
+    let mut imports_command = false;
+    for i in 0..n {
+        if f.is_test(i) {
+            continue;
+        }
+        let t = f.tok(i);
         if (t == "ProcessCommand" || t == "Supervisor")
             && !(i > 0
                 && matches!(
@@ -227,24 +251,16 @@ pub fn scan_file(f: &SourceFile, api: &WriteApi, ambiguous: &AllowList) -> Vec<V
                     "fn" | "struct" | "enum" | "mod" | "type" | "trait"
                 ))
         {
-            out.push(Violation::new(
-                RULE,
-                &f.path,
-                f.line(i),
-                format!(
-                    "`{t}` in a UI crate; processes are started by lector-app commands (ADR 0002)"
-                ),
-            ));
+            out.push((i, ProcessUse::Process(t.to_string())));
         }
-        // std::process::Command
         if f.seq(i, &["process", "::", "Command"]) {
             imports_command = true;
-            out.push(command_violation(f, i));
+            out.push((i, ProcessUse::StdCommand));
         } else if f.seq(i, &["process", "::", "{"]) {
             let close = f.close_of(i + 2);
             if (i + 3..close).any(|k| f.tok(k) == "Command") {
                 imports_command = true;
-                out.push(command_violation(f, i));
+                out.push((i, ProcessUse::StdCommand));
             }
         }
     }
@@ -254,9 +270,34 @@ pub fn scan_file(f: &SourceFile, api: &WriteApi, ambiguous: &AllowList) -> Vec<V
                 && f.seq(i, &["Command", "::", "new", "("])
                 && (i == 0 || f.tok(i - 1) != "::")
             {
-                out.push(command_violation(f, i));
+                out.push((i, ProcessUse::StdCommand));
             }
         }
+    }
+    out
+}
+
+/// Findings in one file (a no-op outside UI crates' non-test sources).
+pub fn scan_file(f: &SourceFile, api: &WriteApi, ambiguous: &AllowList) -> Vec<Violation> {
+    if !is_ui_src(&f.path) {
+        return Vec::new();
+    }
+    let mut out: Vec<Violation> = git_write_calls(f, api, ambiguous)
+        .into_iter()
+        .map(|(i, name)| write_call(f, i, &name))
+        .collect();
+    for (i, hit) in process_uses(f) {
+        out.push(match hit {
+            ProcessUse::Process(t) => Violation::new(
+                RULE,
+                &f.path,
+                f.line(i),
+                format!(
+                    "`{t}` in a UI crate; processes are started by lector-app commands (ADR 0002)"
+                ),
+            ),
+            ProcessUse::StdCommand => command_violation(f, i),
+        });
     }
     out
 }
@@ -281,6 +322,12 @@ fn command_violation(f: &SourceFile, i: usize) -> Violation {
 
 /// The identifier a method call is made on (`repo` in `repo.push(`, `repo` in `x.repo().push(`).
 fn receiver_looks_like_repo(f: &SourceFile, dot: usize) -> bool {
+    receiver_name_contains(f, dot, &["repo", "git", "shadow"])
+}
+
+/// Whether the identifier a method call at `dot` is made on contains one of `hints` (case
+/// insensitive). Shared with the `purity` rule.
+pub(crate) fn receiver_name_contains(f: &SourceFile, dot: usize, hints: &[&str]) -> bool {
     let mut p = dot;
     loop {
         if p == 0 {
@@ -314,7 +361,7 @@ fn receiver_looks_like_repo(f: &SourceFile, dot: usize) -> bool {
             p -= 1;
         }
         let name = f.tok(p).to_ascii_lowercase();
-        return ["repo", "git", "shadow"].iter().any(|h| name.contains(h));
+        return hints.iter().any(|h| name.contains(h));
     }
 }
 

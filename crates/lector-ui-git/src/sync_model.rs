@@ -7,8 +7,8 @@
 
 use std::time::{Duration, SystemTime};
 
+use lector_app::commands::git_sync::askpass::{self, PromptKind};
 use lector_git::{PullMode, SyncError, SyncErrorKind, UpstreamStatus};
-use lector_process::askpass::PromptKind;
 use serde_json::{json, Value};
 
 /// A configured remote (URL with credentials removed).
@@ -990,7 +990,7 @@ pub struct PromptSpec {
     pub title: String,
     /// The prompt as git / ssh sent it, neutralized for display (control characters and
     /// bidi overrides replaced or removed, length capped; see
-    /// [`lector_process::askpass::sanitize_prompt_text`]).
+    /// [`askpass::sanitize_prompt_text`]).
     pub prompt: String,
     /// Host (host-key prompts; `user@host` of ssh password prompts; also from URLs).
     pub host: Option<String>,
@@ -1026,12 +1026,12 @@ pub fn looks_secret(text: &str) -> bool {
 
 /// Classifies a prompt into a dialog (masking, fields to show). Structured dialogs and
 /// their fields come only from exact OpenSSH / git templates
-/// ([`lector_process::askpass::parse_prompt`]); `kind` may only downgrade that result (pass
+/// ([`askpass::parse_prompt`]); `kind` may only downgrade that result (pass
 /// [`PromptKind::Other`] to force the generic dialog), never upgrade it. Anything else is
 /// the generic "The server asks:" dialog with the sanitized text and no trusted-looking
 /// fields.
 pub fn prompt_spec(text: &str, kind: PromptKind) -> PromptSpec {
-    let parsed = lector_process::askpass::parse_prompt(text);
+    let parsed = askpass::parse_prompt(text);
     let kind = if kind == parsed.kind {
         kind
     } else {
@@ -1041,7 +1041,7 @@ pub fn prompt_spec(text: &str, kind: PromptKind) -> PromptSpec {
         kind: PromptDialogKind::Generic,
         masked: false,
         title: "The server asks:".into(),
-        prompt: lector_process::askpass::sanitize_prompt_text(text),
+        prompt: askpass::sanitize_prompt_text(text),
         host: None,
         key_type: None,
         fingerprint: None,
@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn prompts_are_classified_into_dialogs() {
         let host = "The authenticity of host 'github.com (140.82.121.4)' can't be established.\nED25519 key fingerprint is SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU.\nThis key is not known by any other names.\nAre you sure you want to continue connecting (yes/no/[fingerprint])? ";
-        let spec = prompt_spec(host, lector_process::askpass::classify_prompt(host));
+        let spec = prompt_spec(host, askpass::classify_prompt(host));
         assert_eq!(spec.kind, PromptDialogKind::HostKey);
         assert!(!spec.masked);
         assert_eq!(spec.host.as_deref(), Some("github.com (140.82.121.4)"));
@@ -1545,20 +1545,20 @@ mod tests {
         assert_eq!(HOST_KEY_TRUST_ANSWER, "yes");
 
         let pass = "Enter passphrase for key '/home/ann/.ssh/id_ed25519': ";
-        let spec = prompt_spec(pass, lector_process::askpass::classify_prompt(pass));
+        let spec = prompt_spec(pass, askpass::classify_prompt(pass));
         assert_eq!(spec.kind, PromptDialogKind::Passphrase);
         assert!(spec.masked);
         assert_eq!(spec.key_path.as_deref(), Some("/home/ann/.ssh/id_ed25519"));
 
         let user = "Username for 'https://github.com': ";
-        let spec = prompt_spec(user, lector_process::askpass::classify_prompt(user));
+        let spec = prompt_spec(user, askpass::classify_prompt(user));
         assert_eq!(spec.kind, PromptDialogKind::Username);
         assert!(!spec.masked);
         assert_eq!(spec.url.as_deref(), Some("https://github.com"));
         assert_eq!(spec.host.as_deref(), Some("github.com"));
 
         let pw = "Password for 'https://ann:tok@github.com': ";
-        let spec = prompt_spec(pw, lector_process::askpass::classify_prompt(pw));
+        let spec = prompt_spec(pw, askpass::classify_prompt(pw));
         assert_eq!(spec.kind, PromptDialogKind::Password);
         assert!(spec.masked);
         let url = spec.url.unwrap_or_default();
@@ -1566,7 +1566,7 @@ mod tests {
         assert!(url.contains("github.com"));
 
         let ssh_pw = "ann@build.example's password: ";
-        let spec = prompt_spec(ssh_pw, lector_process::askpass::classify_prompt(ssh_pw));
+        let spec = prompt_spec(ssh_pw, askpass::classify_prompt(ssh_pw));
         assert_eq!(spec.kind, PromptDialogKind::Password);
         assert_eq!(spec.host.as_deref(), Some("ann@build.example"));
 
@@ -1594,7 +1594,7 @@ mod tests {
             "Your passphrase: ",
         ];
         for text in cases {
-            let kind = lector_process::askpass::classify_prompt(text);
+            let kind = askpass::classify_prompt(text);
             let spec = prompt_spec(text, kind);
             assert_eq!(spec.kind, PromptDialogKind::Generic, "{text:?}");
             assert_eq!(spec.title, "The server asks:");

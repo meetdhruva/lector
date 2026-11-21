@@ -9,6 +9,7 @@ use gpui::{
     FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task,
     Window,
 };
+use lector_app::review_service::CancelToken;
 use lector_git::{ChangeKind, Changeset, CommitDetail, Oid, RefKind};
 use lector_review::review::{self, changeset_key, ChangesetView};
 use lector_ui::actions::diff as diff_actions;
@@ -174,7 +175,10 @@ impl ReviewView {
         }
         match &self.view {
             Some(v) => v.title.clone().into(),
-            None => review::changeset_title(self.store.read(cx).repo(), &self.changeset).into(),
+            None => lector_ui::commands_bridge::core(cx)
+                .review()
+                .changeset_title(self.store.read(cx).repo(), &self.changeset)
+                .into(),
         }
     }
 
@@ -190,7 +194,7 @@ impl ReviewView {
             self.error = Some("Not a git repository".into());
             return;
         };
-        let review_store = store.review.clone();
+        let review_service = lector_ui::commands_bridge::core(cx).review();
         let opts = settings_diff_options(store, cx);
         let cs = self.changeset.clone();
         let work = cx.background_spawn(async move {
@@ -200,11 +204,12 @@ impl ReviewView {
                 }
                 _ => None,
             };
+            let cancel = CancelToken::new();
             let view = match &cs {
                 Changeset::Range { from, to } if to == review::WORKDIR_REV => {
-                    review::load_vs_workdir_with(&repo, from, &review_store, &opts)
+                    review_service.changeset_vs_workdir(&repo, from, &opts, &cancel)
                 }
-                _ => review::load_changeset_with(&repo, &cs, &review_store, &opts),
+                _ => review_service.changeset(&repo, &cs, &opts, &cancel),
             }
             .map_err(|e| e.to_string())?;
             Ok::<_, String>((commit, view))
@@ -345,10 +350,10 @@ impl ReviewView {
             return;
         }
         let new_state = !file.viewed;
-        let store = self.store.read(cx);
-        if let Some(repo) = store.repo() {
+        let service = lector_ui::commands_bridge::core(cx).review();
+        if let Some(repo) = self.store.read(cx).repo() {
             let root = repo.workdir().to_path_buf();
-            if let Err(e) = review::set_viewed_with(&store.review, &root, &key, file, new_state) {
+            if let Err(e) = service.set_viewed(&root, &key, file, new_state) {
                 tracing::warn!("could not save viewed state: {e}");
             }
         }

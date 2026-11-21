@@ -13,9 +13,11 @@ pub mod documents; // Agent DOCS
 pub mod git_service; // Agent APP
 pub mod health; // local crash log and session health
 pub mod journal; // Agent SAFE
+pub mod os; // reveal in file manager, OS preferences: processes for the UI (ADR 0002)
 pub mod project; // the open project: files, git status, symbols, navigation (ADR 0001)
 pub mod provenance; // Agent REVIEWUX
 pub mod review_queue; // Agent REVIEWUX
+pub mod review_service; // review data for views, the CLI and agents; the viewed-marks write (ADR 0001)
 pub mod scheduler; // Agent APP
 
 pub use crate::commands::{

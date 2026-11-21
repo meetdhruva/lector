@@ -525,8 +525,9 @@ impl ShadowRepo {
         self.write_snapshot(plan, note)
     }
 
-    /// Records the index entries (mode, blob, stage) of `paths`; paths without an entry
-    /// are recorded as "not in the index". Restore with [`ShadowRepo::restore_index`].
+    /// Records the index entries (mode, blob, stage, intent-to-add flag) of `paths`; paths
+    /// without an entry are recorded as "not in the index". Restore with
+    /// [`ShadowRepo::restore_index`].
     pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot> {
         let mut plan = Plan::new(SnapshotKind::Index);
         let mut rels = Vec::new();
@@ -551,6 +552,7 @@ impl ShadowRepo {
         plan.index
             .sort_by(|a, b| (&a.path, a.stage).cmp(&(&b.path, b.stage)));
         plan.index.dedup();
+        plan.intent_to_add = self.intent_to_add(&rels)?.into_iter().collect();
         for (rel, found) in seen {
             if !found {
                 plan.no_index.push(rel);
@@ -1298,8 +1300,8 @@ impl ShadowRepo {
     }
 
     /// Per-path fingerprints of the *index* entries of `paths` (all stages, mode and blob
-    /// id), `"absent"` for requested paths without an entry. Compare with a stored map
-    /// before an index undo.
+    /// id, intent-to-add flag), `"absent"` for requested paths without an entry. Compare with
+    /// a stored map before an index undo.
     pub fn index_fingerprints(&self, paths: &[&str]) -> Result<BTreeMap<String, String>> {
         let mut rels = Vec::new();
         for path in paths {
@@ -1307,6 +1309,7 @@ impl ShadowRepo {
         }
         let mut out: BTreeMap<String, String> = BTreeMap::new();
         let mut covered: BTreeSet<String> = BTreeSet::new();
+        let ita = self.intent_to_add(&rels)?;
         for chunk in rels.chunks(500) {
             let mut args = vec!["ls-files", "-s", "-z", "--"];
             args.extend(chunk.iter().map(String::as_str));
@@ -1318,7 +1321,10 @@ impl ShadowRepo {
                         covered.insert(rel.clone());
                     }
                 }
-                let item = format!("{} {} {}", entry.mode, entry.oid, entry.stage);
+                let mut item = format!("{} {} {}", entry.mode, entry.oid, entry.stage);
+                if ita.contains(&entry.path) {
+                    item.push_str(" ita");
+                }
                 out.entry(entry.path)
                     .and_modify(|v| {
                         v.push(';');
@@ -1515,11 +1521,21 @@ impl ShadowRepo {
             input.extend_from_slice(format!("0 {zero}\t{path}").as_bytes());
             input.push(0);
         }
+        // Intent-to-add entries come back with `git add -N` (update-index cannot set the
+        // flag); one whose file is gone from the working tree comes back as a plain entry.
+        let mut ita: Vec<&str> = Vec::new();
         for entry in manifest
             .index
             .iter()
             .filter(|e| rels.iter().any(|r| is_within(&e.path, r)))
         {
+            if entry.stage == 0
+                && manifest.intent_to_add.contains(&entry.path)
+                && fs::symlink_metadata(self.workdir.join(&entry.path)).is_ok()
+            {
+                ita.push(&entry.path);
+                continue;
+            }
             input.extend_from_slice(
                 format!(
                     "{} {} {}\t{}",
@@ -1529,25 +1545,57 @@ impl ShadowRepo {
             );
             input.push(0);
         }
-        if input.is_empty() {
-            return Ok(());
+        if !input.is_empty() {
+            let mut cmd = Command::new("git");
+            cmd.arg("-C")
+                .arg(&self.workdir)
+                .args([
+                    "--literal-pathspecs",
+                    "--no-pager",
+                    "update-index",
+                    "-z",
+                    "--index-info",
+                ])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_OPTIONAL_LOCKS");
+            exec(cmd, "git update-index", Some(&input))?;
         }
-        let mut cmd = Command::new("git");
-        cmd.arg("-C")
-            .arg(&self.workdir)
-            .args([
-                "--literal-pathspecs",
-                "--no-pager",
-                "update-index",
+        for chunk in ita.chunks(500) {
+            let mut args = vec!["add", "--force", "--intent-to-add", "--"];
+            args.extend(chunk.iter().copied());
+            let mut cmd = self.user_git(&args);
+            cmd.env_remove("GIT_OPTIONAL_LOCKS");
+            exec(cmd, "git add --intent-to-add", None)?;
+        }
+        Ok(())
+    }
+
+    /// The paths among (or below) `rels` whose index entry is intent-to-add: the only entries
+    /// the index-to-working-tree diff shows as added.
+    fn intent_to_add(&self, rels: &[String]) -> Result<BTreeSet<String>> {
+        let mut out = BTreeSet::new();
+        for chunk in rels.chunks(500) {
+            let mut args = vec![
+                "diff",
+                "--name-only",
                 "-z",
-                "--index-info",
-            ])
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_OPTIONAL_LOCKS");
-        exec(cmd, "git update-index", Some(&input)).map(drop)
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules",
+                "--diff-filter=A",
+                "--",
+            ];
+            args.extend(chunk.iter().map(String::as_str));
+            let output = exec(self.user_git(&args), "git diff", None)?;
+            for name in output.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+                out.insert(String::from_utf8_lossy(name).into_owned());
+            }
+        }
+        Ok(out)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1832,6 +1880,8 @@ struct Plan {
     vanished: Vec<String>,
     index: Vec<IndexRecord>,
     no_index: Vec<String>,
+    /// Index entries that are intent-to-add (`git add -N`), a flag `ls-files -s` does not show.
+    intent_to_add: Vec<String>,
 }
 
 impl Plan {
@@ -1844,6 +1894,7 @@ impl Plan {
             vanished: Vec::new(),
             index: Vec::new(),
             no_index: Vec::new(),
+            intent_to_add: Vec::new(),
         }
     }
 
@@ -1877,6 +1928,10 @@ impl Plan {
             tokens.push(b"x".to_vec());
             tokens.push(path.as_bytes().to_vec());
         }
+        for path in &self.intent_to_add {
+            tokens.push(b"n".to_vec());
+            tokens.push(path.as_bytes().to_vec());
+        }
         let mut out = Vec::new();
         for token in tokens {
             out.extend_from_slice(&token);
@@ -1892,6 +1947,7 @@ struct Manifest {
     skipped: Vec<String>,
     index: Vec<IndexRecord>,
     no_index: Vec<String>,
+    intent_to_add: Vec<String>,
 }
 
 impl Manifest {
@@ -1918,6 +1974,7 @@ impl Manifest {
             skipped: Vec::new(),
             index: Vec::new(),
             no_index: Vec::new(),
+            intent_to_add: Vec::new(),
         };
         while let Some(tag) = tokens.next() {
             match tag.as_str() {
@@ -1929,6 +1986,9 @@ impl Manifest {
                 "x" => manifest
                     .no_index
                     .push(tokens.next().ok_or_else(|| bad("x"))?),
+                "n" => manifest
+                    .intent_to_add
+                    .push(tokens.next().ok_or_else(|| bad("n"))?),
                 "i" => {
                     let mode = tokens.next().ok_or_else(|| bad("i mode"))?;
                     let oid = tokens.next().ok_or_else(|| bad("i oid"))?;
@@ -2226,77 +2286,4 @@ fn apply_permissions(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rel_paths_are_checked() {
-        assert_eq!(check_rel("a/b.txt").unwrap(), "a/b.txt");
-        assert_eq!(check_rel("./a//b").unwrap(), "a/b");
-        for bad in [
-            "",
-            "..",
-            "../x",
-            "/etc/passwd",
-            "a/../../x",
-            ".git/config",
-            "sub/.GIT/x",
-        ] {
-            assert!(check_rel(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn within() {
-        assert!(is_within("a/b", "a"));
-        assert!(is_within("a", "a"));
-        assert!(!is_within("ab", "a"));
-        assert!(!is_within("a", "a/b"));
-    }
-
-    #[test]
-    fn quoting() {
-        assert_eq!(quote_path("plain name.txt"), "plain name.txt");
-        assert_eq!(quote_path("a\nb"), "\"a\\nb\"");
-        assert_eq!(quote_path("q\"x\\"), "\"q\\\"x\\\\\"");
-        assert_eq!(quote_path("tab\there"), "\"tab\\there\"");
-    }
-
-    #[test]
-    fn manifest_round_trips() {
-        let mut plan = Plan::new(SnapshotKind::Index);
-        let oid = Oid::from_hex("1111111111111111111111111111111111111111").unwrap();
-        plan.index.push(IndexRecord {
-            path: "weird\nname".into(),
-            mode: "100644".into(),
-            oid,
-            stage: 2,
-        });
-        plan.no_index.push("gone".into());
-        plan.absent.push("missing".into());
-        let parsed = Manifest::parse(&plan.manifest()).unwrap();
-        assert_eq!(parsed.kind, SnapshotKind::Index);
-        assert_eq!(parsed.index.len(), 1);
-        assert_eq!(parsed.index[0].path, "weird\nname");
-        assert_eq!(parsed.index[0].stage, 2);
-        assert_eq!(parsed.no_index, ["gone"]);
-        assert_eq!(parsed.absent, ["missing"]);
-        assert!(Manifest::parse(b"nope\0").is_err());
-    }
-
-    #[test]
-    fn ref_names_carry_the_time() {
-        assert_eq!(
-            ref_time("refs/lector/snapshots/1700000000-0001-9"),
-            Some(1_700_000_000)
-        );
-        assert_eq!(ref_time("refs/heads/main"), None);
-    }
-
-    #[test]
-    fn hash_is_stable_and_separates_parts() {
-        assert_eq!(fnv128(["abc"]), fnv128(["abc"]));
-        assert_ne!(fnv128(["ab", "c"]), fnv128(["a", "bc"]));
-        assert_eq!(fnv128(["x"]).len(), 32);
-    }
-}
+mod tests;

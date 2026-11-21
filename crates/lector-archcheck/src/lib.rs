@@ -61,6 +61,8 @@ options:
   -v, --verbose              list every violation, not only the new ones
   --update                   rewrite arch/baseline.toml; refuses to raise any number
   --allow-increase <reason>  with --update: allow raising/adding entries (initial creation only)
+  --moved <old>=<new>        with --update: a file was renamed; move its baseline entries to the
+                             new path (refused when the new count is higher). Repeatable.
   --root <dir>               repository root (default: the enclosing cargo workspace)
   -h, --help                 this text
 
@@ -80,10 +82,22 @@ struct Cli {
     verbose: bool,
     update: bool,
     allow_increase: Option<String>,
+    moved: Vec<(String, String)>,
     root: Option<PathBuf>,
     graph_write: bool,
     graph_check: bool,
     list_api: bool,
+}
+
+/// `<old>=<new>` of `--moved`: two non-empty, different, forward-slash paths.
+fn parse_moved(pair: &str) -> Result<(String, String)> {
+    let bad = || ArchError::Usage(format!("--moved needs <old>=<new>, got `{pair}`"));
+    let (old, new) = pair.split_once('=').ok_or_else(bad)?;
+    let (old, new) = (old.trim().replace('\\', "/"), new.trim().replace('\\', "/"));
+    if old.is_empty() || new.is_empty() || old == new {
+        return Err(bad());
+    }
+    Ok((old, new))
 }
 
 fn parse_args(args: &[String]) -> Result<Cli> {
@@ -92,6 +106,7 @@ fn parse_args(args: &[String]) -> Result<Cli> {
         verbose: false,
         update: false,
         allow_increase: None,
+        moved: Vec::new(),
         root: None,
         graph_write: false,
         graph_check: false,
@@ -114,6 +129,12 @@ fn parse_args(args: &[String]) -> Result<Cli> {
                     .ok_or_else(|| usage("--allow-increase needs a reason".into()))?;
                 cli.allow_increase = Some(reason.clone());
             }
+            "--moved" => {
+                let pair = it
+                    .next()
+                    .ok_or_else(|| usage("--moved needs <old>=<new>".into()))?;
+                cli.moved.push(parse_moved(pair)?);
+            }
             "--root" => {
                 let dir = it
                     .next()
@@ -122,6 +143,9 @@ fn parse_args(args: &[String]) -> Result<Cli> {
             }
             s if s.starts_with("--allow-increase=") => {
                 cli.allow_increase = Some(s["--allow-increase=".len()..].to_string());
+            }
+            s if s.starts_with("--moved=") => {
+                cli.moved.push(parse_moved(&s["--moved=".len()..])?);
             }
             s if s.starts_with("--root=") => cli.root = Some(PathBuf::from(&s["--root=".len()..])),
             s if s.starts_with('-') => return Err(usage(format!("unknown option `{s}`"))),
@@ -157,6 +181,9 @@ fn parse_args(args: &[String]) -> Result<Cli> {
     }
     if cli.allow_increase.is_some() && !cli.update {
         return bad("--allow-increase only makes sense with --update");
+    }
+    if !cli.moved.is_empty() && !cli.update {
+        return bad("--moved only makes sense with --update");
     }
     if cli
         .allow_increase
@@ -497,6 +524,44 @@ fn print_table(out: &mut dyn Write, rows: &[Row]) -> Result<()> {
     Ok(())
 }
 
+/// `--moved old=new`: in every rule that ran, the baseline entry of `old` becomes the entry of
+/// `new` with the same count. The usual comparison then decides: a `new` that violates more
+/// than `old` did is a raise and is refused like any other. An `old` without an entry in any
+/// rule that ran, or a `new` that already has one, is a usage error (a typo must not pass).
+fn transfer_moves(
+    baseline: &mut Baseline,
+    outputs: &[RuleOutput],
+    moved: &[(String, String)],
+    out: &mut dyn Write,
+) -> Result<()> {
+    for (old, new) in moved {
+        let mut found = false;
+        for o in outputs {
+            let Some(entries) = baseline.rules.get_mut(o.rule) else {
+                continue;
+            };
+            let Some(count) = entries.remove(old) else {
+                continue;
+            };
+            if entries.contains_key(new) {
+                return Err(ArchError::Usage(format!(
+                    "--moved {old}={new}: [{}] already has an entry for `{new}`",
+                    o.rule
+                )));
+            }
+            entries.insert(new.clone(), count);
+            found = true;
+            emit(out, &format!("moved  {}  {old} -> {new} ({count})", o.rule))?;
+        }
+        if !found {
+            return Err(ArchError::Usage(format!(
+                "--moved {old}={new}: no baseline entry for `{old}` in the rules that ran"
+            )));
+        }
+    }
+    Ok(())
+}
+
 enum UpdateResult {
     Refused,
     Written,
@@ -511,6 +576,7 @@ fn update_baseline(
     baseline: &mut Baseline,
     out: &mut dyn Write,
 ) -> Result<UpdateResult> {
+    transfer_moves(baseline, outputs, &cli.moved, out)?;
     let mut raised: Vec<(String, Change)> = Vec::new();
     let mut lowered = 0usize;
     for o in outputs {
@@ -611,6 +677,30 @@ mod tests {
         assert!(c.update);
         assert_eq!(c.allow_increase.as_deref(), Some("initial"));
         assert_eq!(parse_args(&args("graph --check")).unwrap().cmd, Cmd::Graph);
+    }
+
+    #[test]
+    fn moved_arguments() {
+        let c = parse_args(&args("--update --moved a/x.rs=b/x.rs --moved=c.rs=d.rs")).unwrap();
+        assert_eq!(
+            c.moved,
+            [
+                ("a/x.rs".to_string(), "b/x.rs".to_string()),
+                ("c.rs".to_string(), "d.rs".to_string())
+            ]
+        );
+        for bad in [
+            "--moved a=b",
+            "--update --moved",
+            "--update --moved a",
+            "--update --moved a=a",
+            "--update --moved =b",
+        ] {
+            assert!(
+                matches!(parse_args(&args(bad)), Err(ArchError::Usage(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
