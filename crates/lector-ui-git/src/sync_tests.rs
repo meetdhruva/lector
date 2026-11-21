@@ -8,10 +8,10 @@ use std::sync::Once;
 use std::time::Duration;
 
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
+use lector_app::commands::git_sync::askpass::{classify_prompt, PromptReply, PromptRequest};
 use lector_app::Project;
 use lector_app::{AppCore, CoreOptions};
 use lector_git::SyncErrorKind;
-use lector_process::askpass::{classify_prompt, PromptReply, PromptRequest};
 use lector_ui::views::Workspace;
 
 use crate::askpass_ui;

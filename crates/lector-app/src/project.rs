@@ -26,8 +26,8 @@ use lector_syntax::{LanguageRegistry, SymbolIndex, Syntax};
 use lector_text::Text;
 use parking_lot::{Mutex, RwLock};
 
-use crate::content_cache::ContentCache;
 use crate::documents::Document;
+use crate::review_service::ReviewService;
 
 /// Errors of the project model.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +57,7 @@ impl From<lector_review::Error> for ProjectError {
         match e {
             lector_review::Error::Io(e) => ProjectError::Io(e),
             lector_review::Error::Git(e) => ProjectError::Git(e),
+            lector_review::Error::Cancelled => ProjectError::Other("cancelled".into()),
             lector_review::Error::Other(s) => ProjectError::Other(s),
         }
     }
@@ -728,7 +729,7 @@ pub fn load_changeset(
 ) -> Result<ChangesetView> {
     let repo = project.repo().ok_or(ProjectError::NotARepository)?;
     let opts = review::diff_options(&project.settings().diff);
-    Ok(review::load_changeset_with(repo, cs, store, &opts)?)
+    Ok(ReviewService::new(store.clone()).changeset(repo, cs, &opts, &CancelToken::new())?)
 }
 
 /// Loads and diffs one change of the project's repository (through the app's content cache).
@@ -738,13 +739,12 @@ pub fn load_file_diff(
     opts: &DiffOptions,
 ) -> Result<FileDiff> {
     let repo = project.repo().ok_or(ProjectError::NotARepository)?;
-    let cache = ContentCache::global();
-    Ok(review::load_file_diff_with(
+    Ok(ReviewService::without_marks().file_diff(
         repo,
         project.languages(),
         change,
         opts,
-        cache,
+        &CancelToken::new(),
     )?)
 }
 

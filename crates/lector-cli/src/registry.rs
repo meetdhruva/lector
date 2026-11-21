@@ -3,7 +3,7 @@
 use std::io::Read as _;
 
 use anyhow::{anyhow, bail, Context as _};
-use lector_app::commands::CommandError;
+use lector_app::commands::{CommandError, Source};
 use lector_app::Project;
 use serde_json::{json, Value};
 
@@ -17,7 +17,7 @@ pub fn run_commands(args: &CommandsArgs, io: &mut Io) -> anyhow::Result<()> {
     let wanted = args.category.as_deref().map(str::to_lowercase);
     let commands: Vec<_> = core
         .registry()
-        .list()
+        .list_for(Source::Cli)
         .into_iter()
         .filter(|c| {
             wanted

@@ -2,7 +2,8 @@
 //! risk facts and scoring, structural diff and conflict parsing.
 //!
 //! Every function here is a function of its inputs: no globals, no caches that outlive a call,
-//! no I/O other than reading through the `lector-git` / `lector-fs` handles passed in.
+//! no I/O other than reading through the `lector-git` / `lector-fs` handles passed in, and no
+//! writes at all (the `purity` rule of `arch-check` enforces it; ADR 0001/0002).
 //! Memoization of derived data (syntax trees, line diffs) is supplied by the caller through
 //! [`content::DerivedCache`]; [`content::NoCache`] computes everything on every call.
 //! Everything is blocking; the caller owns threading.
@@ -11,6 +12,7 @@
 
 pub mod conflicts;
 pub mod content;
+mod hunks;
 pub mod review;
 pub mod risk;
 pub mod structural;
@@ -26,9 +28,21 @@ pub enum Error {
     /// Git error.
     #[error("git error: {0}")]
     Git(#[from] lector_git::Error),
+    /// The caller's [`CancelToken`](lector_search::CancelToken) was set.
+    #[error("cancelled")]
+    Cancelled,
     /// Anything else.
     #[error("{0}")]
     Other(String),
+}
+
+/// `Err(Cancelled)` once `cancel` is set.
+pub(crate) fn check_cancel(cancel: &lector_search::CancelToken) -> Result<()> {
+    if cancel.is_cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// `Result` alias for the review analysis.

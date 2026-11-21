@@ -1,21 +1,23 @@
 //! Credential prompts from git / ssh in the GUI (askpass, v0.7).
 //!
-//! One [`AskpassServer`] per app process, started the first time a network operation runs
-//! (nothing listens before that). Its handler runs on a connection thread: it posts the
+//! The askpass server is owned by `lector-app` ([`SyncHost::start_askpass`], ADR 0002): one
+//! per app process, started the first time a network operation runs (nothing listens before
+//! that). This module only supplies its prompt handler and shows the dialogs. The handler
+//! runs on a connection thread: it posts the
 //! prompt to the GPUI thread and blocks until the dialog answers, at most
 //! [`PROMPT_TIMEOUT`]. On the GPUI thread prompts are queued and shown one at a time as a
 //! [`PromptDialog`] in the window whose operation is running, naming the operation and the
 //! remote (credentials stripped from the URL). Closing the dialog in any way other than
 //! answering — Escape, the window closing, the operation being cancelled or ending — answers
-//! Cancel. Answers are passed to git as a [`lector_process::askpass::Secret`] (zeroed after
-//! use), never logged and never stored by Lector.
+//! Cancel. Answers are passed to git as a [`Secret`](lector_app::commands::git_sync::askpass::Secret)
+//! (zeroed after use), never logged and never stored by Lector.
 //!
 //! The helper program put into `GIT_ASKPASS` / `SSH_ASKPASS` is the server's generated shim
-//! (Unix) or hard link (Windows), see `lector_process::askpass`; the environment goes to
-//! [`SyncHost::set_askpass_env`] so only git network commands get it.
+//! (Unix) or hard link (Windows), see `lector_process::askpass`; [`SyncHost::start_askpass`]
+//! installs the environment so only git network commands get it.
 //!
 //! **Attribution.** A prompt names the operation that asked when its git process carries
-//! `LECTOR_ASKPASS_OP` (`lector_process::askpass::op_env(<SyncHost operation id>)`): the
+//! `LECTOR_ASKPASS_OP` (set by the [`SyncHost`] to its operation id): the
 //! operation is found among [`SyncHost::running`] and matched to the registered
 //! [`PromptContext`] by repository. Without it, a prompt is attributed only when exactly one
 //! operation is registered; otherwise the dialog names no operation and warns. The dialog
@@ -30,8 +32,8 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{AnyWindowHandle, App, AppContext as _, Entity, Global, WeakEntity};
+use lector_app::commands::git_sync::askpass::{PromptReply, PromptRequest};
 use lector_app::commands::git_sync::SyncHost;
-use lector_process::askpass::{AskpassServer, PromptReply, PromptRequest};
 use lector_ui::views::Workspace;
 
 use crate::sync_dialogs::PromptDialog;
@@ -67,8 +69,8 @@ pub struct PromptContext {
 
 #[derive(Default)]
 struct AskpassHost {
-    server: Option<AskpassServer>,
-    start_error: Option<String>,
+    /// The handler is installed on the core's [`SyncHost`] (started or failed).
+    requested: bool,
     runtime_dir: Option<PathBuf>,
     queue: VecDeque<Pending>,
     showing: Option<(WeakEntity<PromptDialog>, u64)>,
@@ -83,14 +85,15 @@ pub fn set_runtime_dir(dir: PathBuf, cx: &mut App) {
     cx.default_global::<AskpassHost>().runtime_dir = Some(dir);
 }
 
-/// Starts the askpass server once per process and installs its environment on the
-/// [`SyncHost`]. Failing to start is not fatal: git then fails with an authentication error
-/// where it would have prompted, and the failure dialog says so.
+/// Starts the askpass server once per process ([`SyncHost::start_askpass`]) with a handler
+/// that shows prompts in this app. Failing to start is not fatal: git then fails with an
+/// authentication error where it would have prompted, and the failure dialog says so.
 pub fn ensure_started(cx: &mut App) {
     let host = cx.default_global::<AskpassHost>();
-    if host.server.is_some() || host.start_error.is_some() {
+    if host.requested {
         return;
     }
+    host.requested = true;
     let dir = host
         .runtime_dir
         .clone()
@@ -106,31 +109,16 @@ pub fn ensure_started(cx: &mut App) {
             .recv_timeout(PROMPT_TIMEOUT)
             .unwrap_or(PromptReply::Cancel)
     };
-    let started = AskpassServer::start(&dir, handler).and_then(|server| {
-        let exe = std::env::current_exe().map_err(lector_process::askpass::AskpassError::Io)?;
-        let helper = server
-            .helper_program(&exe)
-            .map_err(lector_process::askpass::AskpassError::Io)?;
-        Ok((server.env(&helper), server))
-    });
-    match started {
-        Ok((env, server)) => {
-            let core = lector_ui::commands_bridge::core(cx);
-            SyncHost::of(&core).set_askpass_env(env);
-            cx.default_global::<AskpassHost>().server = Some(server);
-            cx.spawn(async move |cx| {
-                while let Some(p) = rx.next().await {
-                    if cx.update(|cx| enqueue(p, cx)).is_err() {
-                        break;
-                    }
+    let core = lector_ui::commands_bridge::core(cx);
+    if SyncHost::of(&core).start_askpass(&dir, handler).is_ok() {
+        cx.spawn(async move |cx| {
+            while let Some(p) = rx.next().await {
+                if cx.update(|cx| enqueue(p, cx)).is_err() {
+                    break;
                 }
-            })
-            .detach();
-        }
-        Err(err) => {
-            tracing::warn!("askpass: {err}; git cannot ask for credentials in this session");
-            cx.default_global::<AskpassHost>().start_error = Some(err.to_string());
-        }
+            }
+        })
+        .detach();
     }
 }
 
@@ -138,19 +126,19 @@ pub fn ensure_started(cx: &mut App) {
 /// when the app quits; prompts still waiting are cancelled.
 pub fn shutdown(cx: &mut App) {
     cancel_pending(cx);
-    if let Some(host) = cx.try_global::<AskpassHost>() {
-        if host.server.is_some() {
-            if let Some(server) = cx.global_mut::<AskpassHost>().server.take() {
-                server.shutdown();
-            }
-        }
+    if cx
+        .try_global::<AskpassHost>()
+        .is_some_and(|host| host.requested)
+    {
+        let core = lector_ui::commands_bridge::core(cx);
+        SyncHost::of(&core).shutdown_askpass();
     }
 }
 
 /// Why credential prompts are unavailable, if the server could not start.
 pub fn start_error(cx: &App) -> Option<String> {
-    cx.try_global::<AskpassHost>()
-        .and_then(|h| h.start_error.clone())
+    let core = lector_ui::commands_bridge::core(cx);
+    SyncHost::of(&core).askpass_start_error()
 }
 
 /// Registers a running operation that may prompt; returns its id for [`end_operation`].

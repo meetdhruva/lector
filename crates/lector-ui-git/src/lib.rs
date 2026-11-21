@@ -34,6 +34,7 @@ mod sync_tests;
 use std::rc::Rc;
 
 use gpui::{actions, App, AppContext, ClipboardItem, Entity, SharedString, Window};
+use lector_app::review_service::CancelToken;
 use lector_git::Oid;
 use lector_ui::actions::{editor, git as git_actions, workspace as ws_actions};
 use lector_ui::code_view::{CodeSource, CodeView};
@@ -335,7 +336,8 @@ pub fn init(cx: &mut App) {
             else {
                 return;
             };
-            let Some(base) = lector_review::review::default_base(repo, &branch) else {
+            let service = lector_ui::commands_bridge::core(cx).review();
+            let Some(base) = service.default_base(repo, &branch, &CancelToken::new()) else {
                 return;
             };
             let s = s.clone();

@@ -9,7 +9,9 @@
 //!
 //! Policy:
 //!
-//! * Read commands are always listed and callable.
+//! * Read commands are always listed and callable, except UI-only ones
+//!   (`CommandSpec::sources`, e.g. `review.fetch_pull_request`): never listed, and the registry
+//!   refuses a call with a tool error, with or without `--allow-writes`.
 //! * Commands that write (`CommandSpec::writes`) are **neither listed nor callable** unless the
 //!   server was built with [`ServerOptions::allow_writes`]. A call to one anyway (a client with a
 //!   stale tool list) is answered with a tool error (`isError: true`) that says how to enable it.
@@ -373,7 +375,7 @@ impl McpServer {
         let tools: Vec<Value> = self
             .core
             .registry()
-            .list()
+            .list_for(Source::Mcp)
             .iter()
             .filter(|c| self.visible(c.as_ref()))
             .map(|c| tool_json(c.as_ref()))

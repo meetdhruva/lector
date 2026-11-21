@@ -707,3 +707,32 @@ fn settings_get_redacts_agent_environments() {
         assert!(text.contains("<redacted>"), "{text}");
     }
 }
+
+#[test]
+fn ui_only_commands_are_neither_listed_nor_callable_with_or_without_writes() {
+    let fx = fixture();
+    for allow_writes in [false, true] {
+        let server = fx.server(allow_writes);
+        let mut messages = handshake();
+        messages.push(req(2, "tools/list", json!({})));
+        messages.push(call(
+            3,
+            "review_fetch_pull_request",
+            json!({
+                "url": fx.repo.to_string_lossy(),
+                "refspecs": ["+refs/pull/1/head:refs/lector/pr/1/head"],
+            }),
+        ));
+        let out = converse(&server, &messages);
+        let names = tool_names(response(&out, 2));
+        assert!(names.contains(&"git_list_changes".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"review_fetch_pull_request".to_string()),
+            "listed with allow_writes={allow_writes}"
+        );
+        let result = &response(&out, 3)["result"];
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("only from Lector's window"), "{text}");
+    }
+}

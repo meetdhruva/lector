@@ -12,6 +12,7 @@ use gpui::{
     FontWeight, Hsla, ImageSource, MouseButton, MouseDownEvent, Pixels, SharedString, Subscription,
     Task, WeakEntity, Window,
 };
+use lector_app::review_service::CancelToken;
 use lector_config::DiffLayout;
 use lector_diff::{DiffOptions, DiffStats, Whitespace};
 use lector_git::{ChangeKind, Changeset, FileChange, Side};
@@ -116,7 +117,9 @@ mod comments;
 pub(crate) use comments::display_author;
 pub use comments::{CommentComposer, ReviewContext};
 mod review_layer;
+mod widgets;
 pub use review_layer::overlay_colors;
+pub use widgets::{stats_label, viewed_checkbox};
 
 /// The diff view entity.
 pub struct DiffView {
@@ -332,6 +335,7 @@ impl DiffView {
         self.loading = true;
         let repo_override = self.review_ctx.as_ref().and_then(|c| c.repo.clone());
         let comment_query = self.comment_query(cx);
+        let service = lector_ui::commands_bridge::core(cx).review();
         let work = cx.background_spawn(async move {
             let repo = match &repo_override {
                 Some(r) => r,
@@ -340,13 +344,13 @@ impl DiffView {
                     .ok_or_else(|| "Not a git repository".to_string())?,
             };
             let languages = project.languages().clone();
-            let cache = lector_app::content_cache::ContentCache::global();
+            let cancel = CancelToken::new();
             let diff = match &target {
                 DiffTarget::Change(change) => {
-                    review::load_file_diff_with(repo, &languages, change, &opts, cache)
+                    service.file_diff(repo, &languages, change, &opts, &cancel)
                 }
                 DiffTarget::FileVsRev { path, rev } => {
-                    review::file_vs_revision_with(repo, &languages, path, rev, &opts, cache)
+                    service.file_vs_revision(repo, &languages, path, rev, &opts, &cancel)
                 }
             }
             .map_err(|e| e.to_string())?;
@@ -1499,67 +1503,6 @@ impl DiffView {
     }
 }
 
-/// "+12 −3" with diff colors.
-pub fn stats_label(s: DiffStats, theme: &lector_theme::Theme) -> impl IntoElement {
-    h_flex()
-        .flex_none()
-        .gap(px(6.))
-        .text_size(metrics::text_sm())
-        .font_weight(FontWeight::MEDIUM)
-        .child(
-            div()
-                .text_color(theme.diff.added_text.hsla())
-                .child(format!("+{}", s.added)),
-        )
-        .child(
-            div()
-                .text_color(theme.diff.removed_text.hsla())
-                .child(format!("−{}", s.removed)),
-        )
-}
-
-/// A "Viewed" checkbox pill.
-pub fn viewed_checkbox(id: &'static str, viewed: bool, cx: &App) -> gpui::Stateful<gpui::Div> {
-    let ui = &cx.theme().ui;
-    let accent = ui.accent.hsla();
-    h_flex()
-        .id(id)
-        .flex_none()
-        .h(px(24.))
-        .px(px(8.))
-        .gap(px(6.))
-        .rounded(px(5.))
-        .border_1()
-        .border_color(if viewed {
-            accent.opacity(0.5)
-        } else {
-            ui.border.hsla()
-        })
-        .when(viewed, |el| el.bg(accent.opacity(0.12)))
-        .text_size(metrics::text_sm())
-        .text_color(if viewed {
-            ui.text.hsla()
-        } else {
-            ui.text_muted.hsla()
-        })
-        .cursor_pointer()
-        .hover(|s| s.bg(ui.hover.hsla()))
-        .tooltip(Tooltip::for_action(
-            "Toggle Viewed",
-            &diff_actions::ToggleViewed,
-        ))
-        .child(
-            Icon::new(if viewed {
-                IconName::CheckSquare
-            } else {
-                IconName::Square
-            })
-            .size(IconSize::Small)
-            .color(if viewed { accent } else { ui.text_faint.hsla() }),
-        )
-        .child("Viewed")
-}
-
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.relayout_comments_if_resized(window, cx);
@@ -1938,14 +1881,17 @@ pub fn restore_item(
             let key = format!("diff:{changeset_key}:{path}");
             let (ck, path) = (changeset_key.clone(), path.clone());
             let store = store.clone();
+            let service = lector_ui::commands_bridge::core(cx).review();
             let view = cx.new(|cx| {
+                let svc = service.clone();
                 let task = cx.background_spawn(async move {
                     let change = repo
                         .changes(&cs)
                         .ok()?
                         .into_iter()
                         .find(|c| c.path() == path)?;
-                    let (stats, binary, hash) = review::file_summary(&repo, &change, &opts).ok()?;
+                    let summary = svc.file_summary(&repo, &change, &opts, &CancelToken::new());
+                    let (stats, binary, hash) = summary.ok()?;
                     Some((change, stats, binary, hash))
                 });
                 cx.spawn(async move |this, cx| {
@@ -1956,7 +1902,7 @@ pub fn restore_item(
                         let viewed = {
                             let s = v.store.read(cx);
                             s.repo()
-                                .map(|r| s.review.is_viewed(r.workdir(), &ck, change.path(), &hash))
+                                .map(|r| service.is_viewed(r.workdir(), &ck, change.path(), &hash))
                         }
                         .unwrap_or(false);
                         let file = ReviewFile {

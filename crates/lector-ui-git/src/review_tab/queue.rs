@@ -99,12 +99,15 @@ impl ReviewView {
         let detect = settings.review.detect_moved;
         self.queue.risk_order = settings.review.risk_order;
         let root = repo.workdir().to_path_buf();
-        let db = lector_ui::commands_bridge::core(cx).db().clone();
+        let core = lector_ui::commands_bridge::core(cx);
+        let db = core.db().clone();
+        let service = core.review();
         self.queue.task = Some(cx.spawn(async move |this, cx| {
             let analysis = cx
                 .background_executor()
                 .spawn(async move {
-                    let analysis = analyze_changes(&repo, &languages, &changes, &opts, detect);
+                    let analysis =
+                        analyze_changes(&service, &repo, &languages, &changes, &opts, detect);
                     // Persisted reviewed hunks of every analyzed file.
                     let store = HunkReviewStore::new(&db);
                     let marks: Vec<(String, Vec<bool>)> = analysis

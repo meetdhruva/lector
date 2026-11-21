@@ -17,7 +17,8 @@ use std::rc::Rc;
 
 use gpui::{App, Context, Global, PromptLevel, Window};
 use lector_app::commands::{
-    Availability, CommandContext, CommandSpec, Focus, NoticeLevel, Outcome, Source, UiRequest,
+    Availability, CommandContext, CommandSpec, Focus, NoticeLevel, Outcome, Source, Sources,
+    UiRequest,
 };
 use lector_app::AppCore;
 use lector_git::Changeset;
@@ -175,7 +176,8 @@ pub fn palette_entries(ctx: &CommandContext) -> Vec<PaletteEntry> {
         .into_iter()
         .filter_map(|c| {
             let spec = c.spec();
-            if spec.ui_flow.is_some() {
+            // A UI flow, or a UI-only command its own view fronts, is not a palette row.
+            if spec.ui_flow.is_some() || spec.sources == Sources::UiOnly {
                 return None;
             }
             let needs_args = spec

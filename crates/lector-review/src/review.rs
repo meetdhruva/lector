@@ -3,21 +3,23 @@
 //! presentation.
 //!
 //! Everything here is blocking; call it from a background thread. Functions take
-//! the handles they read through (a [`Repo`], a [`LanguageRegistry`], a
-//! [`ReviewStore`]) and, where they parse or diff, a [`DerivedCache`].
+//! the handles they read through (a [`Repo`], a [`LanguageRegistry`]), the viewed marks as a
+//! read-only input ([`ViewedMarks`]) and, where they parse or diff, a [`DerivedCache`].
+//! Nothing here writes: viewed marks are stored, and hunks applied, by `lector-app`.
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use lector_config::{content_hash, DiffSettings, ReviewStore};
+use lector_config::{content_hash, DiffSettings};
 use lector_diff::{
     diff_lines, fold_context, refine_inline, split_rows, unified_rows, Algorithm, DiffOptions,
     DiffStats, InlineChanges, LineDiff, RowKind, Segment, SplitRow, UnifiedRow, Whitespace,
 };
 use lector_fs::{FileKind, ImageFormat};
 use lector_git::{Changeset, FileChange, Oid, Repo, Side};
+use lector_search::CancelToken;
 use lector_syntax::{HighlightId, Language, LanguageRegistry, Syntax};
 use lector_text::Text;
 use parking_lot::Mutex;
@@ -28,13 +30,14 @@ pub const MAX_DIFF_BYTES: u64 = 5 * 1024 * 1024;
 /// Changesets with more files than this get no eager stats (computed on demand).
 pub const MAX_EAGER_STATS: usize = 3000;
 
+use crate::check_cancel;
 use crate::content::{ContentId, DerivedCache};
 pub use crate::{Error, Result};
 
 /// A changeset ready for review: files with stats and viewed state.
 #[derive(Clone, Debug)]
 pub struct ChangesetView {
-    /// Stable key for [`ReviewStore`] ("worktree", "commit:<sha>", "branch:main...feature").
+    /// Stable key for the viewed marks ("worktree", "commit:<sha>", "branch:main...feature").
     pub key: String,
     /// Human title ("Working tree", "abc1234 Fix parser", "main…feature").
     pub title: String,
@@ -79,7 +82,7 @@ pub struct ReviewFile {
     pub stats: Option<DiffStats>,
     /// Marked viewed at the current content.
     pub viewed: bool,
-    /// Hash identifying the diff content (both sides) for [`ReviewStore`].
+    /// Hash identifying the diff content (both sides) for the viewed marks.
     pub content_hash: String,
     /// Either side is binary (known after loading).
     pub binary: bool,
@@ -92,7 +95,7 @@ impl ReviewFile {
     }
 }
 
-/// Stable [`ReviewStore`] key for a changeset.
+/// Stable viewed-marks key for a changeset.
 pub fn changeset_key(cs: &Changeset) -> String {
     match cs {
         Changeset::Unstaged => "unstaged".into(),
@@ -196,7 +199,7 @@ fn display_path(change: &FileChange) -> String {
 }
 
 /// Loaded bytes of one side, or a reason they were not loaded.
-enum Loaded {
+pub(crate) enum Loaded {
     Missing,
     TooLarge(u64),
     Bytes(Vec<u8>),
@@ -232,7 +235,7 @@ fn load_side(repo: &Repo, side: &Side) -> Result<Loaded> {
 /// and the working file uses CRLF, the working file is compared with LF endings, as git
 /// does after its clean filter. Without this, every line of every file would show as
 /// changed for Windows users with `core.autocrlf=true`.
-fn normalize_checkout_eol(stored: Option<&[u8]>, working: Vec<u8>) -> Vec<u8> {
+pub(crate) fn normalize_checkout_eol(stored: Option<&[u8]>, working: Vec<u8>) -> Vec<u8> {
     let Some(stored) = stored else {
         return working;
     };
@@ -252,7 +255,7 @@ fn normalize_checkout_eol(stored: Option<&[u8]>, working: Vec<u8>) -> Vec<u8> {
 }
 
 /// Applies [`normalize_checkout_eol`] when `new_side` is the working tree.
-fn normalize_loaded_pair(old: &Loaded, new_side: &Side, new: Loaded) -> Loaded {
+pub(crate) fn normalize_loaded_pair(old: &Loaded, new_side: &Side, new: Loaded) -> Loaded {
     match (old, new_side, new) {
         (Loaded::Bytes(stored), Side::Workdir(_), Loaded::Bytes(working)) => {
             Loaded::Bytes(normalize_checkout_eol(Some(stored), working))
@@ -362,19 +365,57 @@ pub fn file_summary(
     Ok((s.stats, s.binary, s.hash))
 }
 
+/// Read-only view of the "viewed" marks, supplied by the caller (the app owns the store).
+///
+/// A mark counts only while the content hash recorded with it equals the file's current one.
+/// Any `Fn(changeset_key, path, content_hash) -> bool` is a `ViewedMarks`; [`NoMarks`] has none.
+pub trait ViewedMarks {
+    /// Whether `path` of the changeset `changeset_key` is marked viewed at `content_hash`.
+    fn is_viewed(&self, changeset_key: &str, path: &str, content_hash: &str) -> bool;
+}
+
+impl<F: Fn(&str, &str, &str) -> bool> ViewedMarks for F {
+    fn is_viewed(&self, changeset_key: &str, path: &str, content_hash: &str) -> bool {
+        self(changeset_key, path, content_hash)
+    }
+}
+
+/// [`ViewedMarks`] with nothing viewed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoMarks;
+
+impl ViewedMarks for NoMarks {
+    fn is_viewed(&self, _: &str, _: &str, _: &str) -> bool {
+        false
+    }
+}
+
 /// Loads a changeset with stats and viewed state, using `repo` directly.
 pub fn load_changeset_with(
     repo: &Repo,
     cs: &Changeset,
-    store: &ReviewStore,
+    viewed: &dyn ViewedMarks,
     opts: &DiffOptions,
 ) -> Result<ChangesetView> {
+    load_changeset_cancellable(repo, cs, viewed, opts, &CancelToken::new())
+}
+
+/// [`load_changeset_with`] that stops with [`Error::Cancelled`] soon after `cancel` is set
+/// (checked between files; a file being summarized finishes first).
+pub fn load_changeset_cancellable(
+    repo: &Repo,
+    cs: &Changeset,
+    viewed: &dyn ViewedMarks,
+    opts: &DiffOptions,
+    cancel: &CancelToken,
+) -> Result<ChangesetView> {
+    check_cancel(cancel)?;
     let changes = repo.changes(cs)?;
     let key = changeset_key(cs);
     let title = changeset_title(Some(repo), cs);
     let eager = changes.len() <= MAX_EAGER_STATS;
-    let summaries = summarize_all(repo, &changes, opts, eager);
-    let root = repo.workdir().to_path_buf();
+    let summaries = summarize_all(repo, &changes, opts, eager, cancel);
+    check_cancel(cancel)?;
     let files = changes
         .into_iter()
         .zip(summaries)
@@ -383,12 +424,12 @@ pub fn load_changeset_with(
                 Some(s) => (s.stats, s.binary, s.hash),
                 None => (None, false, String::new()),
             };
-            let viewed = !hash.is_empty() && store.is_viewed(&root, &key, change.path(), &hash);
+            let is_viewed = !hash.is_empty() && viewed.is_viewed(&key, change.path(), &hash);
             ReviewFile {
                 display_path: display_path(&change),
                 change,
                 stats,
-                viewed,
+                viewed: is_viewed,
                 content_hash: hash,
                 binary,
             }
@@ -408,6 +449,7 @@ fn summarize_all(
     changes: &[FileChange],
     opts: &DiffOptions,
     eager: bool,
+    cancel: &CancelToken,
 ) -> Vec<Option<FileSummary>> {
     if !eager || changes.is_empty() {
         return changes.iter().map(|_| None).collect();
@@ -425,7 +467,13 @@ fn summarize_all(
             .map(|part| {
                 s.spawn(move || {
                     part.iter()
-                        .map(|c| summarize(repo, c, opts).ok())
+                        .map(|c| {
+                            if cancel.is_cancelled() {
+                                None
+                            } else {
+                                summarize(repo, c, opts).ok()
+                            }
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -442,19 +490,6 @@ fn summarize_all(
         out.push(None);
     }
     out
-}
-
-/// Marks `file` viewed / unviewed in `store` and updates it.
-pub fn set_viewed_with(
-    store: &ReviewStore,
-    repo_root: &Path,
-    key: &str,
-    file: &mut ReviewFile,
-    viewed: bool,
-) -> std::io::Result<()> {
-    store.set_viewed(repo_root, key, file.path(), &file.content_hash, viewed)?;
-    file.viewed = viewed;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -810,7 +845,7 @@ pub fn load_file_diff_with(
 }
 
 /// Identity of both loaded sides of `change` (blob ids, else content hashes).
-fn pair_content_id(change: &FileChange, old: &Loaded, new: &Loaded) -> String {
+pub(crate) fn pair_content_id(change: &FileChange, old: &Loaded, new: &Loaded) -> String {
     format!(
         "{}|{}",
         side_identity(&change.old, old),
@@ -987,10 +1022,22 @@ pub const WORKDIR_REV: &str = ":workdir";
 pub fn load_vs_workdir_with(
     repo: &Repo,
     rev: &str,
-    store: &ReviewStore,
+    viewed: &dyn ViewedMarks,
     opts: &DiffOptions,
 ) -> Result<ChangesetView> {
+    load_vs_workdir_cancellable(repo, rev, viewed, opts, &CancelToken::new())
+}
+
+/// [`load_vs_workdir_with`] that stops with [`Error::Cancelled`] soon after `cancel` is set.
+pub fn load_vs_workdir_cancellable(
+    repo: &Repo,
+    rev: &str,
+    viewed: &dyn ViewedMarks,
+    opts: &DiffOptions,
+    cancel: &CancelToken,
+) -> Result<ChangesetView> {
     use std::collections::BTreeMap;
+    check_cancel(cancel)?;
     let committed = repo.changes(&Changeset::Range {
         from: rev.to_string(),
         to: "HEAD".into(),
@@ -1041,8 +1088,14 @@ pub fn load_vs_workdir_with(
         to: WORKDIR_REV.to_string(),
     };
     let key = format!("workdir:{rev}");
-    let summaries = summarize_all(repo, &changes, opts, changes.len() <= MAX_EAGER_STATS);
-    let root = repo.workdir().to_path_buf();
+    let summaries = summarize_all(
+        repo,
+        &changes,
+        opts,
+        changes.len() <= MAX_EAGER_STATS,
+        cancel,
+    );
+    check_cancel(cancel)?;
     let files = changes
         .into_iter()
         .zip(summaries)
@@ -1057,12 +1110,12 @@ pub fn load_vs_workdir_with(
             {
                 return None;
             }
-            let viewed = !hash.is_empty() && store.is_viewed(&root, &key, change.path(), &hash);
+            let is_viewed = !hash.is_empty() && viewed.is_viewed(&key, change.path(), &hash);
             Some(ReviewFile {
                 display_path: display_path(&change),
                 change,
                 stats,
-                viewed,
+                viewed: is_viewed,
                 content_hash: hash,
                 binary,
             })
@@ -1110,233 +1163,13 @@ pub fn resolve(repo: &Repo, rev: &str) -> Option<Oid> {
     repo.resolve(rev).ok()
 }
 
-// ---------------------------------------------------------------------------
-// Partial staging (v0.2): stage / unstage / discard one hunk or selected lines.
-// ---------------------------------------------------------------------------
-
-pub use lector_diff::patch::LineSelection;
-
-/// What to do with a hunk (or a line selection) of a file's diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HunkAction {
-    /// Stage it: apply to the index. Needs an `Unstaged` change (index → worktree).
-    Stage,
-    /// Unstage it: revert it in the index. Needs a `Staged` change (HEAD → index).
-    Unstage,
-    /// Discard it: revert it in the working tree. Needs an `Unstaged` change.
-    Discard,
-}
-
-impl HunkAction {
-    /// The actions offered for a change of the given changeset (hunk toolbar).
-    pub fn available_for(cs: &Changeset) -> &'static [HunkAction] {
-        match cs {
-            Changeset::Unstaged => &[HunkAction::Stage, HunkAction::Discard],
-            Changeset::Staged => &[HunkAction::Unstage],
-            _ => &[],
-        }
-    }
-}
-
-impl FileDiff {
-    /// Selection of hunk `ix` of [`FileDiff::diff`] (`None` if out of range).
-    pub fn hunk_selection(&self, ix: usize) -> Option<LineSelection> {
-        self.diff.hunks.get(ix).map(LineSelection::hunk)
-    }
-
-    /// The hunk containing (or nearest after) old row `old` / new row `new`.
-    pub fn hunk_at(&self, old: Option<u32>, new: Option<u32>) -> Option<usize> {
-        let hunks = &self.diff.hunks;
-        let within =
-            |r: &Range<u32>, row: u32| r.contains(&row) || (r.is_empty() && r.start == row);
-        hunks
-            .iter()
-            .position(|h| {
-                old.is_some_and(|o| within(&h.old, o)) || new.is_some_and(|n| within(&h.new, n))
-            })
-            .or_else(|| {
-                let n = new?;
-                hunks.iter().position(|h| h.new.start >= n)
-            })
-    }
-}
-
-/// Bytes of `side` as git sees them for patching (`None` when it does not exist).
-fn patch_bytes(repo: &Repo, side: &Side) -> Result<Option<Vec<u8>>> {
-    Ok(repo.load(side)?)
-}
-
-/// Git file mode for the headers of new/deleted-file patches.
-fn file_mode(repo: &Repo, rel: &str) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(repo.workdir().join(rel)) {
-            if meta.permissions().mode() & 0o111 != 0 {
-                return 0o100755;
-            }
-        }
-    }
-    let _ = (repo, rel);
-    0o100644
-}
-
-/// Builds the patch for `action` on the `selection` (rows of the diff of `change`, a
-/// file of `changeset`, as shown by [`load_file_diff_with`]) and where to apply it. `Ok(None)` when the
-/// selection contains no change (or the file is binary).
-///
-/// Staging applies `index → worktree` to the index; unstaging and discarding build
-/// the reverse pair (`index → HEAD`, `worktree → index`) with the selection swapped and
-/// apply it forwards, so context always comes from the content being patched and
-/// neighbouring unselected changes never get in the way. Working-tree content is
-/// compared in git's normalized form (CRLF → LF when the index uses LF), which is
-/// what `git apply` sees after its clean filter.
-pub fn hunk_patch(
-    repo: &Repo,
-    changeset: &Changeset,
-    change: &FileChange,
-    action: HunkAction,
-    selection: &LineSelection,
-    algorithm: Algorithm,
-) -> Result<Option<(Vec<u8>, lector_git::PatchTarget)>> {
-    hunk_patch_checked(repo, changeset, change, action, selection, algorithm, None)
-}
-
-fn hunk_patch_checked(
-    repo: &Repo,
-    changeset: &Changeset,
-    change: &FileChange,
-    action: HunkAction,
-    selection: &LineSelection,
-    algorithm: Algorithm,
-    expected_content_id: Option<&str>,
-) -> Result<Option<(Vec<u8>, lector_git::PatchTarget)>> {
-    use lector_diff::patch::{build_patch_with, PatchFile};
-    use lector_git::PatchTarget;
-
-    if !HunkAction::available_for(changeset).contains(&action) {
-        return Err(Error::Other(format!(
-            "cannot {} this change: hunks can be staged and discarded in unstaged changes, \
-             and unstaged in staged changes",
-            match action {
-                HunkAction::Stage => "stage",
-                HunkAction::Unstage => "unstage",
-                HunkAction::Discard => "discard",
-            }
-        )));
-    }
-    let path = change
-        .new_path
-        .clone()
-        .or_else(|| change.old_path.clone())
-        .ok_or_else(|| Error::Other("change has no path".into()))?;
-    let file = PatchFile {
-        path: &path,
-        mode: file_mode(repo, &path),
-    };
-    let old = patch_bytes(repo, &change.old)?;
-    let new = patch_bytes(repo, &change.new)?;
-    if let Some(expected) = expected_content_id {
-        let as_loaded = |b: &Option<Vec<u8>>| match b {
-            None => Loaded::Missing,
-            Some(b) if b.len() as u64 > MAX_DIFF_BYTES => Loaded::TooLarge(b.len() as u64),
-            Some(b) => Loaded::Bytes(b.clone()),
-        };
-        let old_loaded = as_loaded(&old);
-        let new_loaded = normalize_loaded_pair(&old_loaded, &change.new, as_loaded(&new));
-        if pair_content_id(change, &old_loaded, &new_loaded) != expected {
-            return Err(Error::Other(format!(
-                "{} changed since this diff was shown; nothing was applied. \
-                 Review the updated diff and try again.",
-                change.path()
-            )));
-        }
-    }
-    let (base, other, sel, target) = match action {
-        HunkAction::Stage => {
-            let new = new.map(|w| normalize_checkout_eol(old.as_deref(), w));
-            (old, new, selection.clone(), PatchTarget::Index)
-        }
-        HunkAction::Unstage => (new, old, selection.swapped(), PatchTarget::Index),
-        HunkAction::Discard => {
-            let new = new.map(|w| normalize_checkout_eol(old.as_deref(), w));
-            (new, old, selection.swapped(), PatchTarget::Worktree)
-        }
-    };
-    Ok(
-        build_patch_with(&file, base.as_deref(), other.as_deref(), &sel, algorithm)
-            .map(|p| (p, target)),
-    )
-}
-
-/// Stages, unstages or discards the `selection` of `change` (see [`hunk_patch`]).
-/// Returns `false` when there was nothing to apply.
-pub fn apply_hunk_action(
-    repo: &Repo,
-    changeset: &Changeset,
-    change: &FileChange,
-    action: HunkAction,
-    selection: &LineSelection,
-    algorithm: Algorithm,
-) -> Result<bool> {
-    apply_checked(repo, changeset, change, action, selection, algorithm, None)
-}
-
-/// [`apply_hunk_action`], but refuses (with an error, writing nothing) when either side
-/// of the file no longer matches `expected_content_id` ([`FileDiff::content_id`] of the
-/// diff the selection was made in), so rows of a stale diff never stage, unstage or
-/// discard the wrong lines.
-pub fn apply_hunk_action_if_unchanged(
-    repo: &Repo,
-    changeset: &Changeset,
-    change: &FileChange,
-    action: HunkAction,
-    selection: &LineSelection,
-    algorithm: Algorithm,
-    expected_content_id: &str,
-) -> Result<bool> {
-    apply_checked(
-        repo,
-        changeset,
-        change,
-        action,
-        selection,
-        algorithm,
-        Some(expected_content_id),
-    )
-}
-
-fn apply_checked(
-    repo: &Repo,
-    changeset: &Changeset,
-    change: &FileChange,
-    action: HunkAction,
-    selection: &LineSelection,
-    algorithm: Algorithm,
-    expected_content_id: Option<&str>,
-) -> Result<bool> {
-    let patch = hunk_patch_checked(
-        repo,
-        changeset,
-        change,
-        action,
-        selection,
-        algorithm,
-        expected_content_id,
-    )?;
-    match patch {
-        Some((patch, target)) => {
-            repo.apply_patch(&patch, target, false)?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
+pub use crate::hunks::{hunk_patch, hunk_patch_if_unchanged, HunkAction, LineSelection};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::content::NoCache;
+    use std::path::Path;
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
@@ -1384,8 +1217,26 @@ mod tests {
         (dir, repo)
     }
 
-    fn store(dir: &Path) -> ReviewStore {
-        ReviewStore::open(dir.join("review-state.json"))
+    /// In-memory viewed marks (the app owns the real store).
+    #[derive(Default)]
+    struct Marks(std::cell::RefCell<std::collections::HashSet<(String, String, String)>>);
+
+    impl Marks {
+        fn mark(&self, key: &str, file: &ReviewFile) {
+            self.0.borrow_mut().insert((
+                key.to_string(),
+                file.path().to_string(),
+                file.content_hash.clone(),
+            ));
+        }
+    }
+
+    impl ViewedMarks for Marks {
+        fn is_viewed(&self, key: &str, path: &str, hash: &str) -> bool {
+            self.0
+                .borrow()
+                .contains(&(key.to_string(), path.to_string(), hash.to_string()))
+        }
     }
 
     #[test]
@@ -1421,8 +1272,7 @@ mod tests {
     #[test]
     fn working_tree_changeset_has_stats_and_viewed_state() {
         let (dir, repo) = fixture();
-        let st_dir = tempfile::tempdir().unwrap();
-        let store = store(st_dir.path());
+        let store = Marks::default();
         let opts = DiffOptions::default();
         let view = load_changeset_with(&repo, &Changeset::WorkingTree, &store, &opts).unwrap();
         let paths: Vec<_> = view.files.iter().map(|f| f.display_path.clone()).collect();
@@ -1452,8 +1302,7 @@ mod tests {
         assert_eq!(view.viewed_count(), 0);
 
         // Mark viewed; reload sees it.
-        let mut lib = lib.clone();
-        set_viewed_with(&store, repo.workdir(), &view.key, &mut lib, true).unwrap();
+        store.mark(&view.key, lib);
         let view2 = load_changeset_with(&repo, &Changeset::WorkingTree, &store, &opts).unwrap();
         assert!(view2.files[view2.index_of("lib.rs").unwrap()].viewed);
         assert_eq!(view2.viewed_count(), 1);
@@ -1468,11 +1317,10 @@ mod tests {
     fn commit_changeset_title() {
         let (_dir, repo) = fixture();
         let head = repo.head().unwrap().oid.unwrap();
-        let st = tempfile::tempdir().unwrap();
         let view = load_changeset_with(
             &repo,
             &Changeset::Commit(head),
-            &store(st.path()),
+            &NoMarks,
             &DiffOptions::default(),
         )
         .unwrap();
@@ -1649,9 +1497,7 @@ mod tests {
             branch: "feature".into(),
             base: "main".into(),
         };
-        let st = tempfile::tempdir().unwrap();
-        let view =
-            load_changeset_with(&repo, &cs, &store(st.path()), &DiffOptions::default()).unwrap();
+        let view = load_changeset_with(&repo, &cs, &NoMarks, &DiffOptions::default()).unwrap();
         assert_eq!(view.files.len(), 1);
         assert_eq!(view.files[0].path(), "feature.rs");
         let text = file_at_revision(&repo, "main", "lib.rs").unwrap().unwrap();
@@ -1677,9 +1523,7 @@ mod tests {
         git(p, &["commit", "-q", "-m", "Second"]);
         std::fs::write(p.join("later.txt"), "new\n").unwrap();
         std::fs::write(p.join("lib.rs"), "fn main() { /* edited */ }\n").unwrap();
-        let st = tempfile::tempdir().unwrap();
-        let view = load_vs_workdir_with(&repo, &first, &store(st.path()), &DiffOptions::default())
-            .unwrap();
+        let view = load_vs_workdir_with(&repo, &first, &NoMarks, &DiffOptions::default()).unwrap();
         let paths: Vec<_> = view.files.iter().map(|f| f.path().to_string()).collect();
         assert!(paths.contains(&"lib.rs".to_string()), "{paths:?}");
         assert!(paths.contains(&"later.txt".to_string()), "{paths:?}");
@@ -1714,12 +1558,11 @@ mod tests {
             .unwrap();
         }
         let repo = Repo::discover(p).unwrap();
-        let st = tempfile::tempdir().unwrap();
         let t = std::time::Instant::now();
         let view = load_changeset_with(
             &repo,
             &Changeset::WorkingTree,
-            &store(st.path()),
+            &NoMarks,
             &DiffOptions::default(),
         )
         .unwrap();

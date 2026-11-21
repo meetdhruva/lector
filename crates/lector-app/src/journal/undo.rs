@@ -146,7 +146,7 @@ impl Journal {
             self.check_snapshots(&record, repo.as_deref())?;
         }
         let mut redo: Vec<UndoRecord> = Vec::new();
-        let mut invoked: Option<u64> = None;
+        let mut invoked: Vec<u64> = Vec::new();
         self.apply(
             &entry,
             &record,
@@ -156,14 +156,25 @@ impl Journal {
             &mut invoked,
         )?;
 
-        // The entry for the undo itself: the inverse command's own entry when one ran
-        // (the registry journaled it), else a new `journal.undo` entry carrying the redo.
-        let undo_entry_id = match (invoked, redo.is_empty()) {
-            (Some(inv), true) => {
+        // The entry for the undo itself: the inverse command's own entry when the record was a
+        // single inverse command (the registry journaled it), else a new `journal.undo` entry
+        // carrying the redo of every part. Inverse commands that ran as part of a larger record
+        // are folded into that redo (their own entries become parts of this undo), so redo
+        // repeats all of the operation, and "Undo last" does not pick one part up on its own.
+        let single_invoke = matches!(record, UndoRecord::Invoke { .. });
+        let undo_entry_id = match invoked.as_slice() {
+            [inv] if single_invoke => {
+                let inv = *inv;
                 self.update(inv, |e| e.undo_of = Some(id));
                 inv
             }
             _ => {
+                for inv in &invoked {
+                    self.update(*inv, |e| {
+                        e.undo_of = Some(id);
+                        e.undo = None;
+                    });
+                }
                 let undo = match redo.len() {
                     0 => None,
                     1 => redo.pop(),
@@ -293,7 +304,7 @@ impl Journal {
         repo: Option<&Path>,
         cx: &CommandContext,
         redo: &mut Vec<UndoRecord>,
-        invoked: &mut Option<u64>,
+        invoked: &mut Vec<u64>,
     ) -> Result<(), UndoError> {
         let fail = |e: lector_git::Error| UndoError::Failed(e.to_string());
         match record {
@@ -355,14 +366,17 @@ impl Journal {
                     .registry()
                     .invoke(command, args.clone(), &cx)
                     .map_err(|e| UndoError::Failed(e.to_string()))?;
-                *invoked = outcome.journal_id;
+                invoked.extend(outcome.journal_id);
+                // The inverse command's own undo is the redo of this part.
+                redo.extend(outcome.undo);
             }
             UndoRecord::Multi { records } => {
+                // Undo runs the parts last first and collects each part's redo in that order;
+                // a `Multi` of those redos (undone last first again) then repeats the
+                // original parts first to last.
                 for r in records.iter().rev() {
                     self.apply(entry, r, repo, cx, redo, invoked)?;
                 }
-                // Redo replays in the original order: reverse what we collected.
-                redo.reverse();
             }
         }
         Ok(())

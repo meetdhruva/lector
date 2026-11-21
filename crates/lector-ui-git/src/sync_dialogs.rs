@@ -16,7 +16,7 @@ use gpui::{
     div, prelude::*, App, Corner, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
 };
-use lector_process::askpass::{PromptReply, Secret};
+use lector_app::commands::git_sync::askpass::{PromptReply, Secret};
 use lector_ui::components::context_menu::ContextMenu;
 use lector_ui::components::popover::Popover;
 use lector_ui::components::text_input::{TextInput, TextInputEvent};

@@ -194,7 +194,12 @@ impl AppCore {
         }
     }
 
-    /// Viewed marks backed by the database (pass to `lector_review::review`).
+    /// Review data (changesets, file diffs, viewed marks) for views, the CLI and agents.
+    pub fn review(&self) -> crate::review_service::ReviewService {
+        crate::review_service::ReviewService::new(self.review_store())
+    }
+
+    /// Viewed marks backed by the database.
     pub fn review_store(&self) -> lector_config::ReviewStore {
         self.inner.db.review_store()
     }
