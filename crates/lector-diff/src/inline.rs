@@ -84,7 +84,8 @@ fn push_merged(v: &mut Vec<Range<usize>>, r: Range<usize>) {
 /// Word-level diff of two lines, with character-level refinement inside replaced words.
 ///
 /// Returns whole-line ranges when the lines are too dissimilar (or too long) for a
-/// fine-grained result to be readable.
+/// fine-grained result to be readable: when they share less than 35% of their
+/// non-whitespace bytes, or either has more than 4000 tokens.
 pub fn refine_inline(old: &str, new: &str) -> InlineChanges {
     if old == new {
         return InlineChanges::default();

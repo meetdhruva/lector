@@ -2,7 +2,7 @@
 //! Lector.
 //!
 //! * [`detect_kind`] classifies a path as text, binary, image or directory.
-//! * [`decode`] turns bytes into text (UTF-8, UTF-16 with BOM, Latin-1
+//! * [`decode`] turns bytes into text (UTF-8, UTF-16 with BOM, windows-1252
 //!   fallback).
 //! * [`load_file`] loads a file into a [`lector_text::Text`], memory-mapping
 //!   large files.
@@ -11,6 +11,11 @@
 //! * [`write_atomic`] saves bytes atomically; [`stamp`] detects changes on disk.
 //!
 //! Nothing but [`write_atomic`] writes, and it only runs on an explicit save.
+//!
+//! [`load_file`] refuses non-regular files (FIFOs, sockets, devices) with
+//! `InvalidInput` instead of blocking on them. The watcher does not follow symlinks (like
+//! the walker), so a link to `/` or a symlink loop cannot make it crawl or fail; its sink
+//! runs on the watcher's own thread.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

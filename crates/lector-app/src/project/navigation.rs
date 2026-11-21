@@ -1,4 +1,5 @@
-//! Back/forward navigation history.
+//! Back/forward navigation history: at most 100 entries; a jump within 3 rows of the newest
+//! entry in the same file replaces it.
 
 use std::path::PathBuf;
 

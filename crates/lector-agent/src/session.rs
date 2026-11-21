@@ -1,9 +1,27 @@
 //! [`AgentSession`]: one conversation with one ACP agent in one project.
 //!
 //! Threads: the agent process's stdout is read by the RPC reader thread (notifications in
-//! order); each agent → client request runs on its own thread (a permission prompt blocks
-//! only itself); each prompt runs on a turn thread that takes the checkpoints, waits for
-//! the answer (checking cancellation and the idle timeout) and finishes the turn.
+//! order); each agent → client request runs as an `AgentRequest` task on the scheduler's
+//! guaranteed lane (a permission prompt blocks only itself); each prompt runs as an
+//! `AgentTurn` job that takes the checkpoints, waits for the answer (checking cancellation and
+//! the idle timeout) and finishes the turn (a turn dropped unrun at shutdown ends as failed).
+//! One turn at a time per session ([`AgentError::Busy`]).
+//!
+//! Protocol details: `initialize` advertises `fs.readTextFile` / `writeTextFile` and
+//! `terminal: false`; `session/new` passes the project root and no MCP servers (an auth error
+//! with `authMethods` triggers one `authenticate` with the first method, then one retry). The
+//! prompt sends the text first, then the context: files and ranges as embedded resources when
+//! the agent reports `promptCapabilities.embeddedContext` (else fenced text), files over
+//! 256 KiB as resource links, diffs and comments as text. Tool-call locations arrive 1-based
+//! and are stored 0-based. A process that exits ends the turn as failed with the last stderr
+//! lines and marks the session crashed (`restart` starts a new process and ACP session, keeping
+//! the history); a cancel not confirmed within `cancel_grace` (10 s) or no traffic for
+//! `turn_idle_timeout` (15 min) also ends the turn. Cancel sends `session/cancel` and answers
+//! pending permission requests `cancelled`. `fs/write_text_file` replaces the text of the open
+//! document and saves it (no hooks or cleanup; refused when the tab is locked read-only or the
+//! file changed on disk), or writes files that are not open with `lector_fs::write_atomic`;
+//! when the turn has no checkpoint, or the file is git-ignored (checkpoints leave those out),
+//! the file is backed up first so its `agent.write_file` entry is undoable on its own.
 
 use lector_process::{ChildHandle, ProcessCommand, ProcessKind, StdinMode, Supervisor};
 use std::collections::{HashMap, HashSet, VecDeque};

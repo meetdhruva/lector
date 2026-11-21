@@ -1,8 +1,9 @@
 //! Default key bindings.
 //!
-//! This hardcoded table mirrors `docs/ARCHITECTURE.md`; the integration wave
-//! replaces it with `lector_config::default_keymap` + user overrides through
-//! [`bind_keymap`], which takes the same `(keys, action name, context)` shape.
+//! [`default_keymap`] holds the UI's default bindings; `settings::effective_keymap` merges
+//! `lector_config::default_keymap` and the user's `keymap.toml` over it and
+//! [`bind_keymap`] binds the result (`(keys, action name, context)` triples). Action names are
+//! the ones defined in [`crate::actions`].
 
 use std::rc::Rc;
 

@@ -3,8 +3,8 @@
 //! The askpass server is owned by `lector-app` ([`SyncHost::start_askpass`], ADR 0002): one
 //! per app process, started the first time a network operation runs (nothing listens before
 //! that). This module only supplies its prompt handler and shows the dialogs. The handler
-//! runs on a connection thread: it posts the
-//! prompt to the GPUI thread and blocks until the dialog answers, at most
+//! runs as an `AskpassPrompt` task on the scheduler's guaranteed lane (one per connection): it
+//! posts the prompt to the GPUI thread and blocks until the dialog answers, at most
 //! [`PROMPT_TIMEOUT`]. On the GPUI thread prompts are queued and shown one at a time as a
 //! [`PromptDialog`] in the window whose operation is running, naming the operation and the
 //! remote (credentials stripped from the URL). Closing the dialog in any way other than

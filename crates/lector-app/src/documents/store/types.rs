@@ -314,7 +314,8 @@ pub enum DocEvent {
     },
 }
 
-/// Delays of debounced work (`Duration::ZERO` = run as soon as possible).
+/// Delays of debounced work (`Duration::ZERO` = run as soon as possible). Defaults: structure
+/// and gutter 300 ms, LSP sync 150 ms, blame remapping 120 ms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryDelays {
     /// Outline / folds / scopes after an edit.

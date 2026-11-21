@@ -1,6 +1,6 @@
 //! Agent sessions for Lector (v0.5): drive a coding agent over the Agent Client Protocol
 //! (ACP: JSON-RPC 2.0 over the agent's stdio) and review each turn's changes as a
-//! changeset. See `docs/ARCHITECTURE.md`, "lector-agent".
+//! changeset. `docs/ARCHITECTURE.md`, "An agent turn", shows the flow across crates.
 //!
 //! * [`AgentSession`]: spawn the agent, `initialize`, `session/new`, `session/prompt` with
 //!   text and context, stream `session/update`, `session/cancel`; answer the agent's

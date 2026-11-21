@@ -3,7 +3,7 @@
 //! actions, a pass-through key context and session restore. Built on the UI-free core in
 //! `lector-terminal`; registered into every workspace window by [`init`].
 //!
-//! Security rules (see `docs/ARCHITECTURE.md`, "lector-ui-terminal"): Lector never writes
+//! Security rules (see `docs/ARCHITECTURE.md`, "Security rules" → "Terminal"): Lector never writes
 //! to a terminal on its own (no auto-run; "Open in Terminal" only picks the folder); only
 //! http/https/mailto links open, file links are resolved off the UI thread; multi-line pastes
 //! without bracketed paste ask first; the shell program/args/env come from user settings

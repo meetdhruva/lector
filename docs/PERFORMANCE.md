@@ -168,4 +168,5 @@ which functions grew.
 `lector health [--json]` prints what Lector recorded about itself on this machine: sessions started, clean
 exits, abnormal exits (crash, kill, power loss), panics, the crash-free rate and the latest crash reports in
 `<data dir>/crashes/`. Nothing is sent anywhere; the files are plain text and can be attached to a bug
-report by hand. Design and privacy rules: `docs/ARCHITECTURE.md`, "Measurement (0.7)".
+report by hand. Design and privacy rules: the rustdoc of `lector_app::health` (crash reports and session
+markers); `docs/ARCHITECTURE.md`, "What leaves the machine".

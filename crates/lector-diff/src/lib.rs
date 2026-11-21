@@ -11,7 +11,9 @@
 //! line, and UI line numbers (0-based here, +1 for display) always match the editor.
 //!
 //! Only this crate's [`diff_lines`] calls `imara-diff`; hunks always refer to the
-//! original (un-normalized) lines.
+//! original (un-normalized) lines. Slider positions use imara-diff's indent
+//! heuristic (`postprocess_lines`). In [`gutter_marks`] a deletion is an empty range at
+//! the row after the removed lines.
 
 #![forbid(unsafe_code)]
 

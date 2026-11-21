@@ -37,6 +37,16 @@
 //! authenticated connections count against the limit of prompts handled at once. Answers
 //! are never logged and the buffers holding them are zeroed after use.
 //!
+//! Limits and housekeeping: at most 16 connections in the handshake and 8 authenticated
+//! prompts at once; the rest of a request must arrive within 10 s; tokens are compared in
+//! constant time; a panicking handler answers Cancel. The Unix socket path is kept to 100
+//! bytes (`sun_path` is 104 on macOS), falling back to the temporary directory when the runtime
+//! directory is too deep. The private directory holds a `pid` file; at start the server removes
+//! directories of its own name pattern whose owner process is gone (when in doubt they stay),
+//! so a crash leaves nothing behind for long. Windows residual risk: std has no
+//! `SO_EXCLUSIVEADDRUSE`, so another process of the same user could in principle bind the
+//! loopback port; that user can read the token from git's environment anyway.
+//!
 //! **Prompt text is untrusted**: parts of it can come from the SSH server
 //! (keyboard-interactive). [`parse_prompt`] gives a structured [`PromptKind`] only for exact
 //! OpenSSH / git templates; see the `prompt` module documentation.

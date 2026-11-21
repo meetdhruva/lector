@@ -6,6 +6,15 @@
 //! document cancels the one in flight (`$/cancelRequest`); a [`CancelToken`]
 //! cancels it on demand. Cancelled requests resolve without waiting for the
 //! server.
+//!
+//! The document must be synced first (`DocHandle::sync_lsp_now` in `lector-app`, tagged with
+//! the rope version) with the text the position refers to. A server answer of
+//! `RequestCancelled` (-32800) is [`RequestOutcome::Cancelled`], `ContentModified` (-32801) is
+//! [`RequestOutcome::Stale`]; other server errors and timeouts are `Err`. Parsing a large list
+//! (10,000 items) happens inside the future, off the caller's thread. `completionItem/resolve`
+//! is sent only when the server has `resolveProvider` and only for items not yet resolved, and
+//! only `documentation`, `detail`, `labelDetails` and `additionalTextEdits` are taken from the
+//! answer (label, filter, sort and the main edit stay as listed).
 
 use std::future::Future;
 use std::path::{Path, PathBuf};

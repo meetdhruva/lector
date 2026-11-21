@@ -6,6 +6,20 @@
 //!
 //! No async runtime is required: requests return runtime-agnostic futures
 //! (built on `futures` channels) and all I/O runs on plain threads.
+//!
+//! Servers: [`builtin_servers`] lists known servers in priority order (the first whose
+//! command is on `PATH` serves a language, so pyright before pylsp); the caller applies the
+//! user's `lsp.servers.<name>` overrides to the [`ServerConfig`]s. Each server gets reader,
+//! writer, stderr and request-timeout owner threads; launches and restarts run on the
+//! caller's `TaskRunner` ([`LspOptions`]), inline without one. "No writes into the project":
+//! [`read_only_settings`] is sent as `initializationOptions` and answers
+//! `workspace/configuration`, clangd runs with `--background-index=false`, and servers in
+//! [`WRITES_TO_PROJECT`] are started by `lector-app` only when the user enables them.
+//! Server-initiated `workspace/applyEdit` goes to the handler set with
+//! [`LspManager::set_apply_edit_handler`] (answered `applied: false` without one); workspace
+//! edits with file operations (create, rename, delete) are a protocol error. Diagnostics are
+//! stored per document with the LSP version they were published for and the caller's tag of
+//! the text with that version.
 #![forbid(unsafe_code)]
 
 mod client;

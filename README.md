@@ -210,7 +210,7 @@ Run in another folder with `-C DIR`.
 **Output.** Human output is compact; colors only on a terminal (`--color auto|always|never`, and
 `NO_COLOR` is respected). `--json` output is stable: every document carries `"schema": 1`, fields are
 only ever added, and paths are repository-relative with 0-based lines (see
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#cli-and-mcp-v05-as-implemented) for the formats).
+the crate documentation in [`crates/lector-cli/src/lib.rs`](crates/lector-cli/src/lib.rs) for the formats).
 Exit codes: `0` ok, `1` error, `2` usage error. `lector changes | head` is fine (a closed pipe is not
 an error). Gate a CI job on risk:
 
@@ -283,7 +283,8 @@ synchronous, and reusable on its own:
 | `lector-terminal` | PTY, VT emulation, scrollback, shell integration (no UI) |
 | `lector-ui`, `lector-ui-git`, `lector-ui-agent`, `lector-ui-terminal` | GPUI shell, widgets and views |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts and design rules,
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture and security rules (API detail is in
+rustdoc, decisions in [docs/adr/](docs/adr/README.md)),
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for release-gate measurements, and
 [docs/RELEASING.md](docs/RELEASING.md) for how releases are built.
 

@@ -6,6 +6,25 @@
 //! the handles they read through (a [`Repo`], a [`LanguageRegistry`]), the viewed marks as a
 //! read-only input ([`ViewedMarks`]) and, where they parse or diff, a [`DerivedCache`].
 //! Nothing here writes: viewed marks are stored, and hunks applied, by `lector-app`.
+//!
+//! * Changeset keys ([`changeset_key`], inverse [`parse_changeset_key`]): `worktree`,
+//!   `staged`, `unstaged`, `untracked`, `commit:<sha>`, `range:<from>..<to>`,
+//!   `branch:<base>...<branch>`, `snapshots:<from>..<to>`, and `workdir:<rev>` for a revision
+//!   against the working tree. They are also the CLI's changeset syntax and the comment and
+//!   viewed-mark keys.
+//! * [`ReviewFile::content_hash`] hashes both sides' identities (blob id, or content hash for
+//!   index and working-tree sides), so a viewed mark stops counting when either side changes.
+//! * Stats are computed eagerly (on up to 4 threads) only for changesets of at most
+//!   [`MAX_EAGER_STATS`] files.
+//! * A side over [`MAX_DIFF_BYTES`] makes the diff `TooLarge` (sizes only, nothing parsed).
+//!   Added and deleted files diff as pure insertions or removals of their real lines.
+//!   Inline refinement of changed pairs is computed lazily and cached in the [`FileDiff`].
+//! * Partial staging: [`hunk_patch`] computes the patch for selected rows (`git add -p`
+//!   semantics through `lector_diff::patch`) and the target (index or worktree); Unstage and
+//!   Discard build the reverse patch against the content being patched, so context always
+//!   comes from it. [`hunk_patch_if_unchanged`] first checks that both sides still match the
+//!   diff the rows were selected in, so rows of a stale diff never touch other lines.
+//!   Applying is `lector_app::review_service::apply`, called by the `git.*_hunk` commands.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1139,7 +1158,8 @@ pub fn load_vs_workdir_cancellable(
 }
 
 /// Resolves the default base branch for "branch vs base": the upstream of
-/// `branch` if any, else `main`, `master`, `origin/main`, `origin/master`.
+/// `branch` unless it has the same branch name, else the first of `main`, `master`,
+/// `origin/main`, `origin/master`, `develop` that exists and is not `branch` itself.
 pub fn default_base(repo: &Repo, branch: &str) -> Option<String> {
     let branches = repo.branches().ok()?;
     if let Some(up) = branches

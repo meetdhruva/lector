@@ -16,7 +16,22 @@
 //! Network and branch operations (v0.7: [`sync`], fetch / pull / push / branches / stash)
 //! also use the CLI, run under `lector-process` (cancellable, whole process tree killed).
 //!
-//! This crate depends only on `lector-process` among Lector crates.
+//! Semantics worth knowing: `Changeset::Unstaged` compares the index with the working tree
+//! (`Side::Index` → `Side::Workdir`), `Staged` a `HEAD` blob with the index, `WorkingTree` a
+//! `HEAD` blob with the working tree (following staged renames). `Side::Index` of a conflicted
+//! path loads stage 2 ("ours"). The `HEAD` commit carries a `RefKind::Head` label (attached or
+//! detached), and [`graph`] edges run from a row's centre to the next row's, with lanes
+//! compacting when they end. Calls that need a working tree return [`Error::Bare`] in a bare
+//! repository. A changed repository config is picked up on the next call (a cheap stat).
+//!
+//! The write paths (the `write` module, the shadow repository) run git through `std::process` so that
+//! tty-based signing pinentries behave as in a terminal; blame, `log -L` / `--follow` and the
+//! [`sync`] operations run under `lector_process::Supervisor`. Writes run git with
+//! `--literal-pathspecs --no-pager -c core.quotepath=off`, `GIT_TERMINAL_PROMPT=0` and
+//! `GIT_EDITOR=true`, passing paths in chunks of 500; absolute paths and paths containing `..`
+//! are refused.
+//!
+//! Among Lector crates this one depends on `lector-base` and `lector-process` only.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
