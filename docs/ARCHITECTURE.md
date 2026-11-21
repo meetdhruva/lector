@@ -526,7 +526,11 @@ action: save, stage/unstage, commit, discard, resolve, accept an LSP edit into t
 save, sync, branch and stash operations. Nothing writes on open, on focus, on a timer or as a side
 effect of reading.
 - **Opt-in automation only.** Auto-save, format-on-save, automatic fetch (`git.auto_fetch`) and
-  update checks (`[updates] check`) are off by default and user-level settings only.
+  update checks (`[updates] check`) are off by default. Automatic fetch and update checks are
+  user-level settings only. Auto-save and format-on-save can also be turned on by a project's
+  `.lector/settings.toml` (`lector_config` does not drop `editor.auto_save` /
+  `editor.format_on_save` from the project layer): they act only on buffers the user edits, with
+  the user's own formatter.
 - **Undo instead of confirm.** Destructive operations back up what they lose into the shadow
   repository first and show an Undo toast; `git.confirm_discard = true` brings the confirmation
   back. A confirmation remains when the backup cannot be taken, for operations that cannot be

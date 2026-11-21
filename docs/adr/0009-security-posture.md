@@ -15,10 +15,14 @@ terminal access).
    signing and credential helpers must behave exactly as in the user's terminal. Git write and
    shadow-repository commands use `std::process` directly rather than the supervisor so signing
    pinentries keep their terminal.
-3. **Automation is opt-in and user-level.** Auto-save, format on save, automatic fetch and
-   update checks are off by default, and a project's settings cannot turn them on or choose a
-   program to run (language servers, agents, shell, forge host). Reason: opening a repository
-   must not run or send anything.
+3. **Automation is opt-in; what runs or leaves the machine is user-level.** Auto-save, format
+   on save, automatic fetch and update checks are off by default. A project's settings cannot
+   turn on automatic fetch or update checks, nor choose a program to run or a host to talk to
+   (language servers, agents, shell, forge). Reason: opening a repository must not run or send
+   anything. As built, a project's settings *can* turn on auto-save and format on save; they
+   act only on buffers the user edits, through the user's own formatter. Whether these two
+   should become user-level as well is open (see the 0.8 plan); until a record says so, this is
+   the boundary.
 4. **Language servers may not write into the project.** They start with options that prevent
    it; their edits reach buffers, never files.
 5. **Agents get file reads and writes inside the project and nothing else**: no terminal, no
