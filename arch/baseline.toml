@@ -5,14 +5,8 @@
 # Lower entries with `scripts/arch-check --update`, which refuses to raise anything.
 
 [deps]
-"lector-ui-git -> lector-process" = 1
 
 [writes]
-"crates/lector-ui-git/src/commit_composer.rs" = 1
-"crates/lector-ui-git/src/pull_requests.rs" = 1
-"crates/lector-ui-git/src/sync.rs" = 1
-"crates/lector-ui/src/a11y.rs" = 1
-"crates/lector-ui/src/os.rs" = 4
 
 [threads]
 "crates/lector-agent/src/rpc.rs" = 2
@@ -92,7 +86,7 @@
 "crates/lector-app/src/documents/store.rs" = 2349
 "crates/lector-buffer/src/tests.rs" = 3092
 "crates/lector-forge/src/releases.rs" = 1917
-"crates/lector-git/src/shadow.rs" = 2302
+"crates/lector-git/src/shadow.rs" = 2289
 "crates/lector-review/src/review.rs" = 1586
 "crates/lector-review/src/risk.rs" = 2696
 "crates/lector-review/src/structural.rs" = 1750
@@ -100,7 +94,7 @@
 "crates/lector-ui-git/src/changes_panel.rs" = 1680
 "crates/lector-ui-git/src/diff_view.rs" = 1938
 "crates/lector-ui-git/src/diff_view/comments.rs" = 1520
-"crates/lector-ui-git/src/sync.rs" = 1944
+"crates/lector-ui-git/src/sync.rs" = 1922
 "crates/lector-ui-git/src/sync_model.rs" = 1702
 "crates/lector-ui/src/code_view/element.rs" = 2272
 "crates/lector-ui/src/code_view/mod.rs" = 2669
