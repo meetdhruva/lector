@@ -17,26 +17,6 @@
 [dupes]
 
 [size]
-"crates/lector-agent/src/inline_edit.rs" = 1725
-"crates/lector-app/src/comments.rs" = 1506
-"crates/lector-app/src/documents/store.rs" = 2349
-"crates/lector-buffer/src/tests.rs" = 3092
-"crates/lector-forge/src/releases.rs" = 1894
-"crates/lector-git/src/shadow.rs" = 2262
-"crates/lector-review/src/review.rs" = 1582
-"crates/lector-review/src/risk.rs" = 2696
-"crates/lector-review/src/structural.rs" = 1750
-"crates/lector-text/src/rope.rs" = 1541
-"crates/lector-ui-git/src/changes_panel.rs" = 1652
-"crates/lector-ui-git/src/diff_view.rs" = 1926
-"crates/lector-ui-git/src/sync.rs" = 1864
-"crates/lector-ui-git/src/sync_model.rs" = 1702
-"crates/lector-ui/src/code_view/element.rs" = 2272
-"crates/lector-ui/src/code_view/mod.rs" = 2669
-"crates/lector-ui/src/editor/completion.rs" = 2025
-"crates/lector-ui/src/editor/mod.rs" = 1746
-"crates/lector-ui/src/views/workspace.rs" = 1649
-"crates/lector-ui/src/views/workspace/integration.rs" = 1724
 
 [purity]
 
