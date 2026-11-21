@@ -73,7 +73,7 @@ fn open_workspace<'a>(
     root: &Path,
     settings: lector_config::Settings,
 ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
-    let project = lector_workspace::Project::open(root, settings).unwrap();
+    let project = lector_app::Project::open(root, settings).unwrap();
     let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
     cx.run_until_parked();
     (ws, cx)

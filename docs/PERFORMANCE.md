@@ -36,8 +36,8 @@ LECTOR_TRACE_STARTUP=1 target/release/lector /path/to/repo
 # the code view logs its own layout/paint time.
 ZED_MEASUREMENTS=1 RUST_LOG=warn,lector_ui::perf=trace target/release/lector some/large/file.rs
 
-# 1 GB file through the workspace model (add LECTOR_PERF_DROP_CACHES=1 as root for a cold run 0).
-LECTOR_PERF_DIR=/tmp cargo test -p lector-workspace --release --test perf -- --ignored --nocapture
+# 1 GB file through the project model (add LECTOR_PERF_DROP_CACHES=1 as root for a cold run 0).
+LECTOR_PERF_DIR=/tmp cargo test -p lector-app --release --test perf -- --ignored --nocapture
 # Same gate on lector-text alone:
 cargo test -p lector-text --release --test large_file -- --ignored --nocapture
 
@@ -51,7 +51,7 @@ cargo test -p lector-search --release --test picker release_gate -- --ignored --
 cargo bench -p lector-search --bench picker_gate
 
 # Structural diff at 500 / 3 000 / 10 000 lines (STRUCTURAL_BENCH_REPS, SHOW_SKIPPED=1).
-cargo bench -p lector-workspace --bench structural_bench
+cargo bench -p lector-review --bench structural_bench
 
 # Risk ordering: scores, per-category table, misses, explanations; the fit (deterministic).
 cargo run -p lector-app --example risk_eval -- --misses

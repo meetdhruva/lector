@@ -17,10 +17,13 @@
 //!   blame mapped onto the buffer, diagnostics mapped through edits. Each is
 //!   cached by text version, never blocks, and the newest request wins.
 //! * Front-ends subscribe ([`DocHandle::subscribe`]) and render snapshots.
+//! * A [`Document`] is the immutable value a snapshot carries: a loaded file
+//!   with its text, language, syntax and lazily derived highlights/outline.
 //!
 //! See `docs/ARCHITECTURE.md`, "lector-app — documents".
 
 mod derive;
+mod document;
 mod exec;
 mod policy;
 mod store;
@@ -28,6 +31,7 @@ mod store;
 mod tests;
 
 pub use derive::{map_offset, map_range, map_row, remap_blame, DocDiagnostic};
+pub use document::{Document, Indentation, LineEnding, LineHighlights};
 pub use exec::{DocExecutor, DocJob, InlineExecutor};
 pub use policy::{
     auto_save_decision, buffer_options, cleanup_edits, AutoSaveDecision, AutoSaveInputs,

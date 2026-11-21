@@ -14,12 +14,12 @@ use gpui::{App, AppContext, Entity, TestAppContext, VisualTestContext, WeakEntit
 use lector_agent::inline_edit::InlinePhase;
 use lector_agent::summary::TurnSummary;
 use lector_agent::{AgentConfig, AgentManager, AgentSession, SessionOptions, TurnId};
+use lector_app::Project;
 use lector_app::{AppCore, CoreOptions};
 use lector_theme::{Appearance, ThemeRegistry};
 use lector_ui::commands_bridge::CoreGlobal;
 use lector_ui::theme::{ThemeMode, ThemeState};
 use lector_ui::views::Workspace;
-use lector_workspace::Project;
 
 use crate::inline_edit::InlineEdits;
 use crate::panel::AgentPanel;

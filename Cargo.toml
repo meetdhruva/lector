@@ -24,7 +24,7 @@ lector-fs = { path = "crates/lector-fs" }
 lector-config = { path = "crates/lector-config" }
 lector-theme = { path = "crates/lector-theme" }
 lector-icons = { path = "crates/lector-icons" }
-lector-workspace = { path = "crates/lector-workspace" }
+lector-review = { path = "crates/lector-review" }
 lector-app = { path = "crates/lector-app" }
 lector-agent = { path = "crates/lector-agent" }
 lector-forge = { path = "crates/lector-forge" }

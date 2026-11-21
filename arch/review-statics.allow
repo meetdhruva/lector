@@ -1,3 +1,8 @@
 # Statics that crates/lector-review may declare, by item name (ADR 0001): immutable lookup tables
 # such as compiled regexes and tree-sitter query tables held in a OnceLock. One name per line,
-# each with a reason. Empty until lector-review exists.
+# each with a reason.
+
+# Compiled regex table of the risk signals (crates/lector-review/src/risk.rs): immutable once built.
+RISK_PATTERNS
+# Compiled regex table of the content signals (crates/lector-review/src/risk/signals.rs): immutable once built.
+SIGNAL_PATTERNS

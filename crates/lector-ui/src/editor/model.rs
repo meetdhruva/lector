@@ -34,10 +34,11 @@ use lector_app::documents::{
     DocHandle, DocumentStore, OpenOptions, QueryKind, SaveOutcome as StoreSaveOutcome, SaveRequest,
     Subscription,
 };
+use lector_app::Document;
+use lector_app::Project;
 use lector_buffer::save::Encoding;
 use lector_buffer::{BufferOptions, TextEdit, Transaction};
 use lector_text::Text;
-use lector_workspace::{Document, Project};
 
 pub use lector_app::documents::{is_editable_document, DiskConflict};
 

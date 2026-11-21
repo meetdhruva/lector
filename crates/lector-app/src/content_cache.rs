@@ -13,77 +13,19 @@
 //! statistics are available through [`ContentCache::stats`]. Computation runs
 //! outside the locks, so two threads may compute the same value concurrently;
 //! the first stored result wins.
+//!
+//! The stateless `lector-review` functions take a [`DerivedCache`]; the app passes
+//! [`ContentCache::global`], which implements it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
 use lector_diff::{DiffOptions, LineDiff};
-use lector_git::Oid;
+use lector_review::{ContentId, DerivedCache};
 use lector_syntax::{Language, OutlineItem, Syntax, SyntaxError, Tag};
 use lector_text::Text;
 use parking_lot::Mutex;
-
-/// Identity of a piece of content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ContentId {
-    /// A git blob.
-    Blob(Oid),
-    /// A 128-bit hash of the bytes (see [`ContentId::of_bytes`]).
-    Hash(u128),
-}
-
-impl ContentId {
-    /// Hashes `bytes` (fast, non-cryptographic, 128 bits, stable across runs).
-    pub fn of_bytes(bytes: &[u8]) -> ContentId {
-        const K1: u64 = 0x9E37_79B9_7F4A_7C15;
-        const K2: u64 = 0xC2B2_AE3D_27D4_EB4F;
-        fn mix(mut h: u64) -> u64 {
-            h ^= h >> 33;
-            h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-            h ^= h >> 33;
-            h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-            h ^ (h >> 33)
-        }
-        let (mut a, mut b) = (K1 ^ bytes.len() as u64, K2);
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            let v = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-            a = (a ^ v).wrapping_mul(K1).rotate_left(29);
-            b = (b.wrapping_add(v)).wrapping_mul(K2) ^ (b >> 31);
-        }
-        let mut tail = [0u8; 8];
-        let rest = chunks.remainder();
-        tail[..rest.len()].copy_from_slice(rest);
-        let v = u64::from_le_bytes(tail);
-        a = (a ^ v).wrapping_mul(K1).rotate_left(29);
-        b = (b.wrapping_add(v)).wrapping_mul(K2) ^ (b >> 31);
-        ContentId::Hash(
-            (mix(a ^ b.rotate_left(17)) as u128) << 64 | mix(b ^ a.rotate_left(41)) as u128,
-        )
-    }
-
-    /// Hashes text (its UTF-8 bytes).
-    pub fn of_text(text: &Text) -> ContentId {
-        match text.as_rope() {
-            Some(rope) => {
-                // Hash chunk by chunk without materializing the text.
-                let mut buf = Vec::with_capacity(rope.len());
-                for c in rope.chunks() {
-                    buf.extend_from_slice(c.as_bytes());
-                }
-                ContentId::of_bytes(&buf)
-            }
-            None => ContentId::of_bytes(text.text_for_range(0..text.len()).as_bytes()),
-        }
-    }
-}
-
-impl From<Oid> for ContentId {
-    fn from(oid: Oid) -> Self {
-        ContentId::Blob(oid)
-    }
-}
 
 /// Byte budgets of a [`ContentCache`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,7 +233,7 @@ impl ContentCache {
         }
     }
 
-    /// The process-wide cache used by [`crate::review`].
+    /// The process-wide cache the app passes to the `lector-review` functions.
     pub fn global() -> &'static ContentCache {
         static GLOBAL: OnceLock<ContentCache> = OnceLock::new();
         GLOBAL.get_or_init(ContentCache::default)
@@ -385,6 +327,27 @@ impl ContentCache {
     }
 }
 
+impl DerivedCache for ContentCache {
+    fn syntax(
+        &self,
+        id: ContentId,
+        lang: &Arc<Language>,
+        text: &Text,
+    ) -> Result<Syntax, SyntaxError> {
+        ContentCache::syntax(self, id, lang, text)
+    }
+
+    fn line_diff(
+        &self,
+        old: ContentId,
+        new: ContentId,
+        opts: &DiffOptions,
+        compute: &dyn Fn() -> LineDiff,
+    ) -> LineDiff {
+        (*ContentCache::line_diff(self, old, new, opts, compute)).clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,19 +387,6 @@ mod tests {
                 prop_assert_eq!(lru.map.len(), lru.order.len());
             }
         }
-    }
-
-    #[test]
-    fn content_id_is_stable_and_discriminating() {
-        let a = ContentId::of_bytes(b"hello world");
-        assert_eq!(a, ContentId::of_bytes(b"hello world"));
-        assert_ne!(a, ContentId::of_bytes(b"hello worle"));
-        assert_ne!(ContentId::of_bytes(b""), ContentId::of_bytes(b"\0"));
-        assert_ne!(
-            ContentId::of_bytes(b"abcdefgh"),
-            ContentId::of_bytes(b"abcdefgh\0")
-        );
-        assert_eq!(ContentId::of_text(&Text::from("hello world")), a);
     }
 
     #[test]
@@ -515,5 +465,58 @@ mod tests {
         let st = cache.stats();
         assert_eq!(st.syntax.hits + st.syntax.misses, 80);
         assert!(st.syntax.entries <= 5);
+    }
+
+    /// The `lector-review` seam: the app's cache and `NoCache` give identical file diffs, on a
+    /// miss and on a hit, and the review functions really go through the cache.
+    #[test]
+    fn cached_and_uncached_file_diffs_are_identical() {
+        use lector_git::{ChangeKind, FileChange, Side};
+        use lector_review::review::{diff_bytes, side_from_bytes, FileDiff};
+        use lector_review::NoCache;
+
+        let langs = LanguageRegistry::new();
+        let old = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
+        let new = "fn main() {\n    let x = 2;\n    println!(\"{x}\");\n}\nfn added() {}\n";
+        let change = FileChange {
+            old_path: Some("lib.rs".into()),
+            new_path: Some("lib.rs".into()),
+            kind: ChangeKind::Modified,
+            old: Side::Workdir("lib.rs".into()),
+            new: Side::Workdir("lib.rs".into()),
+            binary: None,
+        };
+        let opts = DiffOptions::default();
+        let diff = |cache: &dyn DerivedCache| {
+            let (o, n) = (old.as_bytes().to_vec(), new.as_bytes().to_vec());
+            diff_bytes(change.clone(), Some(o), Some(n), &langs, &opts, cache)
+        };
+        let view = |fd: &FileDiff| {
+            let sexp =
+                |s: &lector_review::review::DiffSide| s.syntax.as_ref().map(|t| t.debug_sexp());
+            (
+                fd.kind.clone(),
+                fd.diff.clone(),
+                fd.split.clone(),
+                fd.unified.clone(),
+                (sexp(&fd.old), sexp(&fd.new)),
+                (fd.old.line_highlights(0..5), fd.new.line_highlights(0..6)),
+                fd.inline_for_old(1).map(|i| (*i).clone()),
+            )
+        };
+        let cache = ContentCache::default();
+        let uncached = view(&diff(&NoCache));
+        assert_eq!(view(&diff(&cache)), uncached, "miss");
+        assert_eq!(view(&diff(&cache)), uncached, "hit");
+        let st = cache.stats();
+        assert_eq!((st.syntax.misses, st.syntax.hits), (2, 2));
+        assert_eq!((st.diffs.misses, st.diffs.hits), (1, 1));
+
+        let side = |cache: &dyn DerivedCache| {
+            let s = side_from_bytes("lib.rs", old.as_bytes().to_vec(), &langs, cache);
+            (s.syntax.as_ref().map(|t| t.debug_sexp()), s.line_count())
+        };
+        assert_eq!(side(&cache), side(&NoCache));
+        assert_eq!(cache.stats().syntax.hits, 3);
     }
 }

@@ -18,7 +18,6 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 tracing.workspace = true
 lector-config.workspace = true
-lector-workspace.workspace = true
 lector-search.workspace = true
 lector-fs.workspace = true
 lector-syntax.workspace = true

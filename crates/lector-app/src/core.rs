@@ -194,7 +194,7 @@ impl AppCore {
         }
     }
 
-    /// Viewed marks backed by the database (pass to `lector_workspace::review`).
+    /// Viewed marks backed by the database (pass to `lector_review::review`).
     pub fn review_store(&self) -> lector_config::ReviewStore {
         self.inner.db.review_store()
     }

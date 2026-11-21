@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::project::Project;
 use anyhow::{anyhow, bail, Context as _};
 use lector_buffer::TextEdit;
 use lector_config::Settings;
-use lector_workspace::Project;
 use serde_json::{json, Value};
 
 use super::schema::{object, prop};

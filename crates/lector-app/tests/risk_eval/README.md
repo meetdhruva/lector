@@ -1,6 +1,6 @@
 # Risk-ordering evaluation
 
-How well does `lector_workspace::risk` put the file a reviewer must see first at the top of a changeset?
+How well does `lector_review::risk` put the file a reviewer must see first at the top of a changeset?
 The review queue (`lector_app::review_queue::analyze`) is scored with top-1, top-3 and MRR (mean
 reciprocal rank of the first risky file).
 
@@ -36,7 +36,7 @@ and 8 of every ten are `holdout` (18), the rest `tune` (42). The weights are fit
 
 ## Weights and fitting
 
-`RiskWeights` (in `lector-workspace/src/risk/weights.rs`) has one base weight per signal. `baseline()` is the hand-set
+`RiskWeights` (in `lector-review/src/risk/weights.rs`) has one base weight per signal. `baseline()` is the hand-set
 start, `tuned()` (the `Default`) the result of `examples/risk_fit.rs`: deterministic coordinate search in
 declaration order over factors 0.6x-1.5x of the start weight, accepting a move that improves tune top-1, then MRR, then
 a hinge loss on the margin between the best risky file and the best other file (plus a small pull towards the start

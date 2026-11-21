@@ -6,11 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use lector_app::Project;
 use lector_config::{ReviewStore, Settings};
 use lector_git::{Changeset, LogQuery};
+use lector_review::{conflicts, review};
 use lector_search::CancelToken;
-use lector_workspace::project::Project;
-use lector_workspace::{conflicts, review};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -172,12 +172,12 @@ fn exercise(project: &Project, store: &ReviewStore) {
         changesets.push(Changeset::Commit(c.oid));
     }
     for cs in &changesets {
-        let Ok(view) = review::load_changeset(project, cs, store) else {
+        let Ok(view) = lector_app::project::load_changeset(project, cs, store) else {
             continue;
         };
         for file in &view.files {
             let opts = review::diff_options(&project.settings().diff);
-            if let Ok(diff) = review::load_file_diff(project, &file.change, &opts) {
+            if let Ok(diff) = lector_app::project::load_file_diff(project, &file.change, &opts) {
                 for line in 0..diff.new.line_count().min(20) {
                     let _ = diff.inline_for_new(line);
                 }
@@ -212,6 +212,7 @@ fn exercise(project: &Project, store: &ReviewStore) {
             first,
             "HEAD",
             &review::diff_options(&project.settings().diff),
+            lector_app::content_cache::ContentCache::global(),
         );
     }
 }

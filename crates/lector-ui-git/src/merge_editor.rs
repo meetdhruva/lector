@@ -19,6 +19,9 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, Hsla, Pixels, SharedString, Subscription, Task, WeakEntity,
     Window,
 };
+use lector_review::conflicts::{
+    self, ConflictContents, ConflictKind, ConflictParse, ConflictStage, Resolution, Side, SideView,
+};
 use lector_ui::actions::git as git_actions;
 use lector_ui::code_view::{
     CodeSource, CodeView, CodeViewEvent, Pos, RowBackground, RowWidget, WidgetAnchor,
@@ -29,9 +32,6 @@ use lector_ui::icons::{FileIcon, Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::conflicts::{
-    self, ConflictContents, ConflictKind, ConflictParse, ConflictStage, Resolution, Side, SideView,
-};
 
 use crate::confirm::{confirm, ConfirmSpec};
 use crate::diff_source::RevisionSource;
@@ -112,7 +112,7 @@ impl MergeEditor {
     /// A merge editor for repository-relative `rel` (`abs` is its absolute path, opened in the result pane).
     pub fn new(
         store: Entity<GitStore>,
-        project: lector_workspace::Project,
+        project: lector_app::Project,
         rel: String,
         abs: PathBuf,
         cx: &mut Context<Self>,
@@ -246,10 +246,11 @@ impl MergeEditor {
                 (stage, None)
             };
             let side = |t: &str| {
-                lector_workspace::review::side_from_bytes(
+                lector_review::review::side_from_bytes(
                     &rel,
                     t.as_bytes().to_vec(),
                     project.languages(),
+                    lector_app::content_cache::ContentCache::global(),
                 )
             };
             let ours = side(&ours_view.text);
@@ -261,7 +262,7 @@ impl MergeEditor {
             let (ours_view, theirs_view, base_view, ours, theirs, base) = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.building = None;
-                let make = |side: lector_workspace::review::DiffSide, cx: &mut Context<Self>| {
+                let make = |side: lector_review::review::DiffSide, cx: &mut Context<Self>| {
                     let source: Rc<dyn CodeSource> = Rc::new(RevisionSource::new(side));
                     cx.new(|cx| {
                         let mut v = CodeView::new(source, cx);

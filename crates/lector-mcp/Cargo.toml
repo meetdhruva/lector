@@ -10,7 +10,6 @@ description = "Model Context Protocol server for Lector: registry commands as MC
 
 [dependencies]
 lector-app.workspace = true
-lector-workspace.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

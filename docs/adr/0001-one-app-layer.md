@@ -39,3 +39,29 @@ through `lector-app`.
 `arch-check purity`: no `static`, `thread::spawn`, `OnceLock`/`Lazy` state or file writes in
 `lector-review` (regex and tree-sitter query tables in `OnceLock` are allowed by name).
 No behaviour change: all existing tests pass with only import paths edited.
+
+## Clarifications at implementation (step 1)
+Recorded by the architect when reviewing the implementation, before merge.
+
+- **Threads scoped to one call are allowed** in `lector-review` (`std::thread::scope`, rayon):
+  they do not outlive the call, so the crate stays a function of its inputs. Detached threads
+  remain forbidden (ADR 0003).
+- **The seam is `lector_review::content::DerivedCache`** (memoized syntax trees and line diffs),
+  not a blob provider: that is what the old cache actually held. `lector-app` implements it
+  with `ContentCache`; `NoCache` is the uncached implementation.
+- **UI crates may depend on `lector-review` directly** for its types and pure functions. A
+  blanket re-export through `lector-app` would be the shim this record forbids.
+- **Extra edges accepted:** `lector-review → lector-buffer` (the `TextEdit` value type used by
+  conflict resolution) and, temporarily, `→ lector-config`.
+- **Known debt, with an owner step.** These contradict "stateless" and are not accepted as the
+  end state:
+  - `apply_hunk_action*` writes to the repository through the handle passed in → becomes a
+    registry command in step 2 (ADR 0002).
+  - `set_viewed_with` and the `ReviewStore` it writes (`review.json`) → move behind the state
+    store in step 4 (ADR 0004); `lector-review` then takes viewed-state as an input and drops
+    its `lector-config` dependency for it.
+  - UI code calling `lector-review` loaders that do I/O (`load_changeset_with`,
+    `load_file_diff_with`, `file_vs_revision_with`, `load_vs_workdir_with`, `default_base`,
+    `file_summary`) → routed through `lector-app` in step 2.
+  Step 2 adds a `purity` sub-rule so that writes through handles are caught, not only direct
+  file writes.

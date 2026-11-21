@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::scale::px;
 use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Task, Window};
-use lector_workspace::{FileList, GitStatusMap};
+use lector_app::project::{FileList, GitStatusMap};
 
 use super::file_tree::git_color;
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};

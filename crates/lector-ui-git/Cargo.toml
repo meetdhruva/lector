@@ -14,7 +14,7 @@ gpui = "0.2.2"
 lector-ui.workspace = true
 lector-app.workspace = true
 futures = "0.3"
-lector-workspace.workspace = true
+lector-review.workspace = true
 lector-git = { workspace = true, features = ["serde"] }
 lector-process.workspace = true
 lector-diff.workspace = true

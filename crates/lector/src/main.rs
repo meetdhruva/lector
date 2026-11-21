@@ -229,7 +229,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         let (settings, warnings) = lector_config::load_settings_for(root.as_deref());
         let project = root
             .as_ref()
-            .map(|root| lector_workspace::Project::open(root, settings.clone()));
+            .map(|root| lector_app::Project::open(root, settings.clone()));
         (settings, warnings, project)
     });
     let (registry, mode) = load_themes(&cli);

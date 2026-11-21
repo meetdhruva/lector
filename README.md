@@ -274,8 +274,8 @@ synchronous, and reusable on its own:
 | `lector-fs` | file loading, encoding and kind detection, debounced watcher |
 | `lector-config` | settings, keymaps, paths, session and review state |
 | `lector-theme`, `lector-icons` | theme model and built-in themes; file and UI icons |
-| `lector-workspace` | project model, navigation, review, risk, structural diff, caches |
-| `lector-app` | headless core: commands, scheduler, documents, git state, journal, database |
+| `lector-review` | stateless review analysis: changesets, file diffs, risk, structural diff, conflicts |
+| `lector-app` | headless core: project model, commands, scheduler, documents, git state, journal, database, caches |
 | `lector-agent` | agent sessions over the Agent Client Protocol |
 | `lector-forge` | GitHub and GitLab pull requests |
 | `lector-cli`, `lector-mcp` | command line and MCP server over the same core |

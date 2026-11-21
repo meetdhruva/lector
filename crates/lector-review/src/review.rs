@@ -2,9 +2,9 @@
 //! diffs (both sides loaded, parsed and diffed) ready for split or unified
 //! presentation.
 //!
-//! Everything here is blocking; call it from a background thread. The
-//! `*_with` functions take the core services directly (handy for tests and
-//! tools); the contract functions take a [`crate::project::Project`].
+//! Everything here is blocking; call it from a background thread. Functions take
+//! the handles they read through (a [`Repo`], a [`LanguageRegistry`], a
+//! [`ReviewStore`]) and, where they parse or diff, a [`DerivedCache`].
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -28,8 +28,7 @@ pub const MAX_DIFF_BYTES: u64 = 5 * 1024 * 1024;
 /// Changesets with more files than this get no eager stats (computed on demand).
 pub const MAX_EAGER_STATS: usize = 3000;
 
-use crate::cache::{ContentCache, ContentId};
-use crate::project::Project;
+use crate::content::{ContentId, DerivedCache};
 pub use crate::{Error, Result};
 
 /// A changeset ready for review: files with stats and viewed state.
@@ -741,6 +740,7 @@ fn prepare_side(
     languages: &LanguageRegistry,
     parse: bool,
     id: Option<ContentId>,
+    cache: &dyn DerivedCache,
 ) -> (DiffSide, Option<FileKind>) {
     let mut side = DiffSide {
         path: path.clone(),
@@ -772,7 +772,7 @@ fn prepare_side(
                     if parse {
                         if let Some(lang) = &side.language {
                             side.syntax = match id {
-                                Some(id) => ContentCache::global().syntax(id, lang, &text).ok(),
+                                Some(id) => cache.syntax(id, lang, &text).ok(),
                                 None => Syntax::parse(lang, &text).ok(),
                             };
                         }
@@ -793,10 +793,18 @@ pub fn load_file_diff_with(
     languages: &LanguageRegistry,
     change: &FileChange,
     opts: &DiffOptions,
+    cache: &dyn DerivedCache,
 ) -> Result<FileDiff> {
     let old_loaded = load_side(repo, &change.old)?;
     let new_loaded = normalize_loaded_pair(&old_loaded, &change.new, load_side(repo, &change.new)?);
-    let mut fd = build_file_diff(change.clone(), &old_loaded, &new_loaded, languages, opts);
+    let mut fd = build_file_diff(
+        change.clone(),
+        &old_loaded,
+        &new_loaded,
+        languages,
+        opts,
+        cache,
+    );
     fd.content_id = pair_content_id(change, &old_loaded, &new_loaded);
     Ok(fd)
 }
@@ -817,13 +825,14 @@ pub fn diff_bytes(
     new: Option<Vec<u8>>,
     languages: &LanguageRegistry,
     opts: &DiffOptions,
+    cache: &dyn DerivedCache,
 ) -> FileDiff {
     let wrap = |b: Option<Vec<u8>>| match b {
         None => Loaded::Missing,
         Some(b) if b.len() as u64 > MAX_DIFF_BYTES => Loaded::TooLarge(b.len() as u64),
         Some(b) => Loaded::Bytes(b),
     };
-    build_file_diff(change, &wrap(old), &wrap(new), languages, opts)
+    build_file_diff(change, &wrap(old), &wrap(new), languages, opts, cache)
 }
 
 fn build_file_diff(
@@ -832,6 +841,7 @@ fn build_file_diff(
     new_loaded: &Loaded,
     languages: &LanguageRegistry,
     opts: &DiffOptions,
+    cache: &dyn DerivedCache,
 ) -> FileDiff {
     let too_large =
         matches!(old_loaded, Loaded::TooLarge(_)) || matches!(new_loaded, Loaded::TooLarge(_));
@@ -843,6 +853,7 @@ fn build_file_diff(
         languages,
         !too_large,
         old_id,
+        cache,
     );
     let (new, new_kind) = prepare_side(
         side_path(&change, false),
@@ -850,6 +861,7 @@ fn build_file_diff(
         languages,
         !too_large,
         new_id,
+        cache,
     );
     let image = [&old_kind, &new_kind].into_iter().find_map(|k| match k {
         Some(FileKind::Image(f)) if *f != ImageFormat::Svg => Some(*f),
@@ -896,9 +908,7 @@ fn build_file_diff(
             .map(|t| t.to_string())
             .unwrap_or_default();
         fd.diff = match (old_id, new_id) {
-            (Some(a), Some(b)) => {
-                (*ContentCache::global().line_diff(a, b, opts, || diff_text(&o, &n, opts))).clone()
-            }
+            (Some(a), Some(b)) => cache.line_diff(a, b, opts, &|| diff_text(&o, &n, opts)),
             _ => diff_text(&o, &n, opts),
         };
         fd.split = split_rows(&fd.diff);
@@ -919,6 +929,7 @@ pub fn file_vs_revision_with(
     rel_path: &str,
     rev: &str,
     opts: &DiffOptions,
+    cache: &dyn DerivedCache,
 ) -> Result<FileDiff> {
     let old = repo.file_at(rev, rel_path)?;
     let new = std::fs::read(repo.workdir().join(rel_path))
@@ -941,19 +952,24 @@ pub fn file_vs_revision_with(
         new: Side::Workdir(rel_path.to_string()),
         binary: None,
     };
-    Ok(diff_bytes(change, old, new, languages, opts))
+    Ok(diff_bytes(change, old, new, languages, opts, cache))
 }
 
 /// A parsed [`DiffSide`] for arbitrary bytes of `path` (e.g. a file at a
 /// revision, for a read-only view with highlighting).
-pub fn side_from_bytes(path: &str, bytes: Vec<u8>, languages: &LanguageRegistry) -> DiffSide {
+pub fn side_from_bytes(
+    path: &str,
+    bytes: Vec<u8>,
+    languages: &LanguageRegistry,
+    cache: &dyn DerivedCache,
+) -> DiffSide {
     let loaded = if bytes.len() as u64 > MAX_DIFF_BYTES * 4 {
         Loaded::TooLarge(bytes.len() as u64)
     } else {
         Loaded::Bytes(bytes)
     };
     let id = loaded_id(None, &loaded);
-    prepare_side(Some(path.to_string()), &loaded, languages, true, id).0
+    prepare_side(Some(path.to_string()), &loaded, languages, true, id, cache).0
 }
 
 /// The text of `path` at `rev` (for "view file at revision").
@@ -1092,27 +1108,6 @@ pub fn default_base(repo: &Repo, branch: &str) -> Option<String> {
 /// Resolves `rev` to a commit oid (helper for UI code).
 pub fn resolve(repo: &Repo, rev: &str) -> Option<Oid> {
     repo.resolve(rev).ok()
-}
-
-/// Loads a changeset of the project's repository with stats and viewed state.
-pub fn load_changeset(
-    project: &Project,
-    cs: &Changeset,
-    store: &ReviewStore,
-) -> Result<ChangesetView> {
-    let repo = project.repo().ok_or(Error::NotARepository)?;
-    let opts = diff_options(&project.settings().diff);
-    load_changeset_with(repo, cs, store, &opts)
-}
-
-/// Loads and diffs one change of the project's repository.
-pub fn load_file_diff(
-    project: &Project,
-    change: &FileChange,
-    opts: &DiffOptions,
-) -> Result<FileDiff> {
-    let repo = project.repo().ok_or(Error::NotARepository)?;
-    load_file_diff_with(repo, project.languages(), change, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1336,7 @@ fn apply_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::NoCache;
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
@@ -1495,7 +1491,8 @@ mod tests {
         let langs = LanguageRegistry::new();
         let changes = repo.changes(&Changeset::WorkingTree).unwrap();
         let lib = changes.iter().find(|c| c.path() == "lib.rs").unwrap();
-        let fd = load_file_diff_with(&repo, &langs, lib, &DiffOptions::default()).unwrap();
+        let fd =
+            load_file_diff_with(&repo, &langs, lib, &DiffOptions::default(), &NoCache).unwrap();
         assert_eq!(fd.kind, DiffKind::Text);
         assert_eq!(fd.diff.hunks.len(), 1);
         let changed: Vec<_> = fd
@@ -1536,26 +1533,26 @@ mod tests {
         let opts = DiffOptions::default();
         let get = |p: &str| changes.iter().find(|c| c.path() == p).unwrap();
 
-        let added = load_file_diff_with(&repo, &langs, get("added.md"), &opts).unwrap();
+        let added = load_file_diff_with(&repo, &langs, get("added.md"), &opts, &NoCache).unwrap();
         assert!(!added.old.exists);
         assert_eq!(added.old.line_count(), 0);
         assert!(added.unified.iter().all(|r| r.kind == RowKind::Added));
         assert_eq!(added.unified.len(), 3); // the trailing newline adds no row
 
-        let gone = load_file_diff_with(&repo, &langs, get("gone.txt"), &opts).unwrap();
+        let gone = load_file_diff_with(&repo, &langs, get("gone.txt"), &opts, &NoCache).unwrap();
         assert!(gone.unified.iter().all(|r| r.kind == RowKind::Removed));
 
-        let bin = load_file_diff_with(&repo, &langs, get("blob.bin"), &opts).unwrap();
+        let bin = load_file_diff_with(&repo, &langs, get("blob.bin"), &opts, &NoCache).unwrap();
         assert_eq!(bin.kind, DiffKind::Binary);
         assert_eq!(bin.new.size, 6);
 
-        let renamed = load_file_diff_with(&repo, &langs, get("new.txt"), &opts).unwrap();
+        let renamed = load_file_diff_with(&repo, &langs, get("new.txt"), &opts, &NoCache).unwrap();
         assert_eq!(renamed.display_path(), "old.txt → new.txt");
         assert!(renamed.is_identical());
 
         let big = vec![b'x'; (MAX_DIFF_BYTES + 10) as usize];
         std::fs::write(dir.path().join("added.md"), &big).unwrap();
-        let large = load_file_diff_with(&repo, &langs, get("added.md"), &opts).unwrap();
+        let large = load_file_diff_with(&repo, &langs, get("added.md"), &opts, &NoCache).unwrap();
         assert_eq!(large.kind, DiffKind::TooLarge);
         assert_eq!(large.new.size, MAX_DIFF_BYTES + 10);
     }
@@ -1574,6 +1571,7 @@ mod tests {
             &LanguageRegistry::new(),
             &changes[0],
             &DiffOptions::default(),
+            &NoCache,
         )
         .unwrap();
         assert_eq!(fd.kind, DiffKind::Image(ImageFormat::Png));
@@ -1599,6 +1597,7 @@ mod tests {
             Some(new.clone()),
             &langs,
             &DiffOptions::default(),
+            &NoCache,
         );
         assert_eq!(exact.diff.hunks.len(), 1);
         let settings = DiffSettings {
@@ -1611,6 +1610,7 @@ mod tests {
             Some(new),
             &langs,
             &diff_options(&settings),
+            &NoCache,
         );
         assert!(ws.diff.hunks.is_empty());
     }
@@ -1662,6 +1662,7 @@ mod tests {
             "lib.rs",
             "main",
             &DiffOptions::default(),
+            &NoCache,
         )
         .unwrap();
         assert!(fd.is_identical());
@@ -1690,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "perf smoke test: cargo test -p lector-workspace review_perf -- --ignored --nocapture"]
+    #[ignore = "perf smoke test: cargo test -p lector-review review_perf -- --ignored --nocapture"]
     fn review_perf_500_files() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -1730,6 +1731,7 @@ mod tests {
             &LanguageRegistry::new(),
             &big.change,
             &DiffOptions::default(),
+            &NoCache,
         )
         .unwrap();
         eprintln!(
@@ -1737,17 +1739,5 @@ mod tests {
             t.elapsed(),
             fd.diff.hunks.len()
         );
-    }
-
-    #[test]
-    fn project_wrappers() {
-        let (dir, _repo) = fixture();
-        let project = Project::open(dir.path(), lector_config::Settings::default()).unwrap();
-        let st = tempfile::tempdir().unwrap();
-        let view = load_changeset(&project, &Changeset::Unstaged, &store(st.path())).unwrap();
-        assert!(view.index_of("lib.rs").is_some());
-        let lib = view.files[view.index_of("lib.rs").unwrap()].change.clone();
-        let fd = load_file_diff(&project, &lib, &DiffOptions::default()).unwrap();
-        assert_eq!(fd.stats().added, 1);
     }
 }

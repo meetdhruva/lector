@@ -12,7 +12,7 @@ use gpui::{
     div, prelude::*, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle,
     SharedString, Subscription, Task, Window,
 };
-use lector_workspace::Project;
+use lector_app::Project;
 
 use crate::code_view::{CodeView, CodeViewEvent};
 use crate::components::v_flex;

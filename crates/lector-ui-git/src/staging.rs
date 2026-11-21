@@ -13,7 +13,7 @@ use lector_app::commands::git_write::BackupUnavailable;
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_git::{Changeset, FileChange, OperationKind};
-use lector_workspace::review::{self, HunkAction, LineSelection};
+use lector_review::review::{self, HunkAction, LineSelection};
 use serde_json::{json, Value};
 
 use crate::activity;
@@ -44,7 +44,7 @@ pub enum GitOp {
         action: HunkAction,
         /// Rows of the file's diff.
         selection: LineSelection,
-        /// [`lector_workspace::review::FileDiff::content_id`] of the diff the
+        /// [`lector_review::review::FileDiff::content_id`] of the diff the
         /// selection was made in: the op refuses when the file changed since.
         content_id: String,
     },
@@ -155,10 +155,18 @@ pub fn git_error_text(e: &lector_git::Error) -> String {
     }
 }
 
-/// [`git_error_text`] through a workspace error.
-pub fn workspace_error_text(e: &lector_workspace::Error) -> String {
+/// [`git_error_text`] through a review-analysis error.
+pub fn review_error_text(e: &lector_review::Error) -> String {
     match e {
-        lector_workspace::Error::Git(g) => git_error_text(g),
+        lector_review::Error::Git(g) => git_error_text(g),
+        other => other.to_string(),
+    }
+}
+
+/// [`git_error_text`] through a project error.
+pub fn project_error_text(e: &lector_app::project::ProjectError) -> String {
+    match e {
+        lector_app::project::ProjectError::Git(g) => git_error_text(g),
         other => other.to_string(),
     }
 }
@@ -169,8 +177,10 @@ pub fn command_error_text(e: &CommandError) -> String {
         CommandError::Failed(err) => {
             if let Some(g) = err.downcast_ref::<lector_git::Error>() {
                 git_error_text(g)
-            } else if let Some(w) = err.downcast_ref::<lector_workspace::Error>() {
-                workspace_error_text(w)
+            } else if let Some(w) = err.downcast_ref::<lector_review::Error>() {
+                review_error_text(w)
+            } else if let Some(w) = err.downcast_ref::<lector_app::project::ProjectError>() {
+                project_error_text(w)
             } else {
                 err.to_string()
             }
@@ -307,10 +317,10 @@ pub fn unstage_paths_for(change: &FileChange) -> Vec<String> {
 mod tests {
     use super::*;
     use gpui::{Focusable as _, TestAppContext, VisualTestContext};
+    use lector_app::Project;
     use lector_app::{AppCore, CoreOptions};
     use lector_ui::actions::workspace::UndoLastOperation;
     use lector_ui::views::Workspace;
-    use lector_workspace::Project;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")

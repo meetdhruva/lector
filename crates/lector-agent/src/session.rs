@@ -17,9 +17,9 @@ use std::time::{Duration, Instant, SystemTime};
 use lector_app::commands::Source;
 use lector_app::documents::{DocumentStore, SaveRequest};
 use lector_app::journal::{ActivityEntry, Journal, UndoError, UndoMode, UndoRecord};
+use lector_app::Project;
 use lector_app::{AppCore, CommandContext};
 use lector_git::ShadowRepo;
-use lector_workspace::Project;
 use parking_lot::{Condvar, Mutex};
 use serde_json::{json, Value};
 

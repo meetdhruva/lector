@@ -2,7 +2,7 @@
 
 use lector_app::documents::DocumentStore;
 use lector_app::AppCore;
-use lector_workspace::Project;
+use lector_app::Project;
 use serde_json::{json, Value};
 
 use crate::model::PromptContext;

@@ -1,12 +1,12 @@
 //! Structural diff scaling: files of 500 / 3 000 / 10 000 lines with a realistic
 //! agent-style edit (about 50 changed lines spread over the file).
-//! `cargo bench -p lector-workspace --bench structural_bench`
+//! `cargo bench -p lector-review --bench structural_bench`
 //! (custom harness; `STRUCTURAL_BENCH_REPS=n` sets the repetitions)
 
 use std::time::{Duration, Instant};
 
+use lector_review::structural::{self, Budget};
 use lector_syntax::{LanguageRegistry, Syntax};
-use lector_workspace::structural::{self, Budget};
 
 /// One generated function (about 14 lines).
 fn function(i: usize) -> String {
