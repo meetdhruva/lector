@@ -536,7 +536,7 @@ impl SyncController {
         cx.notify();
         let core = lector_ui::commands_bridge::core(cx);
         // Network and writes: the blocking lane. Cancelled by `SyncHost::cancel_repo` (kills git).
-        let key = view_key(JobKind::Command, cx.entity_id());
+        let key = view_key(JobKind::NetworkCommand, cx.entity_id());
         let job = background(cx, key, Priority::Visible, move |_| {
             Journal::install(&core);
             let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);

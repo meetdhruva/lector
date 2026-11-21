@@ -27,7 +27,7 @@
 "crates/lector-review/src/risk.rs" = 2696
 "crates/lector-review/src/structural.rs" = 1750
 "crates/lector-text/src/rope.rs" = 1541
-"crates/lector-ui-git/src/changes_panel.rs" = 1657
+"crates/lector-ui-git/src/changes_panel.rs" = 1652
 "crates/lector-ui-git/src/diff_view.rs" = 1926
 "crates/lector-ui-git/src/sync.rs" = 1864
 "crates/lector-ui-git/src/sync_model.rs" = 1702

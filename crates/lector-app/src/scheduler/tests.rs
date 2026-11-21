@@ -621,3 +621,107 @@ fn a_runner_scheduler_keeps_keys_subjects_and_results() {
 fn default_workers_at_least_two() {
     assert!(default_workers() >= 2);
 }
+
+/// `n` blocking-lane leaf jobs that wait for their release; returns once all have started.
+fn fill_blocking_lane(s: &Scheduler, n: usize) -> Vec<mpsc::Sender<()>> {
+    let (started_tx, started_rx) = mpsc::channel();
+    let mut senders = Vec::new();
+    for i in 0..n {
+        let (tx, rx) = mpsc::channel::<()>();
+        let started = started_tx.clone();
+        let _ = s.spawn(
+            key(JobKind::ForgeRead, 5000 + i as u64),
+            Priority::Visible,
+            move |_| {
+                started.send(()).ok();
+                let _ = rx.recv_timeout(Duration::from_secs(30));
+            },
+        );
+        senders.push(tx);
+    }
+    for _ in 0..n {
+        started_rx.recv_timeout(SECS5).unwrap();
+    }
+    senders
+}
+
+#[test]
+fn a_full_blocking_lane_never_delays_what_others_wait_on() {
+    let s = Scheduler::new(1);
+    let release = fill_blocking_lane(&s, BLOCKING_MAX);
+    // One more leaf job queues: the lane really is full.
+    let mut queued = s.spawn(key(JobKind::LspHover, 1), Priority::Visible, |_| ());
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(queued.try_take(), None);
+    let started = Instant::now();
+    let prompt = s.spawn(key(JobKind::AskpassPrompt, 1), Priority::Visible, |_| {
+        "answer"
+    });
+    let control = s.spawn(key(JobKind::AgentControl, 1), Priority::Visible, |_| {
+        "cancelled"
+    });
+    let terminal = s.spawn(key(JobKind::TerminalKill, 1), Priority::Background, |_| {
+        "killed"
+    });
+    assert_eq!(prompt.wait(), Some("answer"));
+    assert_eq!(control.wait(), Some("cancelled"));
+    assert_eq!(terminal.wait(), Some("killed"));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    for r in release {
+        r.send(()).ok();
+    }
+    assert_eq!(queued.wait(), Some(()));
+}
+
+#[test]
+fn a_command_waiting_for_a_prompt_completes_while_the_lane_is_otherwise_full() {
+    let s = Scheduler::new(1);
+    let release = fill_blocking_lane(&s, BLOCKING_MAX - 1);
+    let (asked_tx, asked_rx) = mpsc::channel();
+    let (answer_tx, answer_rx) = mpsc::channel::<&'static str>();
+    let answer_rx = Arc::new(Mutex::new(Some(answer_rx)));
+    let s2 = s.clone();
+    // The sixteenth leaf slot: a git command that needs a credential.
+    let command = s.spawn(
+        key(JobKind::NetworkCommand, 1),
+        Priority::Visible,
+        move |_| {
+            let answers = answer_rx.clone();
+            let prompt = s2.spawn(
+                key(JobKind::AskpassPrompt, 1),
+                Priority::Visible,
+                move |_| {
+                    asked_tx.send(()).ok();
+                    let rx = answers.lock().take()?;
+                    rx.recv_timeout(SECS5).ok()
+                },
+            );
+            prompt.wait().flatten()
+        },
+    );
+    // The prompt is shown although all sixteen leaf slots are taken; the user answers.
+    asked_rx.recv_timeout(SECS5).expect("the prompt started");
+    answer_tx.send("hunter2").unwrap();
+    assert_eq!(command.wait(), Some(Some("hunter2")));
+    for r in release {
+        r.send(()).ok();
+    }
+}
+
+#[test]
+fn a_compute_job_waits_for_a_blocking_job_instead_of_running_it_inline() {
+    let s = Scheduler::new(1);
+    let s2 = s.clone();
+    let outer = s.spawn(any(1), Priority::Visible, move |_| {
+        let inner = s2.spawn(key(JobKind::ForgeRead, 1), Priority::Visible, |_| {
+            thread::current().name().map(str::to_owned)
+        });
+        inner.wait().flatten()
+    });
+    let ran_on = outer.wait().flatten().expect("thread name");
+    assert!(ran_on.contains("blocking"), "{ran_on}");
+}

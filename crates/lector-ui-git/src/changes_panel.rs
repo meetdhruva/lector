@@ -12,7 +12,6 @@ use gpui::{
     MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
 };
 use lector_app::review_queue::QueueGroup;
-use lector_base::CancelToken;
 use lector_diff::DiffStats;
 use lector_git::{ChangeKind, Changeset};
 use lector_review::review::{ChangesetView, ReviewFile};
@@ -131,6 +130,8 @@ pub struct ChangesPanel {
     banner: Entity<OperationBanner>,
     sync_bar: Option<Entity<crate::sync::SyncPanelBar>>,
     menu: ContextMenuState,
+    /// The current branch's default base, for the mode menu (computed off the UI thread).
+    base: load::BaseCache,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -204,6 +205,7 @@ impl ChangesPanel {
             composer,
             banner,
             menu: ContextMenuState::default(),
+            base: load::BaseCache::default(),
             focus_handle: cx.focus_handle().tab_stop(true),
             _subscriptions: subs,
         };
@@ -239,6 +241,7 @@ impl ChangesPanel {
 
     /// Reloads in the background (coalesced).
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.refresh_default_base(cx);
         if self.load_task.is_some() {
             self.reload_pending = true;
             return;
@@ -878,15 +881,7 @@ impl ChangesPanel {
             .head
             .as_ref()
             .and_then(|h| h.branch.clone());
-        let repo = self.store.read(cx).repo().cloned();
-        let default_base = match (&repo, &branch) {
-            (Some(r), Some(b)) => lector_ui::commands_bridge::core(cx).review().default_base(
-                r,
-                b,
-                &CancelToken::new(),
-            ),
-            _ => None,
-        };
+        let default_base = self.base.base_for(branch.as_deref());
         let set = move |mode: ChangesMode| {
             let t = this.clone();
             move |_: &mut Window, cx: &mut App| {

@@ -262,15 +262,14 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         // On macOS `quit` ends in `[NSApp terminate:]`, which exits the process without
         // returning from `run`, so the clean shutdown is also recorded here (idempotent).
         // Order: the other quit hooks first (sessions saved, terminals killed, askpass server
-        // removed), then every child process tree is stopped (TERM, KILL after the grace
-        // period; returns as soon as they are gone, see lector-process), then the scheduler
-        // (queued and running jobs cancelled, bounded wait), and the clean-exit marker last: a hang or crash before it still counts as an abnormal session.
+        // removed), then `lector_app::shutdown`: reads cancelled, writes drained (bounded), every
+        // child process tree stopped (TERM, KILL after the grace period), the scheduler stopped
+        // (bounded wait), and the clean-exit marker last: a hang or crash before it still counts as an abnormal session.
         lector_ui::startup::on_quit_last(cx, move || {
             // Child process trees, then the scheduler (cancel all, bounded wait).
-            let _ = lector_app::shutdown::shutdown(
-                std::time::Duration::from_millis(1500),
-                std::time::Duration::from_millis(500),
-            );
+            // Reads cancelled, writes drained (10 s; network writes 2 s), then child process
+            // trees and the scheduler.
+            let _ = lector_app::shutdown::shutdown(lector_app::shutdown::QuitBounds::default());
             quit_session.end_clean();
         });
         cx.spawn(async move |cx| {

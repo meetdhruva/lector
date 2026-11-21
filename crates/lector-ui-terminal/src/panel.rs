@@ -582,7 +582,7 @@ impl TerminalPanel {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(1))
                 .await;
-            let key = view_key(JobKind::TerminalSessions, this.entity_id());
+            let key = view_key(JobKind::TerminalSessionsSave, this.entity_id());
             let write = background(cx, key, Priority::Background, move |_| {
                 crate::session::save(&sessions, &root, &tabs)
             });

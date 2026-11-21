@@ -1,6 +1,6 @@
-//! The scheduler's state and threads: two lanes of priority queues, the compute workers (one
-//! of them reserved for interactive jobs), the elastic blocking lane, the debounce timer and
-//! shutdown. Everything here runs under one mutex that is never held while a job runs, while a
+//! The scheduler's state and threads: three lanes of priority queues (compute, with one worker
+//! reserved for interactive jobs; the bounded blocking lane; the guaranteed lane), the debounce
+//! timer, the quit drain and shutdown. Everything here runs under one mutex that is never held while a job runs, while a
 //! thread is started or while a runner is called.
 
 use std::cell::Cell;
@@ -13,7 +13,7 @@ use lector_base::thread::{spawn_named, ThreadKind};
 use lector_base::CancelToken;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
-use super::key::{JobKey, Lane, Subject};
+use super::key::{AtQuit, JobKey, JobKind, Lane, Subject};
 use super::Priority;
 
 /// A job body handed to a [`Runner`]; it returns at once when its job was cancelled.
@@ -41,6 +41,21 @@ pub(super) struct Job {
     pub(super) id: u64,
     pub(super) key: JobKey,
     pub(super) body: Body,
+    queued_at: Instant,
+    /// Already logged as waiting long for a blocking-lane slot.
+    warned: bool,
+}
+
+impl Job {
+    pub(super) fn new(id: u64, key: JobKey, body: Body) -> Job {
+        Job {
+            id,
+            key,
+            body,
+            queued_at: Instant::now(),
+            warned: false,
+        }
+    }
 }
 
 struct Debounced {
@@ -52,53 +67,103 @@ struct Debounced {
 
 type Queues = [VecDeque<Job>; 4];
 
+/// A lane whose threads start on demand: the blocking lane (bounded) and the guaranteed lane.
+#[derive(Default)]
+struct Elastic {
+    queues: Queues,
+    threads: usize,
+    idle: usize,
+}
+
+/// Index of a lane in `State::elastic` / `Inner::elastic_cv`.
+const BLOCKING: usize = 0;
+const GUARANTEED: usize = 1;
+
+/// A blocking-lane job waiting longer than this for a slot is logged (once).
+const SLOT_WAIT_WARN: Duration = Duration::from_secs(3);
+
+/// More guaranteed-lane threads than this at once is logged (it has no bound).
+const GUARANTEED_WARN: usize = 64;
+
 #[derive(Default)]
 struct State {
     compute: Queues,
-    blocking: Queues,
+    elastic: [Elastic; 2],
     /// Every job queued or running, by key: (id, token).
     live: HashMap<JobKey, Vec<(u64, CancelToken)>>,
     debounced: HashMap<JobKey, Debounced>,
-    /// Jobs running on the scheduler's threads, or handed to the runner and not finished.
-    running: usize,
-    blocking_threads: usize,
-    blocking_idle: usize,
+    /// Jobs running on the scheduler's threads (or handed to the runner), by id.
+    active: HashMap<u64, JobKind>,
     /// Scheduler threads (workers and timer) that have not exited.
     threads_alive: usize,
+    /// Quitting: only kinds that are drained at quit are accepted and run.
+    quitting: bool,
     shutdown: bool,
 }
 
 impl State {
-    fn queued(&self) -> usize {
+    fn all_queues(&mut self) -> impl Iterator<Item = &mut VecDeque<Job>> {
+        let [blocking, guaranteed] = &mut self.elastic;
         self.compute
-            .iter()
-            .chain(self.blocking.iter())
-            .map(VecDeque::len)
-            .sum()
+            .iter_mut()
+            .chain(blocking.queues.iter_mut())
+            .chain(guaranteed.queues.iter_mut())
+    }
+
+    fn queued(&self) -> usize {
+        let elastic = self.elastic.iter().flat_map(|e| e.queues.iter());
+        self.compute.iter().chain(elastic).map(VecDeque::len).sum()
     }
 
     fn idle(&self) -> bool {
-        self.running == 0 && self.queued() == 0 && self.debounced.is_empty()
+        self.active.is_empty() && self.queued() == 0 && self.debounced.is_empty()
+    }
+
+    /// Takes the first queued job (highest priority first, lanes in order) that is drained at
+    /// quit.
+    fn pop_drained(&mut self) -> Option<Job> {
+        for q in self.all_queues() {
+            if let Some(pos) = q
+                .iter()
+                .position(|j| j.key.kind.at_quit() != AtQuit::Cancel)
+            {
+                return q.remove(pos);
+            }
+        }
+        None
     }
 }
 
-/// Which compute jobs a worker takes.
+/// Which jobs a worker takes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
-    /// Any priority, highest first.
+    /// Compute jobs of any priority, highest first.
     General,
-    /// Only `Interactive` jobs: one keystroke-driven job always finds a free worker, even when
-    /// every general worker is busy with long background work.
+    /// Only `Interactive` compute jobs: one keystroke-driven job always finds a free worker,
+    /// even when every general worker is busy with long background work.
     Reserved,
+    /// Started at quit: only jobs drained at quit, from any lane, so the drain never waits for
+    /// a worker held by a cancelled job that ignores its token.
+    Drain,
+}
+
+/// What [`Inner::drain`] could not finish within its bounds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DrainReport {
+    /// Kinds of writes abandoned (one entry per job): still queued or running at the bound,
+    /// or network writes past their grace.
+    pub abandoned: Vec<JobKind>,
 }
 
 pub(super) struct Inner {
     state: Mutex<State>,
     general_cv: Condvar,
     reserved_cv: Condvar,
-    blocking_cv: Condvar,
+    drain_cv: Condvar,
+    elastic_cv: [Condvar; 2],
     timer_cv: Condvar,
-    idle_cv: Condvar,
+    /// Notified whenever a job finishes or the scheduler's thread count changes.
+    progress_cv: Condvar,
     next_id: AtomicU64,
     pub(super) general: usize,
     pub(super) blocking_max: usize,
@@ -107,7 +172,7 @@ pub(super) struct Inner {
 
 impl Inner {
     /// A pool with `general` compute workers, one reserved interactive worker, a blocking
-    /// lane of at most `blocking_max` threads and the debounce timer.
+    /// lane of at most `blocking_max` threads, the guaranteed lane and the debounce timer.
     pub(super) fn start(general: usize, blocking_max: usize) -> Arc<Inner> {
         let inner = Arc::new(Inner::new(general.max(1), blocking_max.max(1), None));
         let mut roles = vec![Role::Reserved];
@@ -116,7 +181,7 @@ impl Inner {
             let worker = inner.clone();
             let name = match role {
                 Role::Reserved => "interactive".to_string(),
-                Role::General => format!("compute-{i}"),
+                _ => format!("compute-{i}"),
             };
             inner.start_thread(ThreadKind::SchedulerWorker, name, move || {
                 worker.compute_loop(role);
@@ -139,9 +204,10 @@ impl Inner {
             state: Mutex::new(State::default()),
             general_cv: Condvar::new(),
             reserved_cv: Condvar::new(),
-            blocking_cv: Condvar::new(),
+            drain_cv: Condvar::new(),
+            elastic_cv: [Condvar::new(), Condvar::new()],
             timer_cv: Condvar::new(),
-            idle_cv: Condvar::new(),
+            progress_cv: Condvar::new(),
             next_id: AtomicU64::new(1),
             general,
             blocking_max,
@@ -182,7 +248,8 @@ impl Inner {
     /// Registers `job` under its key (cancelling what it replaces) and queues it on its lane.
     pub(super) fn submit(self: &Arc<Self>, prio: Priority, token: CancelToken, job: Job) {
         let mut st = self.state.lock();
-        if st.shutdown {
+        let refused = st.shutdown || (st.quitting && job.key.kind.at_quit() == AtQuit::Cancel);
+        if refused {
             drop(st);
             token.cancel();
             // The body sees the cancelled token and only reports `Cancelled` to its waiter.
@@ -191,10 +258,10 @@ impl Inner {
         }
         register(&mut st, &job.key, job.id, &token);
         if let Some(runner) = self.runner.clone() {
-            st.running += 1;
+            st.active.insert(job.id, job.key.kind);
             drop(st);
             let me = self.clone();
-            let Job { id, key, body } = job;
+            let Job { id, key, body, .. } = job;
             runner(
                 Duration::ZERO,
                 Box::new(move || {
@@ -204,6 +271,7 @@ impl Inner {
             );
             return;
         }
+        let quitting = st.quitting;
         match job.key.kind.lane() {
             Lane::Compute => {
                 st.compute[prio as usize].push_back(job);
@@ -213,33 +281,53 @@ impl Inner {
                     self.reserved_cv.notify_one();
                 }
             }
-            Lane::Blocking => {
-                st.blocking[prio as usize].push_back(job);
-                let grow = st.blocking_idle == 0 && st.blocking_threads < self.blocking_max;
+            lane => {
+                let ix = if lane == Lane::Blocking {
+                    BLOCKING
+                } else {
+                    GUARANTEED
+                };
+                let bound = (ix == BLOCKING).then_some(self.blocking_max);
+                let e = &mut st.elastic[ix];
+                e.queues[prio as usize].push_back(job);
+                let grow = e.idle == 0 && bound.is_none_or(|max| e.threads < max);
                 if grow {
-                    st.blocking_threads += 1;
+                    e.threads += 1;
+                    if ix == GUARANTEED && e.threads > GUARANTEED_WARN {
+                        tracing::warn!("{} guaranteed-lane threads at once", e.threads);
+                    }
                 }
                 drop(st);
                 if grow {
-                    self.grow_blocking();
+                    self.grow(ix);
                 } else {
-                    self.blocking_cv.notify_one();
+                    self.elastic_cv[ix].notify_one();
+                    // A full blocking lane: the timer logs jobs that wait long for a slot.
+                    self.timer_cv.notify_all();
                 }
             }
         }
+        if quitting {
+            self.drain_cv.notify_all();
+        }
     }
 
-    fn grow_blocking(self: &Arc<Self>) {
+    fn grow(self: &Arc<Self>, ix: usize) {
         let me = self.clone();
         let n = self.next_id();
-        let started = self.start_thread(ThreadKind::SchedulerWorker, format!("blocking-{n}"), {
-            move || me.blocking_loop()
+        let name = if ix == BLOCKING {
+            format!("blocking-{n}")
+        } else {
+            format!("guaranteed-{n}")
+        };
+        let started = self.start_thread(ThreadKind::SchedulerWorker, name, move || {
+            me.elastic_loop(ix)
         });
         if !started {
             let mut st = self.state.lock();
-            st.blocking_threads -= 1;
-            if st.blocking_threads == 0 {
-                tracing::error!("no blocking-lane thread could start; blocking jobs wait");
+            st.elastic[ix].threads -= 1;
+            if st.elastic[ix].threads == 0 {
+                tracing::error!("no thread could start for a lane of the scheduler; its jobs wait");
             }
         }
     }
@@ -258,11 +346,11 @@ impl Inner {
             // registered now, so a newer call cancels this one while it waits.
             let id = self.next_id();
             let mut st = self.state.lock();
-            if st.shutdown {
+            if st.shutdown || st.quitting {
                 return;
             }
             register(&mut st, &key, id, &token);
-            st.running += 1;
+            st.active.insert(id, key.kind);
             drop(st);
             let me = self.clone();
             runner(
@@ -275,7 +363,7 @@ impl Inner {
             return;
         }
         let mut st = self.state.lock();
-        if st.shutdown {
+        if st.shutdown || st.quitting {
             return;
         }
         if let Some(old) = st.debounced.insert(
@@ -296,17 +384,14 @@ impl Inner {
     /// Bookkeeping after a job ran (or was handed back by the runner).
     fn finish(&self, id: u64, key: &JobKey) {
         let mut st = self.state.lock();
-        st.running = st.running.saturating_sub(1);
+        st.active.remove(&id);
         unregister(&mut st, key, id);
-        let idle = st.idle();
         drop(st);
-        if idle {
-            self.idle_cv.notify_all();
-        }
+        self.progress_cv.notify_all();
     }
 
     fn run(&self, job: Job) {
-        let Job { id, key, body } = job;
+        let Job { id, key, body, .. } = job;
         body();
         self.finish(id, &key);
     }
@@ -315,6 +400,7 @@ impl Inner {
         let cv = match role {
             Role::General => &self.general_cv,
             Role::Reserved => &self.reserved_cv,
+            Role::Drain => &self.drain_cv,
         };
         loop {
             let job = {
@@ -323,9 +409,10 @@ impl Inner {
                     let next = match role {
                         Role::General => st.compute.iter_mut().find_map(VecDeque::pop_front),
                         Role::Reserved => st.compute[Priority::Interactive as usize].pop_front(),
+                        Role::Drain => st.pop_drained(),
                     };
                     if let Some(job) = next {
-                        st.running += 1;
+                        st.active.insert(job.id, job.key.kind);
                         break job;
                     }
                     if st.shutdown {
@@ -338,28 +425,28 @@ impl Inner {
         }
     }
 
-    fn blocking_loop(&self) {
+    fn elastic_loop(&self, ix: usize) {
         loop {
             let job = {
                 let mut st = self.state.lock();
                 loop {
-                    if let Some(job) = st.blocking.iter_mut().find_map(VecDeque::pop_front) {
-                        st.running += 1;
+                    let e = &mut st.elastic[ix];
+                    if let Some(job) = e.queues.iter_mut().find_map(VecDeque::pop_front) {
+                        st.active.insert(job.id, job.key.kind);
                         break job;
                     }
                     if st.shutdown {
-                        st.blocking_threads -= 1;
+                        st.elastic[ix].threads -= 1;
                         return;
                     }
-                    st.blocking_idle += 1;
-                    let timed_out = self
-                        .blocking_cv
+                    st.elastic[ix].idle += 1;
+                    let timed_out = self.elastic_cv[ix]
                         .wait_for(&mut st, BLOCKING_IDLE)
                         .timed_out();
-                    st.blocking_idle -= 1;
-                    let empty = st.blocking.iter().all(VecDeque::is_empty);
-                    if timed_out && empty {
-                        st.blocking_threads -= 1;
+                    let e = &mut st.elastic[ix];
+                    e.idle -= 1;
+                    if timed_out && e.queues.iter().all(VecDeque::is_empty) {
+                        e.threads -= 1;
                         return;
                     }
                 }
@@ -389,20 +476,19 @@ impl Inner {
                 drop(st);
                 for (key, d) in jobs {
                     let id = self.next_id();
-                    self.submit(
-                        d.prio,
-                        d.token,
-                        Job {
-                            id,
-                            key,
-                            body: d.body,
-                        },
-                    );
+                    self.submit(d.prio, d.token, Job::new(id, key, d.body));
                 }
                 st = self.state.lock();
                 continue;
             }
-            match st.debounced.values().map(|d| d.deadline).min() {
+            let next_warn = warn_slow_slots(&mut st, now);
+            let next = st
+                .debounced
+                .values()
+                .map(|d| d.deadline)
+                .chain(next_warn)
+                .min();
+            match next {
                 Some(deadline) => {
                     self.timer_cv.wait_until(&mut st, deadline);
                 }
@@ -411,15 +497,17 @@ impl Inner {
         }
     }
 
-    /// Takes job `id` out of its queue if it has not started (a worker that waits for it runs
-    /// it inline instead of blocking: a job waiting for another job can never deadlock the pool).
+    /// Takes compute job `id` out of its queue if it has not started: a compute worker that
+    /// waits for it runs it inline instead of blocking, so a job waiting for another job can
+    /// never deadlock the compute pool. Jobs of the other lanes are never run inline (they may
+    /// wait without bound and would park a compute worker); their lanes guarantee progress.
     pub(super) fn steal(&self, id: u64) -> Option<Job> {
         let mut st = self.state.lock();
         let st = &mut *st;
-        for q in st.compute.iter_mut().chain(st.blocking.iter_mut()) {
+        for q in st.compute.iter_mut() {
             if let Some(pos) = q.iter().position(|j| j.id == id) {
                 let job = q.remove(pos)?;
-                st.running += 1;
+                st.active.insert(job.id, job.key.kind);
                 return Some(job);
             }
         }
@@ -445,10 +533,26 @@ impl Inner {
         }
     }
 
+    /// Cancels the one job `id` of `key` (it then reports `Cancelled` when its body runs).
+    fn cancel_id(&self, key: &JobKey, id: u64) {
+        let token = {
+            let mut st = self.state.lock();
+            let entries = st.live.get_mut(key);
+            entries.and_then(|e| e.iter().position(|(i, _)| *i == id).map(|p| e.remove(p).1))
+        };
+        if let Some(t) = token {
+            t.cancel();
+        }
+    }
+
     /// Cancels every job of `subject` whose kind is cancelled with its subject; returns how
     /// many jobs (queued, running or debounced) were cancelled.
     pub(super) fn cancel_subject(&self, subject: &Subject) -> usize {
-        let hit = |k: &JobKey| &k.subject == subject && k.kind.cancelled_with_subject();
+        self.cancel_where(|k| &k.subject == subject && k.kind.cancelled_with_subject())
+    }
+
+    /// Cancels every queued, running or debounced job whose key matches; returns how many.
+    fn cancel_where(&self, hit: impl Fn(&JobKey) -> bool) -> usize {
         let mut tokens = Vec::new();
         let mut st = self.state.lock();
         st.live.retain(|k, entries| {
@@ -485,11 +589,144 @@ impl Inner {
         let deadline = Instant::now() + timeout;
         let mut st = self.state.lock();
         while !st.idle() {
-            if self.idle_cv.wait_until(&mut st, deadline).timed_out() {
+            if self.progress_cv.wait_until(&mut st, deadline).timed_out() {
                 return st.idle();
             }
         }
         true
+    }
+
+    /// The first step of quitting: from now on only kinds drained at quit are accepted. Every
+    /// other job is cancelled (queued ones dropped, their waiters told), debounces dropped, and a
+    /// drain worker started so queued writes run even if every worker is busy. Returns how many
+    /// jobs were cancelled.
+    pub(super) fn begin_quit(self: &Arc<Self>) -> usize {
+        let mut st = self.state.lock();
+        if st.quitting || st.shutdown {
+            return 0;
+        }
+        st.quitting = true;
+        let mut dropped: Vec<Job> = Vec::new();
+        for q in st.all_queues() {
+            let (cancel, keep): (VecDeque<Job>, VecDeque<Job>) = q
+                .drain(..)
+                .partition(|j| j.key.kind.at_quit() == AtQuit::Cancel);
+            *q = keep;
+            dropped.extend(cancel);
+        }
+        drop(st);
+        let cancelled = self.cancel_where(|k| k.kind.at_quit() == AtQuit::Cancel);
+        let debounced: Vec<Debounced> = self
+            .state
+            .lock()
+            .debounced
+            .drain()
+            .map(|(_, d)| d)
+            .collect();
+        for d in &debounced {
+            d.token.cancel();
+        }
+        for job in dropped {
+            let Job { id, key, body, .. } = job;
+            body();
+            self.finish(id, &key);
+        }
+        if self.runner.is_none() {
+            let me = self.clone();
+            self.start_thread(
+                ThreadKind::SchedulerWorker,
+                "quit-drain".into(),
+                move || me.compute_loop(Role::Drain),
+            );
+        }
+        self.drain_cv.notify_all();
+        cancelled + debounced.len()
+    }
+
+    /// Waits until every write ([`AtQuit::Drain`] / [`AtQuit::DrainBriefly`]) queued or running
+    /// has finished, at most until `deadline`; [`AtQuit::DrainBriefly`] jobs (network writes)
+    /// only until `brief_deadline`, after which they are cancelled. Call after
+    /// [`Inner::begin_quit`]. Reports what was left.
+    pub(super) fn drain(&self, deadline: Instant, brief_deadline: Instant) -> DrainReport {
+        let mut report = DrainReport::default();
+        let mut given_up: HashMap<u64, JobKind> = HashMap::new();
+        let mut st = self.state.lock();
+        loop {
+            let now = Instant::now();
+            if now >= brief_deadline {
+                // Network writes past their grace: cancel and stop waiting for them.
+                let mut dropped = Vec::new();
+                for q in st.all_queues() {
+                    while let Some(pos) = q
+                        .iter()
+                        .position(|j| j.key.kind.at_quit() == AtQuit::DrainBriefly)
+                    {
+                        if let Some(job) = q.remove(pos) {
+                            dropped.push(job);
+                        }
+                    }
+                }
+                let running: Vec<(u64, JobKind)> = st
+                    .active
+                    .iter()
+                    .filter(|(id, k)| {
+                        k.at_quit() == AtQuit::DrainBriefly && !given_up.contains_key(id)
+                    })
+                    .map(|(id, k)| (*id, *k))
+                    .collect();
+                drop(st);
+                for job in dropped {
+                    report.abandoned.push(job.key.kind);
+                    let Job { id, key, body, .. } = job;
+                    self.cancel_id(&key, id);
+                    body();
+                    self.finish(id, &key);
+                }
+                if !running.is_empty() {
+                    self.cancel_where(|k| k.kind.at_quit() == AtQuit::DrainBriefly);
+                }
+                for (id, kind) in running {
+                    given_up.insert(id, kind);
+                    report.abandoned.push(kind);
+                }
+                st = self.state.lock();
+            }
+            let pending_writes = st
+                .all_queues()
+                .flat_map(|q| q.iter())
+                .any(|j| j.key.kind.at_quit() != AtQuit::Cancel)
+                || st
+                    .active
+                    .iter()
+                    .any(|(id, k)| k.at_quit() != AtQuit::Cancel && !given_up.contains_key(id));
+            if !pending_writes {
+                break;
+            }
+            if now >= deadline {
+                for q in st.all_queues() {
+                    for j in q.iter() {
+                        if j.key.kind.at_quit() != AtQuit::Cancel {
+                            report.abandoned.push(j.key.kind);
+                        }
+                    }
+                }
+                let left: Vec<JobKind> = st
+                    .active
+                    .iter()
+                    .filter(|(id, k)| k.at_quit() != AtQuit::Cancel && !given_up.contains_key(id))
+                    .map(|(_, k)| *k)
+                    .collect();
+                report.abandoned.extend(left);
+                break;
+            }
+            let wake = if brief_deadline > now {
+                deadline.min(brief_deadline)
+            } else {
+                deadline
+            };
+            self.progress_cv.wait_until(&mut st, wake);
+        }
+        report
     }
 
     /// Stops the scheduler: no new job runs, every queued job is dropped (its waiter gets
@@ -501,7 +738,7 @@ impl Inner {
         let st = &mut *guard;
         st.shutdown = true;
         let mut dropped: Vec<Job> = Vec::new();
-        for q in st.compute.iter_mut().chain(st.blocking.iter_mut()) {
+        for q in st.all_queues() {
             dropped.extend(q.drain(..));
         }
         let mut tokens: Vec<CancelToken> = st
@@ -520,11 +757,14 @@ impl Inner {
         }
         self.general_cv.notify_all();
         self.reserved_cv.notify_all();
-        self.blocking_cv.notify_all();
+        self.drain_cv.notify_all();
+        for cv in &self.elastic_cv {
+            cv.notify_all();
+        }
         self.timer_cv.notify_all();
         let mut st = self.state.lock();
         while st.threads_alive > 0 {
-            if self.idle_cv.wait_until(&mut st, deadline).timed_out() {
+            if self.progress_cv.wait_until(&mut st, deadline).timed_out() {
                 break;
             }
         }
@@ -548,13 +788,35 @@ impl Inner {
 
     #[cfg(test)]
     pub(super) fn blocking_threads(&self) -> usize {
-        self.state.lock().blocking_threads
+        self.state.lock().elastic[BLOCKING].threads
     }
 
     #[cfg(test)]
     pub(super) fn threads_alive(&self) -> usize {
         self.state.lock().threads_alive
     }
+}
+
+/// Logs (once per job) blocking-lane jobs that have waited [`SLOT_WAIT_WARN`] for a slot;
+/// returns when the next one would be due.
+fn warn_slow_slots(st: &mut State, now: Instant) -> Option<Instant> {
+    let mut next: Option<Instant> = None;
+    for q in st.elastic[BLOCKING].queues.iter_mut() {
+        for job in q.iter_mut().filter(|j| !j.warned) {
+            let due = job.queued_at + SLOT_WAIT_WARN;
+            if due <= now {
+                job.warned = true;
+                tracing::warn!(
+                    kind = ?job.key.kind,
+                    "a job has waited {:?} for a blocking-lane slot (all busy)",
+                    now - job.queued_at
+                );
+            } else {
+                next = Some(next.map_or(due, |n| n.min(due)));
+            }
+        }
+    }
+    next
 }
 
 /// Decrements `threads_alive` when a scheduler thread's loop returns (or unwinds).
@@ -565,7 +827,7 @@ impl Drop for AliveGuard {
         let mut st: MutexGuard<'_, State> = self.0.state.lock();
         st.threads_alive = st.threads_alive.saturating_sub(1);
         drop(st);
-        self.0.idle_cv.notify_all();
+        self.0.progress_cv.notify_all();
     }
 }
 

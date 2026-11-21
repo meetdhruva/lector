@@ -33,8 +33,17 @@ Changes:
   superseded, now stop instead of running to the end.
 - **A background job that panics is caught**: the worker keeps running, the panic is written to the
   crash log (`lector health`), and views that report errors (diffs, panels, commits) show it.
-- **Quitting stops background work promptly**: running and queued jobs are cancelled and Lector
-  waits at most half a second for them, after stopping child processes as before.
+- **Quitting finishes your writes and stops the rest.** A save, a stage, a commit or an undo that is
+  running or waiting when you quit now completes (up to 10 seconds; a push or a pull-request comment
+  up to 2 seconds, since the network can hang) before Lector stops its child processes; everything
+  else is cancelled at once. Before, Lector did not wait for any of them: a save still in progress
+  was lost (never half-written: saves replace the file in one step), and a git command still running,
+  such as a commit, was killed by the process stop that quitting does. A write that could not finish
+  in time is named in the log and the crash log (`lector health`).
+- **A credential prompt or an agent's question always appears**, even while many network operations
+  or agent sessions are busy: what other work waits on no longer queues behind them.
+- **The Changes panel's mode menu no longer runs git when it opens**, and Review Branch no longer
+  runs git on the UI thread: the branch's base is looked up in the background.
 
 ## 0.7.1 — 2026-11-19
 

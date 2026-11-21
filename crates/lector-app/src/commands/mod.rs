@@ -637,8 +637,9 @@ impl CommandRegistry {
         Ok(outcome)
     }
 
-    /// Runs [`CommandRegistry::invoke`] on the core's scheduler (blocking lane, job kind
-    /// [`crate::scheduler::JobKind::Command`], `Visible`).
+    /// Runs [`CommandRegistry::invoke`] on the core's scheduler (blocking lane, `Visible`; job
+    /// kind [`crate::scheduler::JobKind::Command`] for a write, which is drained at quit, else
+    /// `CommandRead`).
     pub fn invoke_async(
         &self,
         id: &str,
@@ -648,10 +649,13 @@ impl CommandRegistry {
         let this = self.clone();
         let id = id.to_string();
         let scheduler = cx.core.scheduler().clone();
-        let key = crate::scheduler::JobKey::new(
-            crate::scheduler::JobKind::Command,
-            crate::scheduler::Subject::App,
-        );
+        let writes = self.get(&id).is_none_or(|c| c.spec().writes);
+        let kind = if writes {
+            crate::scheduler::JobKind::Command
+        } else {
+            crate::scheduler::JobKind::CommandRead
+        };
+        let key = crate::scheduler::JobKey::new(kind, crate::scheduler::Subject::App);
         scheduler.spawn(key, crate::scheduler::Priority::Visible, move |_| {
             this.invoke(&id, args, &cx)
         })

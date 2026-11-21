@@ -36,7 +36,6 @@ use lector_ui::background::{background, view_key, JobKind, Priority};
 use std::rc::Rc;
 
 use gpui::{actions, App, AppContext, ClipboardItem, Entity, SharedString, Window};
-use lector_base::CancelToken;
 use lector_git::Oid;
 use lector_ui::actions::{editor, git as git_actions, workspace as ws_actions};
 use lector_ui::code_view::{CodeSource, CodeView};
@@ -338,19 +337,23 @@ pub fn init(cx: &mut App) {
             else {
                 return;
             };
+            // Finding the base runs git: off the UI thread, then the review opens.
             let service = lector_ui::commands_bridge::core(cx).review();
-            let Some(base) = service.default_base(repo, &branch, &CancelToken::new()) else {
-                return;
-            };
-            let s = s.clone();
-            window.defer(cx, move |window, cx| {
-                review_tab::open_review(
-                    &s,
-                    lector_git::Changeset::BranchVsBase { branch, base },
-                    window,
-                    cx,
-                )
+            let (repo, b) = (repo.clone(), branch.clone());
+            let key = view_key(JobKind::GitLookup, s.entity_id());
+            let base = background(cx, key, Priority::Visible, move |cancel| {
+                service.default_base(&repo, &b, cancel)
             });
+            let s = s.clone();
+            window
+                .spawn(cx, async move |cx| {
+                    let Ok(Some(base)) = base.await else { return };
+                    let _ = cx.update(|window, cx| {
+                        let cs = lector_git::Changeset::BranchVsBase { branch, base };
+                        review_tab::open_review(&s, cs, window, cx)
+                    });
+                })
+                .detach();
         });
     })
     .detach();

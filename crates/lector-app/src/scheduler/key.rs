@@ -9,7 +9,9 @@
 //! * the kind picks the [`Lane`]: short, CPU or local-disk work runs on the compute workers;
 //!   work whose duration depends on somebody else (the network, a language server, an agent,
 //!   the user answering a prompt, an external program) runs on the bounded blocking lane so it
-//!   can never occupy every compute worker.
+//!   can never occupy every compute worker; work that other jobs or a person wait on runs on
+//!   the guaranteed lane, which never queues behind a bound (see [`Lane`]);
+//! * the kind says what happens at quit ([`AtQuit`]): writes are drained, the rest cancelled.
 //!
 //! The priority of each kind is chosen by the caller; only the kinds listed in
 //! [`JobKind::may_be_interactive`] may use [`Priority::Interactive`](super::Priority), the
@@ -24,8 +26,28 @@ use std::sync::Arc;
 pub enum Lane {
     /// The fixed compute pool (CPU work, local disk and local `git`, bounded by input size).
     Compute,
-    /// The bounded blocking lane: waits whose length nobody here controls.
+    /// The bounded blocking lane: "leaf" waits whose length nobody here controls (network,
+    /// language servers, external programs). Beyond its bound, jobs queue by priority.
     Blocking,
+    /// Waits that other jobs or a person wait on (a credential prompt a git command waits for,
+    /// an agent's request, cancelling or undoing a turn, a terminal's kill escalation) and agent
+    /// turns (at most one per session). Always start at once: no bound, so a full blocking
+    /// lane of waiters can never keep the job they wait for from starting. Their number is
+    /// bounded by their owners (prompt slots, requests in flight, sessions).
+    Guaranteed,
+}
+
+/// What happens to a job of a kind when the app quits (`lector_app::shutdown`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AtQuit {
+    /// Cancelled at once (reads, computations): its result has no one to go to.
+    Cancel,
+    /// A local write: queued ones run, running ones finish, within the drain bound; its child
+    /// processes are stopped only after the drain.
+    Drain,
+    /// A write that waits on the network (push, forge comments) or on an agent: drained for a
+    /// short grace only, since it can hang; then cancelled and reported.
+    DrainBriefly,
 }
 
 macro_rules! job_kinds {
@@ -169,10 +191,13 @@ job_kinds! {
     ConflictParse = (Compute, true, true, false),
     /// A write command the user asked for (stage, commit, discard, undo...).
     GitWrite = (Compute, false, false, false),
-    /// A registry command run off the caller's thread (`CommandRegistry::invoke_async`): any
-    /// command, network sync included, so the blocking lane; it may write, so never cancelled
-    /// with a subject.
+    /// A writing registry command run off the caller's thread (`CommandRegistry::invoke_async`,
+    /// palette actions): it may run git, so the blocking lane; never cancelled with a subject.
     Command = (Blocking, false, false, false),
+    /// A reading registry command run off the caller's thread.
+    CommandRead = (Blocking, false, true, false),
+    /// A git network operation (fetch, pull, push, sync flows): waits on the remote.
+    NetworkCommand = (Blocking, false, false, false),
 
     // ---- review ----
     /// Review analysis of changes (risk, structure, queue).
@@ -194,32 +219,50 @@ job_kinds! {
     /// Checking for an update.
     UpdateCheck = (Blocking, true, true, false),
     /// One credential prompt connection (waits for the user).
-    AskpassPrompt = (Blocking, false, true, false),
+    AskpassPrompt = (Guaranteed, false, true, false),
 
     // ---- agents ----
     /// Starting or restarting an agent session (spawns and initializes the agent).
     AgentStart = (Blocking, true, true, false),
     /// One agent turn.
-    AgentTurn = (Blocking, false, true, false),
+    AgentTurn = (Guaranteed, false, true, false),
     /// One request from the agent (may wait for the user's permission).
-    AgentRequest = (Blocking, false, true, false),
+    AgentRequest = (Guaranteed, false, true, false),
     /// Cancelling a turn or undoing one (talks to the agent / writes).
-    AgentControl = (Blocking, false, false, false),
+    AgentControl = (Guaranteed, false, false, false),
     /// Computing a turn summary or the diff context for the agent.
     AgentContext = (Compute, false, true, false),
 
     // ---- terminal ----
     /// Starting a terminal session.
     TerminalSpawn = (Compute, true, true, false),
-    /// Loading or saving the terminal tabs of a project.
+    /// Loading the terminal tabs of a project.
     TerminalSessions = (Compute, false, true, false),
+    /// Saving the terminal tabs of a project (a write).
+    TerminalSessionsSave = (Compute, false, false, false),
     /// Resolving a clicked link in a terminal.
     TerminalLink = (Compute, true, true, false),
     /// Killing a terminal's process tree after its grace period.
-    TerminalKill = (Blocking, false, false, false),
+    TerminalKill = (Guaranteed, false, false, false),
 }
 
 impl JobKind {
+    /// What happens to jobs of this kind at quit. Every kind that is not
+    /// [cancelled with its subject](JobKind::cancelled_with_subject) is drained.
+    pub const fn at_quit(self) -> AtQuit {
+        match self {
+            JobKind::DocumentSave
+            | JobKind::GitWrite
+            | JobKind::Command
+            | JobKind::TerminalSessionsSave
+            | JobKind::TerminalKill => AtQuit::Drain,
+            JobKind::ForgeWrite | JobKind::NetworkCommand | JobKind::AgentControl => {
+                AtQuit::DrainBriefly
+            }
+            _ => AtQuit::Cancel,
+        }
+    }
+
     /// The kind's name for diagnostics (`DocumentParse` -> `"DocumentParse"`).
     pub fn name(self) -> String {
         format!("{self:?}")
@@ -231,8 +274,6 @@ impl JobKind {
 pub enum Subject {
     /// Process-wide work that belongs to nothing that closes.
     App,
-    /// A window.
-    Window(u64),
     /// A document of the document store (its id).
     Document(u64),
     /// A repository, by work directory.
@@ -311,6 +352,9 @@ mod tests {
             JobKind::GitWrite,
             JobKind::ForgeWrite,
             JobKind::AgentControl,
+            JobKind::Command,
+            JobKind::NetworkCommand,
+            JobKind::TerminalSessionsSave,
         ] {
             assert!(!kind.replaces(), "{kind:?}");
             assert!(!kind.cancelled_with_subject(), "{kind:?}");
@@ -324,12 +368,34 @@ mod tests {
             JobKind::LspLaunch,
             JobKind::ForgeRead,
             JobKind::UpdateCheck,
-            JobKind::AskpassPrompt,
-            JobKind::AgentTurn,
-            JobKind::AgentRequest,
+            JobKind::NetworkCommand,
             JobKind::ExternalProgram,
         ] {
             assert_eq!(kind.lane(), Lane::Blocking, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn what_others_wait_on_has_a_guaranteed_start() {
+        for kind in [
+            JobKind::AskpassPrompt,
+            JobKind::AgentRequest,
+            JobKind::AgentControl,
+            JobKind::AgentTurn,
+            JobKind::TerminalKill,
+        ] {
+            assert_eq!(kind.lane(), Lane::Guaranteed, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_kind_that_survives_its_subject_is_drained_at_quit() {
+        for &kind in JobKind::ALL {
+            assert_eq!(
+                kind.cancelled_with_subject(),
+                kind.at_quit() == AtQuit::Cancel,
+                "{kind:?}"
+            );
         }
     }
 }

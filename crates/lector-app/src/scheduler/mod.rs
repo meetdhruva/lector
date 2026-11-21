@@ -16,9 +16,15 @@
 //! * A job that panics is caught: the worker survives, the panic is logged (and written to the
 //!   crash log by the process's panic hook, see `health`) and the waiter gets
 //!   [`JobError::Panicked`].
-//! * A job that waits for another job ([`JobHandle::wait`]) on a scheduler thread runs that job
-//!   inline if it has not started, so waiting on the same pool cannot deadlock it.
-//! * [`Scheduler::shutdown`] cancels everything and waits a bounded time for the threads.
+//! * A job that waits for a compute job ([`JobHandle::wait`]) on a scheduler thread runs that job
+//!   inline if it has not started, so waiting on the compute pool cannot deadlock it; jobs of the
+//!   other lanes are waited for (never run inline on a compute worker).
+//! * **Guaranteed lane**: kinds that other jobs or a person wait on (credential prompts, agent
+//!   requests and turns, cancel/undo, terminal kill escalation) always start at once, so a
+//!   blocking lane full of waiters cannot keep them from starting.
+//! * Quitting: [`Scheduler::begin_quit`] cancels everything but writes, [`Scheduler::drain`]
+//!   lets writes finish within a bound, [`Scheduler::shutdown`] cancels the rest and waits a
+//!   bounded time for the threads (orchestrated by `lector_app::shutdown`).
 //! * [`Scheduler::debounce`] coalesces calls with the same key: only the last closure runs,
 //!   `delay` after the last call.
 //! * [`Scheduler::with_runner`] hands every job to a runner instead of threads (the GPUI
@@ -40,8 +46,8 @@ use std::time::Duration;
 use futures::channel::oneshot;
 use lector_base::CancelToken;
 
-pub use key::{JobKey, JobKind, Lane, Subject};
-pub use pool::{Body, Runner};
+pub use key::{AtQuit, JobKey, JobKind, Lane, Subject};
+pub use pool::{Body, DrainReport, Runner};
 
 use pool::{Inner, Job};
 
@@ -194,7 +200,7 @@ impl Scheduler {
         let body = guarded(key.kind, token.clone(), finished.clone(), f, tx);
         let id = self.inner().next_id();
         self.inner()
-            .submit(prio, token.clone(), Job { id, key, body });
+            .submit(prio, token.clone(), Job::new(id, key, body));
         JobHandle {
             id,
             token,
@@ -274,6 +280,23 @@ impl Scheduler {
     /// anyway).
     pub fn shutdown(&self, timeout: Duration) -> bool {
         self.inner().shutdown(timeout)
+    }
+
+    /// First step of quitting: every job whose kind is [`AtQuit::Cancel`] is cancelled (queued
+    /// ones dropped, debounces dropped) and later ones are refused; writes keep running, and a
+    /// dedicated drain worker runs queued writes even if every worker is held. Returns how many
+    /// jobs were cancelled.
+    pub fn begin_quit(&self) -> usize {
+        self.inner().begin_quit()
+    }
+
+    /// Waits for the writes queued or running at quit ([`Scheduler::begin_quit`] first): local
+    /// writes up to `bound`, network writes ([`AtQuit::DrainBriefly`]) up to `network_grace`,
+    /// after which they are cancelled. Reports the writes it gave up on.
+    pub fn drain(&self, bound: Duration, network_grace: Duration) -> DrainReport {
+        let now = std::time::Instant::now();
+        self.inner()
+            .drain(now + bound, now + network_grace.min(bound))
     }
 
     /// Whether [`Scheduler::shutdown`] was called.

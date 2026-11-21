@@ -1219,8 +1219,8 @@ As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered
   * Changes panel: `SyncPanelBar` at the top (state text, Fetch / Pull / Push icon buttons with tooltips and key
     bindings; disabled with "A push is running" while busy; progress bar + Cancel while running).
   * Running: `run_action(SyncAction)` → `sync_model::plan` → `Plan::{Run, Confirm, Blocked}`; `execute(OpKind, steps,
-    label, quiet)` runs the registry commands in order through the background bridge (`JobKind::Command`, blocking
-    lane, `Visible`, journaled,
+    label, quiet)` runs the registry commands in order through the background bridge (`JobKind::NetworkCommand`,
+    blocking lane, `Visible`, drained 2 s at quit, journaled,
     `Source::Ui`), then `notify_repo_changed` (status, history, branches, diff tabs reload) and a status refresh. One
     operation per repository: this window's running op or a `SyncHost::running()` entry for the repo blocks new ones
     (toast). Progress comes from `SyncHost::subscribe` (filtered by repo, coalesced to the newest event). Cancel =
@@ -1692,30 +1692,54 @@ else starts a thread (`arch-check threads`), and UI code reaches the scheduler o
   `an_interactive_job_runs_while_every_general_worker_is_busy_with_background_work`). Only the kinds that
   `may_be_interactive()` (DocumentParse, PickerRank, FindInFile: short, keystroke-driven) get `Interactive`; any other
   kind asking for it runs at `Visible` (`Priority::for_kind`), so the reserved worker cannot be occupied by long work.
-* **Blocking lane.** Kinds whose duration depends on somebody else — the network (forge, update check, git sync
-  commands), a language server (hover, definitions, references, launch), an agent (start, turns, its requests, undo),
-  the user (askpass prompts, agent permission requests), an external program (reveal in file manager, OS preference
-  probes) — run on their own threads, started on demand up to `BLOCKING_MAX` (16) and stopped after 30 s idle; more
-  jobs queue by priority. They never occupy a compute worker (test `blocking_jobs_never_occupy_the_compute_workers`).
-  Local `git`, file reads and parsing are bounded by input size and stay on the compute lane.
+* **Blocking lane.** "Leaf" waits whose duration depends on somebody else — the network (forge, update check, git
+  sync commands), a language server (hover, definitions, references, launch), starting an agent, an external program
+  (reveal in file manager, OS preference probes) — run on their own threads, started on demand up to `BLOCKING_MAX`
+  (16) and stopped after 30 s idle; more jobs queue by priority, and a job that waits more than 3 s for a slot is
+  logged once. They never occupy a compute worker (test `blocking_jobs_never_occupy_the_compute_workers`). Local
+  `git`, file reads and parsing are bounded by input size and stay on the compute lane.
+* **Guaranteed lane.** **Rule: a kind that other jobs or a person wait on never queues behind the lane bound.**
+  AskpassPrompt (a git command waits for it), AgentRequest (the agent waits; permission prompts), AgentControl
+  (cancel / undo a turn), TerminalKill and AgentTurn run on threads started on demand with no bound, so a blocking
+  lane full of waiters can never keep the job they wait for from starting (tests
+  `a_full_blocking_lane_never_delays_what_others_wait_on`,
+  `a_command_waiting_for_a_prompt_completes_while_the_lane_is_otherwise_full`). Their number is bounded by their
+  owners: 8 askpass prompt slots (+16 handshakes), the requests in flight per agent connection, one turn per session
+  (a busy session refuses a second prompt), user clicks; more than 64 threads at once is logged. **AgentTurn** is a
+  turn of a session, not the session: it starts with a prompt and ends with the turn, so it is a job, not an owner
+  thread; it is here rather than on the blocking lane so that N parallel agents use N threads and never take the
+  leaf bound.
 * **Keys.** Every job has a `JobKey { kind: JobKind, subject: Subject }`; `JobKind` is a closed enum in
   `scheduler/key.rs`, one line per kind with its lane and policies. A kind that `replaces()` cancels older jobs with
   the same key ("latest wins"; a replaced job that has not started never runs). `cancel_subject(&Subject)` cancels
   every queued, running and debounced job of a document (`DocShared` drop), a repository (`RepoState` drop), a view
   (the bridge) or any subject, except kinds not `cancelled_with_subject()`: writes the user asked for (DocumentSave,
-  GitWrite, Command, ForgeWrite, AgentControl, TerminalKill) are never replaced and survive their window closing.
+  GitWrite, Command, NetworkCommand, ForgeWrite, AgentControl, TerminalSessionsSave, TerminalKill) are never replaced
+  and survive their window closing.
 * **Results.** A running job sees its `CancelToken`; once cancelled, its result is never delivered (`JobError::Cancelled`).
   A panicking job is caught: the worker survives, `tracing::error!` logs it, the process's panic hook writes it to the
   crash log (`lector health`), and the waiter gets `JobError::Panicked(message)`.
 * **No deadlock.** The scheduler's lock is never held while a job runs, a thread starts or a runner is called; jobs
-  never run inline on `spawn` (only the cancelled no-op body after shutdown). A job that waits for another job
-  (`JobHandle::wait`) on a scheduler thread runs that job inline when it has not started yet (test
-  `a_job_waiting_for_another_job_on_a_one_worker_pool_does_not_deadlock`).
-* **Shutdown.** `lector_app::shutdown::shutdown(process_grace, scheduler_timeout)` (the GUI's last quit hook: 1.5 s,
-  0.5 s) stops every supervised child process tree first — which ends the jobs and owner threads waiting on a child —
-  then `Scheduler::shutdown`: queued jobs dropped (waiters get `Cancelled`), running jobs cancelled, debounces
-  dropped, a bounded wait for the scheduler threads, later jobs cancelled at once. Owner threads end with their
-  resource; those still alive are reported (`ShutdownReport::owner_threads_alive`).
+  never run inline on `spawn` (only the cancelled no-op body after shutdown). A job that waits for a compute job
+  (`JobHandle::wait`) on a scheduler thread runs it inline when it has not started yet (test
+  `a_job_waiting_for_another_job_on_a_one_worker_pool_does_not_deadlock`); a job of the other lanes is waited for,
+  never run inline on a compute worker (test `a_compute_job_waits_for_a_blocking_job_instead_of_running_it_inline`):
+  the guaranteed lane always starts, the blocking lane only holds leaf waits.
+* **Quit: writes are drained, not cancelled.** `lector_app::shutdown::shutdown(QuitBounds::default())` (the GUI's
+  last quit hook): (1) `begin_quit` cancels every `AtQuit::Cancel` job (reads, computations, debounces) and refuses
+  new ones, and starts a drain worker that runs only writes; (2) `drain` waits for writes — `AtQuit::Drain`
+  (DocumentSave, GitWrite, Command = writing registry commands incl. their journal entries, TerminalSessionsSave,
+  TerminalKill): queued ones run, running ones finish, up to 10 s; `AtQuit::DrainBriefly` (NetworkCommand = push /
+  pull / fetch flows, ForgeWrite, AgentControl) only 2 s, then cancelled — while every child process is still
+  alive, so a `git commit` is never killed halfway; (3) every supervised child process tree is stopped (TERM, KILL
+  after 1.5 s); (4) `Scheduler::shutdown` cancels the rest, 0.5 s bounded wait. Worst case ≈ 12 s. Writes given up
+  on are logged and written to the crash log (`ShutdownReport::abandoned`). Tests:
+  `quit_completes_a_queued_save_and_a_running_git_write`,
+  `quit_gives_up_on_a_hung_network_write_within_its_grace_and_reports_it`,
+  `reads_are_cancelled_at_once_while_writes_drain`, `quits_promptly_with_reads_queued_and_running`. Every kind not
+  cancelled with its subject is drained (a unit test keeps the two lists equal). ReplaceInFile only computes the
+  replacements (the edit is applied to the buffer on the main thread), so it is not a write. Owner threads end with
+  their resource; those still alive are reported (`ShutdownReport::owner_threads_alive`).
 * **Crates below `lector-app` do not schedule.** They expose blocking, cancellable functions; an owner thread with
   short work to hand off calls a `lector_base::thread::TaskRunner` its caller supplies: askpass connections
   (`AskpassServer::start(dir, runner, handler)`, app: `AskpassPrompt`), language-server launches and restarts
@@ -1749,15 +1773,17 @@ jobs and debounces deterministically; the document store uses the same scheduler
 (`background_executor().timer(..)`) and pure UI animation stay on GPUI. `ListRanker` calls `Scheduler::global()`
 directly (it does not touch GPUI).
 
-**Priorities by job kind** (call sites choose the priority; "C" compute lane, "B" blocking lane):
+**Priorities by job kind** (call sites choose the priority; "C" compute lane, "B" blocking lane, "G" guaranteed lane):
 
 | Priority | Kinds | Why |
 |---|---|---|
 | Interactive (C, reserved worker) | DocumentParse (reparse after an edit), PickerRank (ranking for the typed query), FindInFile (find as you type) | answer a keystroke; short; newest wins |
 | Visible (C) | DocumentHighlight, DocumentStructure, DocumentOpen, DocumentReload, DocumentSave, FileRead, ImageDecode, MarkdownRender, ReplaceInFile, ProjectSearch, ProjectSymbols, PickerFeed, GitChangeset, GitFileSummary, GitBlame, GitLog, GitRefs, GitIdentity, GitCommitMessage, GitLookup, GitConfigRead, ConflictParse, GitWrite, JournalList, JournalPreview, ProvenanceExplain, ReviewAnalysis (review queue), AgentContext (attach diff), TerminalSpawn, TerminalLink, TerminalSessions (restore) | what is on screen, or what the user just asked for and waits to see |
-| Visible (B) | LspHover, LspDefinitions, LspReferences, ForgeRead, ForgeWrite, AskpassPrompt, AgentStart, AgentTurn, AgentRequest, AgentControl, Command (sync operations, `invoke_async`), StartupLoad, ExternalProgram (reveal) | the user waits, but the duration is somebody else's |
-| Background (C) | DocumentGutter, DocumentBlame, DocumentLsp, GitRefresh, GitSyncStatus, WatchRegister, FileRescan, Reindex, ReviewFingerprint, ReviewAnalysis (working-tree hint), AgentContext (turn summaries), TerminalSessions (save) | needed soon, not on the critical path |
-| Background (B) | LspSync, LspLaunch, UpdateCheck, TerminalKill | waits on a server, the network or a dying process; nobody waits for it |
+| Visible (B) | LspHover, LspDefinitions, LspReferences, ForgeRead, ForgeWrite, AgentStart, NetworkCommand (sync operations), Command / CommandRead (`invoke_async`), StartupLoad, ExternalProgram (reveal) | the user waits, but the duration is somebody else's |
+| Visible (G) | AskpassPrompt, AgentRequest, AgentControl, AgentTurn | other jobs or the user wait on them: guaranteed start |
+| Background (C) | DocumentGutter, DocumentBlame, DocumentLsp, GitRefresh, GitSyncStatus, WatchRegister, FileRescan, Reindex, ReviewFingerprint, ReviewAnalysis (working-tree hint), AgentContext (turn summaries), TerminalSessionsSave, GitLookup (the changes panel's default base) | needed soon, not on the critical path |
+| Background (B) | LspSync, LspLaunch, UpdateCheck | waits on a server or the network; nobody waits for it |
+| Background (G) | TerminalKill | a dying process tree; must run even when the lane is full |
 | Idle | SymbolIndex (C), ExternalProgram (B; OS reduce-motion probe) | indexing and probes that can wait |
 
 ### lector-app `os` (ADR 0002)
@@ -1772,8 +1798,9 @@ Processes the UI needs that are not writes, so plain functions rather than regis
 // scheduler/ (ADR 0003; see "Background work (ADR 0003)")
 pub enum Priority { Interactive, Visible, Background, Idle }   // Interactive only for kinds that may_be_interactive(), else Visible
 pub enum JobKind { DocumentParse, PickerRank, FindInFile, GitChangeset, LspHover, ForgeRead, AgentTurn, /* ... closed, scheduler/key.rs */ }
-    // lane() -> Lane::{Compute, Blocking}; replaces(); cancelled_with_subject(); may_be_interactive(); ALL
-pub enum Subject { App, Window(u64), Document(u64), Repo(Arc<Path>), Path(Arc<Path>), View(u64), Session(u64), Local(u64) }
+    // lane() -> Lane::{Compute, Blocking, Guaranteed}; replaces(); cancelled_with_subject(); may_be_interactive();
+    // at_quit() -> AtQuit::{Cancel, Drain, DrainBriefly}; ALL
+pub enum Subject { App, Document(u64), Repo(Arc<Path>), Path(Arc<Path>), View(u64), Session(u64), Local(u64) }
     // Subject::repo(p), path(p), unique()
 pub struct JobKey { pub kind: JobKind, pub subject: Subject }  // JobKey::new(kind, subject)
 pub enum JobError { Cancelled, Panicked(String) }
@@ -1785,13 +1812,16 @@ impl Scheduler {
     pub fn debounce(&self, key: JobKey, delay: Duration, prio: Priority, f: impl FnOnce(&CancelToken) + Send + 'static);
     pub fn task_runner(&self, key: JobKey, prio: Priority) -> lector_base::thread::TaskRunner;
     pub fn cancel_key(&self, key: &JobKey); pub fn cancel_subject(&self, s: &Subject) -> usize;
+    pub fn begin_quit(&self) -> usize;                    // cancel every AtQuit::Cancel job, refuse new ones, start the drain worker
+    pub fn drain(&self, bound: Duration, network_grace: Duration) -> DrainReport { abandoned: Vec<JobKind> };
     pub fn shutdown(&self, timeout: Duration) -> bool;   // cancel everything, bounded wait for the threads; later jobs cancelled at once
     // workers(), blocking_max(), pending(), live_jobs(), wait_idle(timeout), is_shut_down()
 }
 pub struct JobHandle<T>;   // cancel(), token(), is_finished(), try_take(), outcome() -> Future<Result<T, JobError>>,
-                           // into_future() -> Future<Option<T>>, wait_outcome() / wait() (block; on a scheduler thread a job that
-                           // has not started runs inline). Dropping it does not cancel.
-// shutdown.rs: shutdown(process_grace, scheduler_timeout) -> ShutdownReport { scheduler_stopped, owner_threads_alive }
+                           // into_future() -> Future<Option<T>>, wait_outcome() / wait() (block; on a scheduler thread a compute
+                           // job that has not started runs inline; other lanes are waited for). Dropping it does not cancel.
+// shutdown.rs: shutdown(QuitBounds { drain: 10 s, network_grace: 2 s, process_grace: 1.5 s, scheduler: 0.5 s })
+//   -> ShutdownReport { cancelled, abandoned: Vec<JobKind>, scheduler_stopped, owner_threads_alive }
 
 // commands/ (Agent APP)
 pub struct CommandSpec { pub id: &'static str /* "git.stage" */, pub title: &'static str, pub category: &'static str,
@@ -3602,7 +3632,8 @@ without a network and send nothing anywhere.
   crash_dir }`. The GUI installs the hook first thing in `main` and begins the session after the start request is built;
   `end_clean` runs from `App::on_app_quit` (macOS exits inside `[NSApp terminate:]`) and again after `Application::run`. **Quit
   order (0.8):** save sessions → kill terminals → remove the askpass server → `lector_app::shutdown::shutdown`
-  (`Supervisor::shutdown`, then `Scheduler::shutdown`) → `end_clean`, the last two through `lector_ui::startup::on_quit_last(cx, work)`: GPUI runs every quit hook's synchronous part in registration
+  (reads cancelled, writes drained ≤ 10 s / network writes ≤ 2 s, then `Supervisor::shutdown`, then
+  `Scheduler::shutdown`) → `end_clean`, the last two through `lector_ui::startup::on_quit_last(cx, work)`: GPUI runs every quit hook's synchronous part in registration
   order and awaits the returned futures afterwards, so `work` (run inside such a future) starts after every other hook
   finished, whenever the hook was registered (windows register theirs later than `main`);
   `lector_cli::run_args` installs the hook for the CLI and `lector mcp`, which never count as sessions. Killing the app

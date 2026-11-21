@@ -1,48 +1,92 @@
 //! Orderly stop of background work when the process quits (ADR 0003).
 //!
-//! Order: every supervised child process tree is stopped first (`TERM`, `KILL` after the
-//! grace period), which also ends the jobs and owner threads that wait on a child (git, agents,
-//! language servers, their pipe readers); then the [`Scheduler`] cancels what is queued and
-//! running and waits a bounded time for its threads. Owner threads made with
-//! `lector_base::thread::spawn_named` end with the resource they own (a dropped watcher, a
-//! killed process, a closed terminal); the ones still alive are reported.
+//! Order:
+//! 1. [`Scheduler::begin_quit`]: everything that is not a write is cancelled at once (reads,
+//!    computations, debounces), so the writes get the workers.
+//! 2. [`Scheduler::drain`]: writes ([`AtQuit::Drain`]: saves, git writes, writing commands,
+//!    session saves, terminal kill escalation) finish, queued ones run, up to
+//!    [`QuitBounds::drain`]; network writes ([`AtQuit::DrainBriefly`]: push and other sync
+//!    commands, forge comments, agent cancel/undo) only up to [`QuitBounds::network_grace`],
+//!    since they can hang. Child processes are still alive here, so a `git commit` is not
+//!    killed halfway.
+//! 3. Every supervised child process tree is stopped (`TERM`, `KILL` after
+//!    [`QuitBounds::process_grace`]).
+//! 4. [`Scheduler::shutdown`] cancels what is left and waits [`QuitBounds::scheduler`] for its
+//!    threads.
+//!
+//! Writes given up on are logged and written to the crash log (`lector health`). Owner threads
+//! made with `lector_base::thread::spawn_named` end with the resource they own; the ones still
+//! alive are reported.
 
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lector_base::thread::{threads, ThreadInfo};
 
-use crate::scheduler::Scheduler;
+use crate::scheduler::{AtQuit, JobKind, Scheduler};
 
-/// What [`shutdown`] left behind.
+/// How long each step of [`shutdown`] may take. The worst case is the sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuitBounds {
+    /// Local writes still running or queued at quit (10 s).
+    pub drain: Duration,
+    /// Network writes (2 s, within `drain`).
+    pub network_grace: Duration,
+    /// Child process trees: `TERM`, then `KILL` after this (1.5 s).
+    pub process_grace: Duration,
+    /// The scheduler's threads after the final cancellation (0.5 s).
+    pub scheduler: Duration,
+}
+
+impl Default for QuitBounds {
+    fn default() -> Self {
+        QuitBounds {
+            drain: Duration::from_secs(10),
+            network_grace: Duration::from_secs(2),
+            process_grace: Duration::from_millis(1500),
+            scheduler: Duration::from_millis(500),
+        }
+    }
+}
+
+/// What [`shutdown`] did and left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShutdownReport {
-    /// Whether every scheduler thread exited within the timeout.
+    /// Jobs cancelled at once (not writes).
+    pub cancelled: usize,
+    /// Writes given up on (one entry per job): still running or queued at the drain bound, or
+    /// network writes past their grace.
+    pub abandoned: Vec<JobKind>,
+    /// Whether every scheduler thread exited within [`QuitBounds::scheduler`].
     pub scheduler_stopped: bool,
     /// Owner threads still alive afterwards (diagnostics; the process exits anyway).
     pub owner_threads_alive: Vec<ThreadInfo>,
 }
 
-/// Stops child processes (waiting up to `process_grace` before killing them), then the
-/// process-wide scheduler (waiting up to `scheduler_timeout` for its threads). Blocking; call
-/// it once when the app quits. Later jobs are cancelled at once.
-pub fn shutdown(process_grace: Duration, scheduler_timeout: Duration) -> ShutdownReport {
+/// Quits the process-wide supervisor and scheduler (see the module docs). Blocking; call it
+/// once when the app quits. Abandoned writes go to the user's crash log.
+pub fn shutdown(bounds: QuitBounds) -> ShutdownReport {
+    let crashes = crate::health::HealthPaths::default().crashes;
     shutdown_with(
         lector_process::Supervisor::global(),
         &Scheduler::global(),
-        process_grace,
-        scheduler_timeout,
+        bounds,
+        Some(&crashes),
     )
 }
 
-/// [`shutdown`] for an explicit supervisor and scheduler (tests).
+/// [`shutdown`] for an explicit supervisor and scheduler; abandoned writes are written to
+/// `crash_dir` when given.
 pub fn shutdown_with(
     supervisor: &lector_process::Supervisor,
     scheduler: &Scheduler,
-    process_grace: Duration,
-    scheduler_timeout: Duration,
+    bounds: QuitBounds,
+    crash_dir: Option<&Path>,
 ) -> ShutdownReport {
-    supervisor.shutdown(process_grace);
-    let scheduler_stopped = scheduler.shutdown(scheduler_timeout);
+    let cancelled = scheduler.begin_quit();
+    let drained = scheduler.drain(bounds.drain, bounds.network_grace);
+    supervisor.shutdown(bounds.process_grace);
+    let scheduler_stopped = scheduler.shutdown(bounds.scheduler);
     let owner_threads_alive: Vec<ThreadInfo> = threads().into_iter().filter(|t| t.alive).collect();
     for t in &owner_threads_alive {
         tracing::debug!(
@@ -51,58 +95,57 @@ pub fn shutdown_with(
             t.name
         );
     }
+    if !drained.abandoned.is_empty() {
+        report_abandoned(&drained.abandoned, crash_dir);
+    }
     ShutdownReport {
+        cancelled,
+        abandoned: drained.abandoned,
         scheduler_stopped,
         owner_threads_alive,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::scheduler::{JobKey, JobKind, Priority, Subject};
-    use std::time::Instant;
-
-    #[test]
-    fn quits_promptly_with_jobs_queued_and_running() {
-        let supervisor = lector_process::Supervisor::new();
-        let scheduler = Scheduler::with_limits(1, 2);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let running = scheduler.spawn(
-            JobKey::new(JobKind::GitLog, Subject::App),
-            Priority::Background,
-            move |cancel| {
-                tx.send(()).ok();
-                while !cancel.is_cancelled() {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            },
-        );
-        rx.recv_timeout(Duration::from_secs(5)).ok();
-        let queued: Vec<_> = (0..50)
-            .map(|i| {
-                scheduler.spawn(
-                    JobKey::new(JobKind::DocumentHighlight, Subject::Document(i)),
-                    Priority::Idle,
-                    |_| (),
-                )
-            })
-            .collect();
-        let started = Instant::now();
-        let report = shutdown_with(
-            &supervisor,
-            &scheduler,
-            Duration::from_millis(100),
-            Duration::from_secs(5),
-        );
-        assert!(report.scheduler_stopped);
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(running.wait().is_none());
-        assert!(queued.into_iter().all(|h| h.wait().is_none()));
-        assert!(supervisor.is_shutting_down());
+/// Logs the writes given up on at quit and records them in the crash log.
+fn report_abandoned(kinds: &[JobKind], crash_dir: Option<&Path>) {
+    let list = kinds
+        .iter()
+        .map(|k| {
+            let how = if k.at_quit() == AtQuit::DrainBriefly {
+                "network grace"
+            } else {
+                "drain bound"
+            };
+            format!("{k:?} ({how})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = format!("quit gave up on {} write(s): {list}", kinds.len());
+    tracing::error!("{message}");
+    let Some(dir) = crash_dir else {
+        return;
+    };
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let details = crate::health::PanicDetails {
+        message,
+        location: None,
+        thread: Some("quit".into()),
+        backtrace: String::new(),
+    };
+    let cx = crate::health::ReportContext {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        time,
+        session: crate::health::current_session_id(),
+        home: None,
+    };
+    let text = crate::health::render_report(&details, &cx);
+    if let Err(err) = crate::health::write_report(dir, time, &text, crate::health::MAX_REPORTS) {
+        tracing::warn!("cannot record the abandoned writes in the crash log: {err}");
     }
 }
+
+#[cfg(test)]
+mod tests;
