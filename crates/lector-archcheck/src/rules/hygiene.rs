@@ -2,9 +2,10 @@
 //!
 //! * Every library and binary target root (from `cargo metadata`) must contain
 //!   `#![forbid(unsafe_code)]`, except crates listed as `crate:<name>` in `arch/unsafe.allow`
-//!   (today `lector-text`, for the memory map). In an allowed crate every `unsafe { ... }`
-//!   block and `unsafe impl` needs a `// SAFETY:` comment on the same line or in the comment
-//!   lines directly above it.
+//!   (today `lector-text`, for the memory map). The attribute must be at the file's root scope.
+//!   In an allowed crate every `unsafe { ... }` block and `unsafe impl` needs a `// SAFETY:`
+//!   comment on the same line or in the comment lines directly above it. In any other crate an
+//!   `unsafe` block, fn, impl or trait in non-test code is itself a violation.
 //! * `.unwrap()` and `.expect(` calls in non-test code are counted per file and ratcheted by
 //!   the baseline (CLAUDE.md: no `unwrap`/`expect` on user data or I/O).
 //!
@@ -68,6 +69,8 @@ pub fn check(ws: &Workspace, files: &[SourceFile], cfg: &Config) -> RuleOutput {
         {
             if unsafe_ok {
                 found.extend(missing_safety_comments(f));
+            } else {
+                found.extend(unsafe_outside_allowlist(f));
             }
             found.extend(unwrap_findings(f));
         }
@@ -75,14 +78,48 @@ pub fn check(ws: &Workspace, files: &[SourceFile], cfg: &Config) -> RuleOutput {
     RuleOutput::new(RULE, found, Unit::Count)
 }
 
-/// True when the file contains `#![forbid(unsafe_code)]` (alone or in a list).
+/// True when the file has `#![forbid(unsafe_code)]` (alone or in a list) at its root scope.
+/// An inner attribute inside `mod x { ... }` or any other block only covers that block.
 pub fn has_forbid_unsafe(f: &SourceFile) -> bool {
-    (0..f.tokens().len()).any(|i| {
-        f.seq(i, &["#", "!", "[", "forbid", "("]) && {
-            let close = f.close_of(i + 4);
-            (i + 5..close).any(|k| f.tok(k) == "unsafe_code")
+    let mut depth = 0usize;
+    for i in 0..f.tokens().len() {
+        match f.tok(i) {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            "#" if depth == 0 && f.seq(i, &["#", "!", "[", "forbid", "("]) => {
+                let close = f.close_of(i + 4);
+                if (i + 5..close).any(|k| f.tok(k) == "unsafe_code") {
+                    return true;
+                }
+            }
+            _ => {}
         }
-    })
+    }
+    false
+}
+
+/// Any `unsafe` block, fn, impl or trait in non-test code. Used for crates that are not on the
+/// allowlist, where `forbid(unsafe_code)` should make this impossible: it is a second line of
+/// defence in case the forbid check is ever fooled.
+pub fn unsafe_outside_allowlist(f: &SourceFile) -> Vec<Violation> {
+    let mut out = Vec::new();
+    for i in 0..f.tokens().len() {
+        if f.tok(i) == "unsafe"
+            && !f.is_test(i)
+            && matches!(f.tok(i + 1), "{" | "fn" | "impl" | "trait" | "extern")
+        {
+            out.push(
+                Violation::new(
+                    RULE,
+                    &f.path,
+                    f.line(i),
+                    "`unsafe` in a crate that is not on arch/unsafe.allow",
+                )
+                .keyed(format!("{} [unsafe_outside_allowlist]", f.path)),
+            );
+        }
+    }
+    out
 }
 
 /// `unsafe` blocks and impls without a nearby `// SAFETY:` comment.
@@ -200,6 +237,38 @@ mod tests {
             "a.rs",
             "const S: &str = \"#![forbid(unsafe_code)]\";"
         )));
+    }
+
+    #[test]
+    fn forbid_inside_a_module_does_not_count() {
+        assert!(!has_forbid_unsafe(&file(
+            "a.rs",
+            "mod safe { #![forbid(unsafe_code)] }\nunsafe fn outside() {}"
+        )));
+        assert!(has_forbid_unsafe(&file(
+            "a.rs",
+            "#![forbid(unsafe_code)]\nmod m { fn f() {} }"
+        )));
+    }
+
+    #[test]
+    fn unsafe_in_a_non_allowlisted_crate_is_a_violation() {
+        let src = "mod safe { #![forbid(unsafe_code)] }\nunsafe fn outside() {}\nfn f() { unsafe { g() } }\nunsafe impl Send for X {}\n#[cfg(test)]\nmod t { fn h() { unsafe { g() } } }\nconst S: &str = \"unsafe { }\";";
+        let files = [file("crates/a/src/lib.rs", src)];
+        let out = check(&ws("a", "crates/a/src/lib.rs"), &files, &Config::default());
+        let lines: Vec<u32> = out.violations.iter().map(|v| v.line).collect();
+        // Line 1: forbid only inside a module; lines 2-4: the unsafe items.
+        assert_eq!(lines, [1, 2, 3, 4], "{:?}", out.violations);
+        let mut cfg = Config::default();
+        cfg.set_allow(
+            "unsafe",
+            crate::config::AllowList::from_entries(["crate:a"]),
+        );
+        let out = check(&ws("a", "crates/a/src/lib.rs"), &files, &cfg);
+        assert!(out
+            .violations
+            .iter()
+            .all(|v| v.key.ends_with("[safety_comment]")));
     }
 
     #[test]

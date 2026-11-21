@@ -75,34 +75,56 @@ pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
     }
     let exempt: Vec<&str> = allow.tagged("literal");
     let mut out = Vec::new();
-    // Variables bound from a data/config/state dir expression: (name, brace depth at binding).
-    let mut tainted: Vec<(String, usize)> = Vec::new();
-    let mut depth = 0usize;
-    let mut depth_at = vec![0usize; f.tokens().len() + 1];
-    for (i, slot) in depth_at.iter_mut().enumerate().take(f.tokens().len()) {
+    // Block structure: every `{` opens a block with a parent; `block_at[i]` is the innermost
+    // block containing token `i`. A binding is visible only inside the block that declared it.
+    let mut parent: Vec<usize> = vec![0];
+    let mut stack: Vec<usize> = vec![0];
+    let mut block_at = vec![0usize; f.tokens().len() + 1];
+    for (i, slot) in block_at.iter_mut().enumerate().take(f.tokens().len()) {
         match f.tok(i) {
-            "{" => depth += 1,
-            "}" => depth = depth.saturating_sub(1),
+            "{" => {
+                parent.push(stack.last().copied().unwrap_or(0));
+                stack.push(parent.len() - 1);
+            }
+            "}" if stack.len() > 1 => {
+                stack.pop();
+            }
             _ => {}
         }
-        *slot = depth;
+        *slot = stack.last().copied().unwrap_or(0);
     }
-    let mut last_depth = 0usize;
-    for c in chunks(f) {
-        let d = depth_at[c.start];
-        if d < last_depth {
-            tainted.retain(|(_, bound_at)| *bound_at <= d);
+    let visible = |declared: usize, here: usize| {
+        let mut b = here;
+        loop {
+            if b == declared {
+                return true;
+            }
+            if b == 0 {
+                return false;
+            }
+            b = parent[b];
         }
-        last_depth = d;
+    };
+    // `let` bindings seen so far: (name, declaring block, holds a dir). The latest visible one
+    // wins, so `let dir = <untainted>` shadows an earlier tainted `dir`.
+    let mut bindings: Vec<(String, usize, bool)> = Vec::new();
+    for c in chunks(f) {
+        let here = block_at[c.start];
         if (c.start..c.end).all(|i| f.is_test(i)) {
             continue;
         }
-        let has_source = (c.start..c.end).any(|i| {
-            let t = f.tok(i);
-            DIR_NAMES.contains(&t) || tainted.iter().any(|(n, _)| n == t)
-        });
-        // `let name = <expr mentioning a source>` taints `name`.
-        if f.tok(c.start) == "let" && has_source {
+        let is_dir = |t: &str, bindings: &[(String, usize, bool)]| {
+            DIR_NAMES.contains(&t)
+                || bindings
+                    .iter()
+                    .rev()
+                    .find(|(n, blk, _)| n == t && visible(*blk, here))
+                    .is_some_and(|(_, _, held)| *held)
+        };
+        // For `let name = <expr>` only the expression counts; the new name is bound afterwards.
+        let mut scan_from = c.start;
+        let mut binding: Option<String> = None;
+        if f.tok(c.start) == "let" {
             let mut k = c.start + 1;
             if f.tok(k) == "mut" {
                 k += 1;
@@ -112,14 +134,13 @@ pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
                 eq,
                 f.tokens().get(k).is_some_and(|t| t.kind == TokKind::Ident),
             ) {
-                let rhs_has_source = (eq + 1..c.end).any(|i| {
-                    let t = f.tok(i);
-                    DIR_NAMES.contains(&t) || tainted.iter().any(|(n, _)| n == t)
-                });
-                if rhs_has_source {
-                    tainted.push((f.tok(k).to_string(), d));
-                }
+                scan_from = eq + 1;
+                binding = Some(f.tok(k).to_string());
             }
+        }
+        let has_source = (scan_from..c.end).any(|i| is_dir(f.tok(i), &bindings));
+        if let Some(name) = binding {
+            bindings.push((name, here, has_source));
         }
         let mut found_join = false;
         for i in c.start..c.end {
@@ -214,6 +235,21 @@ mod tests {
         let src = "fn a() {\n    let dir = data_dir();\n    let p = dir.join(\"recent.json\");\n    let q = p.join(\"x\");\n}\nfn b(dir: &Path) {\n    let r = dir.join(\"recent.json\");\n}";
         let v = run("crates/lector-config/src/recent.rs", src);
         assert_eq!(v.iter().map(|v| v.line).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn taint_does_not_leak_into_sibling_blocks() {
+        let src = "fn paths(project: &Path) {\n    { let dir = data_dir(); }\n    { let dir = project; let path = dir.join(\"manifest.toml\"); }\n}";
+        assert!(run("crates/x/src/a.rs", src).is_empty());
+        let same = "fn p() {\n    { let dir = data_dir(); let a = dir.join(\"a.json\"); }\n}";
+        assert_eq!(run("crates/x/src/a.rs", same).len(), 1);
+    }
+
+    #[test]
+    fn shadowing_clears_taint_for_its_scope_only() {
+        let src = "fn p(project: &Path) {\n    let dir = data_dir();\n    {\n        let dir = project;\n        dir.join(\"a.json\");\n    }\n    dir.join(\"b.json\");\n    let dir = project;\n    dir.join(\"c.json\");\n}";
+        let v = run("crates/x/src/a.rs", src);
+        assert_eq!(v.iter().map(|v| v.line).collect::<Vec<_>>(), [7]);
     }
 
     #[test]

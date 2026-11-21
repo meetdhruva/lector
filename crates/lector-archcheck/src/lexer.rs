@@ -7,7 +7,8 @@
 //!
 //! * an item following `#[cfg(test)]` (also `cfg(all(test, ...))`), by brace matching,
 //! * a function carrying `#[test]`, `#[gpui::test]`, `#[tokio::test]`, `#[bench]` and the like,
-//! * a whole file that starts with `#![cfg(test)]`,
+//! * a whole file that has `#![cfg(test)]` at its root; inside an inline module or block the
+//!   inner attribute marks only that module's braces,
 //! * `#[cfg(test)] mod name;` declarations, reported in [`Scanned::test_mod_decls`] so the
 //!   caller can mark the file they point at as test-only.
 //!
@@ -418,8 +419,18 @@ impl Classifier<'_> {
     fn run(&mut self) {
         let n = self.toks.len();
         let mut i = 0;
+        // Indices of the `{` tokens that are still open: an inner attribute applies to the
+        // innermost one (or to the whole file when there is none).
+        let mut open_braces: Vec<usize> = Vec::new();
         while i < n {
             if self.t(i) != "#" {
+                match self.t(i) {
+                    "{" => open_braces.push(i),
+                    "}" => {
+                        open_braces.pop();
+                    }
+                    _ => {}
+                }
                 i += 1;
                 continue;
             }
@@ -433,12 +444,21 @@ impl Classifier<'_> {
             let verdict = self.attr(open + 1, close);
             if verdict == Attr::Other || inner {
                 if inner && verdict == Attr::CfgTest {
-                    self.whole = true;
+                    match open_braces.last() {
+                        None => self.whole = true,
+                        Some(&open) => {
+                            let close = self.close_of(open);
+                            for flag in &mut self.in_test[open..=close.min(n - 1)] {
+                                *flag = true;
+                            }
+                        }
+                    }
                 }
                 i = close + 1;
                 continue;
             }
-            let end = self.item_end(close + 1, verdict == Attr::CfgTest);
+            let at_root = open_braces.is_empty();
+            let end = self.item_end(close + 1, verdict == Attr::CfgTest && at_root);
             for flag in &mut self.in_test[i..=end.min(n - 1)] {
                 *flag = true;
             }
@@ -510,7 +530,10 @@ impl Classifier<'_> {
     }
 
     /// Index of the last token of the item that starts at `start` (attributes may precede it).
-    fn item_end(&mut self, start: usize, cfg_test: bool) -> usize {
+    /// `record_mod` is true for a `#[cfg(test)]` item at file level, whose `mod x;` declaration
+    /// then names a test-only file (declarations inside inline modules resolve to other paths
+    /// and are not followed).
+    fn item_end(&mut self, start: usize, record_mod: bool) -> usize {
         let n = self.toks.len();
         let mut k = start;
         while self.t(k) == "#" {
@@ -542,7 +565,7 @@ impl Classifier<'_> {
         }
         let kw = self.t(m).to_string();
         if kw == "mod" && self.t(m + 2) == ";" {
-            if cfg_test {
+            if record_mod {
                 let name = self.t(m + 1).to_string();
                 self.test_mods.push(name);
             }
@@ -772,6 +795,27 @@ mod tests {
         assert_eq!(s.test_mod_decls, ["tests", "support"]);
         let idents = prod_idents("#[cfg(test)]\nmod tests;\nmod real;\n");
         assert_eq!(idents, ["mod", "real"]);
+    }
+
+    #[test]
+    fn nested_inner_cfg_test_marks_only_its_module() {
+        let src = "fn production() { std::thread::spawn(|| {}); }\nmod checks {\n    #![cfg(test)]\n    fn helper() {}\n}\nfn after() {}";
+        let s = scan(src);
+        assert!(!s.whole_file_test);
+        let idents = prod_idents(src);
+        assert!(idents.contains(&"production".to_string()));
+        assert!(idents.contains(&"spawn".to_string()));
+        assert!(idents.contains(&"after".to_string()));
+        assert!(!idents.contains(&"helper".to_string()));
+        // A file-level attribute after other inner attributes still marks the whole file.
+        assert!(scan("#![allow(dead_code)]\n#![cfg(test)]\nmod a { fn x() {} }").whole_file_test);
+    }
+
+    #[test]
+    fn test_mod_declarations_inside_inline_modules_are_not_resolved_at_file_level() {
+        let s =
+            scan("mod inner {\n    #[cfg(test)]\n    mod fixtures;\n}\n#[cfg(test)]\nmod tests;");
+        assert_eq!(s.test_mod_decls, ["tests"]);
     }
 
     #[test]
