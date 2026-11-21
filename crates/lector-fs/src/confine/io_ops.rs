@@ -218,7 +218,9 @@ mod imp {
         }
         let mut file = opts.open(&path).map_err(|e| c.io(e))?;
         let meta = file.metadata().map_err(|e| c.io(e))?;
-        if meta.file_type().is_symlink() || is_reparse(&meta) {
+        // The handle itself (Windows opens a reparse point instead of following it), and the
+        // path once more after the open (platforms without that flag).
+        if meta.file_type().is_symlink() || is_reparse(&meta) || is_link(&path) {
             return Err(c.changed());
         }
         if !meta.is_file() {
@@ -280,12 +282,20 @@ mod imp {
             file.write_all(bytes).map_err(|e| c.io(e))?;
             file.sync_all().map_err(|e| c.io(e))?;
             drop(file);
-            // Re-verify right before the rename: std has no `renameat`.
-            verify_parent(c, &parent)?;
-            if is_link(&target) {
-                return Err(ConfineError::FinalSymlink { path: c.path() });
-            }
-            fs::rename(&tmp, &target).map_err(|e| c.io(e))
+            // Re-verify right before every rename attempt (std has no `renameat`); the shared
+            // helper retries a transient `PermissionDenied` on Windows like `write_atomic`.
+            crate::write::replace_checked(
+                &tmp,
+                &target,
+                || {
+                    verify_parent(c, &parent)?;
+                    if is_link(&target) {
+                        return Err(ConfineError::FinalSymlink { path: c.path() });
+                    }
+                    Ok(())
+                },
+                |e| c.io(e),
+            )
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);

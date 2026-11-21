@@ -474,9 +474,14 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
 3. Agent-to-client requests run as `JobKind::AgentRequest` tasks
    (`lector_agent::rpc::Connection`). Both file requests go through the one confinement check,
    `lector_fs::confine` (configured by `lector_app::commands::confinement`): the path is resolved
-   with its symlinks and must stay inside the project, outside every git directory (any case,
-   Windows short names) and outside Lector's data and settings directories; a write never goes
-   through a final-component symlink. `fs/read_text_file` serves the open document (unsaved edits
+   with its symlinks and must stay inside the project, outside every git directory and outside
+   Lector's data and settings directories. A git directory is refused by name (`.git` in any case,
+   Windows short names) in the path as written and in the resolved path, and the project's actual
+   git and common directories are refused wherever they are (`.git` followed when it is a link or
+   read when it is a `gitdir:` file, `commondir`, `GIT_DIR`), so `.git -> metadata` protects
+   `metadata/` too. A write never goes through a final-component symlink; on Windows its rename
+   is retried like a save's while another program holds the file, with the confinement re-checked
+   before each attempt. `fs/read_text_file` serves the open document (unsaved edits
    included) or reads the file with `Confined::read`; `fs/write_text_file` goes through the open
    `DocHandle` (a confined save, `SaveRequest::confine`) or `Confined::write`. A write is refused
    unless it can be undone: the turn checkpoint covers the file, or the file is backed up into the

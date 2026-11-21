@@ -66,8 +66,10 @@ Security:
   `cfg`) were accepted, because only the spelled path was checked for `.git`. Every path an agent,
   an MCP client or a command argument names is now resolved with its links before it is checked,
   `.git` is recognised in every spelling (any case, trailing dots, Windows short names such as
-  `GIT~1`), Lector's own data and settings folders are off limits, and writes never go through a
-  symlink, even one swapped in while the write runs.
+  `GIT~1`) both as written and after resolving, the repository's real git directory is off limits
+  wherever it is (a `.git` that is a link, or a `gitdir:` file of a worktree or submodule, and its
+  shared directory), Lector's own data and settings folders are off limits, and writes never go
+  through a symlink, even one swapped in while the write runs.
 - **Your GitHub or GitLab token is no longer sent to look-alike hosts** (also in 0.7.1, fixed in
   0.7.2). A repository whose remote was on any host whose name starts with `github.` or `gitlab.`
   (for example `github.evil.example`) was treated as GitHub or GitLab, and the token from

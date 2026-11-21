@@ -14,10 +14,18 @@
 //!
 //! The resolved path is then checked:
 //! * it must lie inside the canonical root ([`ConfineError::Outside`]);
-//! * no component of the resolved path relative to the root may name a git directory: `.git`
+//! * no component may name a git directory, neither in the path **as written** (after lexical
+//!   normalisation of `.` and `..`) nor in the **resolved** path relative to the root: `.git`
 //!   compared case-insensitively, ignoring trailing dots and spaces, an NTFS stream suffix
 //!   (`.git::$INDEX_ALLOCATION`) and the code points HFS+ ignores, plus the Windows short names
-//!   `git~<n>` ([`ConfineError::GitDir`]);
+//!   `git~<n>` ([`ConfineError::GitDir`]). Checking both matters when `.git` is a link: with
+//!   `.git -> metadata`, `.git/hooks/pre-commit` resolves to `metadata/hooks/pre-commit`;
+//! * it must not lie inside the root's **actual git directories** ([`Confinement::git_dirs`]),
+//!   found once when the confinement is built: `<root>/.git` followed when it is a link, read
+//!   when it is a file (`gitdir: <path>`, as linked worktrees and submodules have), its
+//!   `commondir`, and `GIT_DIR` / `GIT_COMMON_DIR` from the environment. Those inside the root are
+//!   refused like `.git` itself ([`ConfineError::GitDir`]), so `metadata/hooks/pre-commit` is
+//!   refused too. Git directories of nested repositories are refused by the name rule;
 //! * it must not lie inside a directory the caller forbade, such as Lector's own data directory
 //!   when the root contains it ([`ConfineError::Forbidden`], [`Confinement::forbid`]).
 //!
@@ -48,9 +56,12 @@
 //! * **Windows and other platforms:** std has no `openat`. Directories are created one by one and
 //!   each is checked not to be a symlink or junction; the temporary file is created with
 //!   `create_new`; right before the rename the parent directory is canonicalized again and must
-//!   still be the resolved parent, and the target must still not be a link. Reads open the file
-//!   with `FILE_FLAG_OPEN_REPARSE_POINT` (Windows), refuse a reparse point, and re-verify the
-//!   resolved path after the open. A window between that re-verification and the rename (or the
+//!   still be the resolved parent, and the target must still not be a link; that check runs
+//!   before every attempt of the rename, which Windows retries on a transient
+//!   `PermissionDenied` (an indexer or antivirus holding the target) with the same helper as
+//!   [`crate::write_atomic`]. Reads open the file with `FILE_FLAG_OPEN_REPARSE_POINT` (Windows),
+//!   refuse a reparse point, and re-verify after the open that the path is not a link and its
+//!   parent is unchanged. A window between that re-verification and the rename (or the
 //!   open) remains on these platforms.
 //!
 //! Nothing here writes except [`Confined::write`], which callers reach only from an explicit
@@ -146,6 +157,10 @@ pub enum ConfineError {
 #[derive(Debug, Clone)]
 pub struct Confinement {
     root: PathBuf,
+    /// The root as given, lexically normalised (to strip it from absolute paths spelled
+    /// through it).
+    given_root: PathBuf,
+    git_dirs: Vec<PathBuf>,
     forbidden: Vec<PathBuf>,
 }
 
@@ -156,10 +171,22 @@ impl Confinement {
             root: root.to_path_buf(),
             source,
         })?;
+        let git_dirs = actual_git_dirs(&canonical);
         Ok(Confinement {
+            given_root: lexical(root),
             root: canonical,
+            git_dirs,
             forbidden: Vec::new(),
         })
+    }
+
+    /// The root's actual git directory and common directory (canonical), wherever they are:
+    /// `<root>/.git` (followed if it is a link, read if it is a `gitdir:` file), its
+    /// `commondir`, and `GIT_DIR` / `GIT_COMMON_DIR` when set; only those inside the root are
+    /// kept (ones outside it are refused as outside anyway). [`Confinement::check`] refuses
+    /// every path inside them.
+    pub fn git_dirs(&self) -> &[PathBuf] {
+        &self.git_dirs
     }
 
     /// Also refuses every path inside `dir` (resolved the same way). Callers pass Lector's data
@@ -191,6 +218,21 @@ impl Confinement {
         } else {
             self.root.join(given)
         };
+        // The path as written: a git directory name anywhere after the root is refused even
+        // when it resolves elsewhere (`.git -> metadata`).
+        let written = lexical(&joined);
+        let written_rel = written
+            .strip_prefix(&self.root)
+            .or_else(|_| written.strip_prefix(&self.given_root))
+            .unwrap_or(Path::new(""));
+        if written_rel.components().any(|c| match c {
+            Component::Normal(name) => is_git_dir_name(name),
+            _ => false,
+        }) {
+            return Err(ConfineError::GitDir {
+                path: given.to_path_buf(),
+            });
+        }
         let resolved = resolve(&joined, access, given)?;
         let resolved = canonicalize_existing_prefix(&resolved);
         let outside = || ConfineError::Outside {
@@ -201,6 +243,11 @@ impl Confinement {
             Component::Normal(name) => is_git_dir_name(name),
             _ => true,
         }) {
+            return Err(ConfineError::GitDir {
+                path: given.to_path_buf(),
+            });
+        }
+        if self.git_dirs.iter().any(|g| resolved.starts_with(g)) {
             return Err(ConfineError::GitDir {
                 path: given.to_path_buf(),
             });
@@ -419,6 +466,66 @@ fn resolve(joined: &Path, access: Access, given: &Path) -> Result<PathBuf, Confi
         }
     }
     Ok(out)
+}
+
+/// `path` with `.` dropped and `..` applied lexically (never above the root component).
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// See [`Confinement::git_dirs`]. Only existing directories inside `root` are returned,
+/// canonical, without duplicates.
+fn actual_git_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut add = |p: PathBuf| {
+        if let Ok(c) = dunce::canonicalize(&p) {
+            if c.is_dir() && c.starts_with(root) && !dirs.contains(&c) {
+                dirs.push(c);
+            }
+        }
+    };
+    let dot_git = root.join(".git");
+    let git_dir = match std::fs::symlink_metadata(&dot_git) {
+        // A directory, or a link to one: canonicalize follows it.
+        Ok(m) if !m.is_file() => dunce::canonicalize(&dot_git).ok(),
+        // A `gitdir: <path>` file (linked worktrees, submodules), relative to the root.
+        Ok(_) => std::fs::read_to_string(&dot_git).ok().and_then(|text| {
+            let target = text
+                .lines()
+                .next()?
+                .strip_prefix("gitdir:")?
+                .trim()
+                .to_owned();
+            (!target.is_empty()).then(|| root.join(target))
+        }),
+        Err(_) => None,
+    };
+    let env_dirs = ["GIT_DIR", "GIT_COMMON_DIR"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    for dir in git_dir.into_iter().chain(env_dirs) {
+        // `commondir` (relative to the git directory) names the shared directory of a linked
+        // worktree: objects, refs, hooks and config live there.
+        if let Ok(text) = std::fs::read_to_string(dir.join("commondir")) {
+            let common = text.trim();
+            if !common.is_empty() {
+                add(dir.join(common));
+            }
+        }
+        add(dir);
+    }
+    dirs
 }
 
 /// Canonicalizes the deepest existing ancestor of `path` (case and short names) and appends the

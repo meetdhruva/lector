@@ -42,6 +42,7 @@ pub use crate::auth::{
     auth_token, auth_token_with, delete_token, env_vars, host_env_var, store_token, token_help,
     Token, TokenSource, TokenSources, CLI_SCRUBBED_ENV,
 };
+pub use crate::http::{is_loopback_url, may_carry_token};
 pub use crate::remote::{
     detect, detect_with, is_public_forge_host, parse_remote_url, ForgeHosts, ForgeRemote,
 };
@@ -420,8 +421,7 @@ pub fn fetch_auth_header(
     token: &Token,
 ) -> Option<String> {
     let url = remote.remote_url.trim();
-    let secure =
-        url.starts_with("https://") || (url.starts_with("http://") && http::is_loopback(url));
+    let secure = http::may_carry_token(url);
     let again = detect_with(url, hosts)?;
     (secure && again.host == remote.host && again.kind == remote.kind)
         .then(|| git_auth_header(remote.kind, token))

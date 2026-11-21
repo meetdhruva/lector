@@ -302,11 +302,13 @@ pub fn scan_file_with(f: &SourceFile, apis: &PurityApis, globals: &Globals) -> V
             }
             let name = f.tok(j).to_string();
             let (ty, end) = static_type_and_end(f, j);
-            let listed = apis
-                .statics
-                .pairs()
-                .iter()
-                .any(|(n2, t2)| *n2 == name && normalize_type(t2) == ty);
+            // An allowance covers an immutable table only: `static mut` is always reported.
+            let listed = !is_mut
+                && apis
+                    .statics
+                    .pairs()
+                    .iter()
+                    .any(|(n2, t2)| *n2 == name && normalize_type(t2) == ty);
             if listed {
                 apis.statics.mark_pair(&name, &ty);
                 // Skip the whole allowed item, including its type and initialiser.
@@ -595,6 +597,17 @@ mod tests {
             wrong_name.iter().any(|(_, m)| m.contains("static RE")),
             "{wrong_name:?}"
         );
+    }
+
+    /// Step 8 review: an approved name and type turned into `static mut` is reported anyway;
+    /// an allowance never covers a mutable static.
+    #[test]
+    fn an_allowance_never_covers_static_mut() {
+        let entry = ["RISK_PATTERNS: &[(&str, u8)]"];
+        assert!(statics_run("static RISK_PATTERNS: &[(&str, u8)] = &[];", &entry).is_empty());
+        let v = statics_run("static mut RISK_PATTERNS: &[(&str, u8)] = &[];", &entry);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].1.contains("static mut RISK_PATTERNS"), "{}", v[0].1);
     }
 
     #[test]

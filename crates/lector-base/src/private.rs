@@ -38,13 +38,17 @@ pub fn create_dir_all(path: &Path) -> io::Result<()> {
 }
 
 fn options() -> OpenOptions {
-    let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
         options.mode(FILE_MODE);
+        options
     }
-    options
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new()
+    }
 }
 
 /// Creates a new file `0600` (Unix); fails with `AlreadyExists` if there is one.

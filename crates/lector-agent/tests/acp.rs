@@ -665,3 +665,29 @@ fn writes_whose_backup_fails_are_refused() {
     assert!(t.written.is_empty());
     s.stop();
 }
+
+/// Step 8 review: a repository whose `.git` is a link to `metadata` (git follows it). Neither
+/// spelling of the git directory can be written or read by the agent.
+#[cfg(unix)]
+#[test]
+fn a_git_directory_behind_a_link_is_refused_in_both_spellings() {
+    let fx = fx!();
+    fs::rename(fx.root.join(".git"), fx.root.join("metadata")).unwrap();
+    std::os::unix::fs::symlink("metadata", fx.root.join(".git")).unwrap();
+    let config_before = fs::read(fx.root.join("metadata/config")).unwrap();
+    let s = fx.start();
+    let t = fx.run(
+        &s,
+        "write .git/hooks/pre-commit evil\nwrite metadata/hooks/pre-commit evil\nwrite metadata/config evil\nread metadata/config\nwrite src/ok.rs fine",
+    );
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 3, "{answer}");
+    assert_eq!(answer.matches("READ-ERROR:").count(), 1, "{answer}");
+    assert!(!fx.root.join("metadata/hooks/pre-commit").exists());
+    assert_eq!(
+        fs::read(fx.root.join("metadata/config")).unwrap(),
+        config_before
+    );
+    assert_eq!(fx.read("src/ok.rs").as_deref(), Some("fine"));
+    s.stop();
+}
