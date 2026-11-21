@@ -1575,7 +1575,7 @@ pub enum StoreError { Db(DbError), NewerSchema { concern, found, known }, Migrat
   state) is gone when it exits. It is said for as long as it lasts: `StoreMode::indicator() -> StateIndicator { label:
   "State not saved", detail }` is a status bar item in every window (detail on hover and click; also a 20 s toast at
   startup), `lector health` prints the same line (`Store::probe(path) -> Probe::{Missing, Healthy, ReadOnly, Damaged}`,
-  a read-only look that creates, writes and recovers nothing; JSON field `state`), and headless commands (`lector
+  a read-only look that creates, writes and recovers nothing and answers what `Store::open` would do: `RepairAborted` (a repair a writable open does) counts as healthy only when the file opens for writing, which is checked without writing; permission, other I/O and upgrade errors, a read-only file or file system, a missing file whose folder is not writable and a damaged file whose folder is not writable are read-only; JSON field `state`), and headless commands (`lector
   <subcommand>`, `lector mcp`) print `StoreMode::headless_warning()` once on stderr at their first state change
   (`Store::on_read_only_write`; cache writes do not count). The same applies to a file written by a newer Lector (detected
   through a read-only handle before any writable open) or one that cannot be written (permissions, old redb format).

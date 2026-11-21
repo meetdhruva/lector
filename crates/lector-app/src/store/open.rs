@@ -160,10 +160,27 @@ impl Probe {
 }
 
 /// Looks at the file through a read-only handle (opened in the writers' mode, so it coexists
-/// with running Lector processes); creates, writes and recovers nothing.
+/// with running Lector processes) and answers what [`open`] would do, without creating,
+/// writing or recovering anything:
+///
+/// * missing: [`Probe::Missing`] when the file can be created (its nearest existing folder is
+///   writable), else read-only (`open` cannot create it);
+/// * newer schema, locked by an excluding process: read-only;
+/// * opens read-only, or fails only with `DatabaseError::RepairAborted` (a database a
+///   writable open repairs: unclean shutdown, unflushed primary): healthy when the file can
+///   be opened for writing (checked by opening it for writing and writing nothing, which
+///   changes neither contents nor modification time), else read-only (read-only file,
+///   permissions, read-only file system);
+/// * damaged: [`Probe::Damaged`] when its folder is writable (`open` moves it aside), else
+///   read-only;
+/// * any other error (permission denied, other I/O, a file format that needs an upgrade...):
+///   read-only, with the reason.
 pub(crate) fn probe(path: &Path) -> Probe {
-    if !path.exists() {
-        return Probe::Missing;
+    if std::fs::symlink_metadata(path).is_err() {
+        return match creatable(path) {
+            Ok(()) => Probe::Missing,
+            Err(e) => Probe::ReadOnly(format!("cannot create the database: {e}")),
+        };
     }
     if let Some(found) = peek_schema(path).filter(|v| *v > crate::db::SCHEMA_VERSION) {
         return Probe::ReadOnly(format!(
@@ -171,17 +188,59 @@ pub(crate) fn probe(path: &Path) -> Probe {
             crate::db::SCHEMA_VERSION
         ));
     }
-    match builder(ConcurrencyMode::MultiWriter).open_read_only(path) {
-        Ok(_) => Probe::Healthy,
+    let opened = builder(ConcurrencyMode::MultiWriter).open_read_only(path);
+    match opened {
+        Ok(_) | Err(redb::DatabaseError::RepairAborted) => match writable_file(path) {
+            Ok(()) => Probe::Healthy,
+            Err(e) => Probe::ReadOnly(format!("the database cannot be written: {e}")),
+        },
         Err(e) => match classify(&e) {
             OpenFailure::Locked(r) => Probe::ReadOnly(format!(
                 "the database is in use by another process that excludes this one ({r})"
             )),
-            OpenFailure::Corrupt(r) => Probe::Damaged(r),
-            // E.g. a database that needs the repair a writable open does: nothing to report.
-            OpenFailure::Unavailable(_) => Probe::Healthy,
+            OpenFailure::Corrupt(r) => match writable_dir(path.parent()) {
+                Ok(()) => Probe::Damaged(r),
+                Err(e) => Probe::ReadOnly(format!(
+                    "the database is damaged ({r}) and could not be moved aside ({e})"
+                )),
+            },
+            OpenFailure::Unavailable(r) => Probe::ReadOnly(r),
         },
     }
+}
+
+/// Whether `path` (an existing file) can be opened for writing. Writes nothing.
+fn writable_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new().write(true).open(path).map(drop)
+}
+
+/// Whether a file can be created in `dir` (`None`: the current folder). Creates nothing.
+fn writable_dir(dir: Option<&Path>) -> std::io::Result<()> {
+    let dir = dir
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    {
+        rustix::fs::access(dir, rustix::fs::Access::WRITE_OK).map_err(std::io::Error::from)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: a folder's read-only attribute does not stop creating files in it; ACLs
+        // are only known by trying. Report what the metadata says.
+        std::fs::metadata(dir).map(drop)
+    }
+}
+
+/// Whether `path` (missing) could be created: its nearest existing ancestor is writable.
+fn creatable(path: &Path) -> std::io::Result<()> {
+    let mut dir = path.parent();
+    while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+        if std::fs::symlink_metadata(d).is_ok() {
+            return writable_dir(Some(d));
+        }
+        dir = d.parent();
+    }
+    writable_dir(None)
 }
 
 /// The store over the file at `path`, by the policy in the module doc. Never fails.
