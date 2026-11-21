@@ -78,21 +78,64 @@ pub struct CommandSpec {
     /// (selection, confirmation, progress, Undo toast). The bridge registers nothing for it
     /// and the palette lists that action's row instead of a second row for the command.
     pub ui_flow: Option<&'static str>,
-    /// Who may run it. [`Sources::UiOnly`] commands are refused by [`CommandRegistry::invoke`]
-    /// for every other [`Source`] and left out of [`CommandRegistry::list_for`] (MCP
-    /// `tools/list`, `lector commands`, `commands.list`) and the palette: they exist so a UI
-    /// view's work runs through the registry, not as an API for other callers.
+    /// Who may run it, as declared with [`CommandSpec::ui_only`] (or set directly).
+    /// [`CommandRegistry::invoke`] and [`CommandRegistry::list_for`] enforce
+    /// [`CommandSpec::allowed_sources`], the stricter of this and what the command touches
+    /// ([`CommandSpec::touches`]), so a command that declares network use cannot be reached by
+    /// MCP clients even if this field says [`Sources::All`].
     pub sources: Sources,
+    /// What the command reaches beyond Lector and the project's files (ADR 0010, item 3):
+    /// declared with [`CommandSpec::uses_network`], [`CommandSpec::uses_credentials`],
+    /// [`CommandSpec::steers_agent`] and [`CommandSpec::answers_for_user`]. It decides the
+    /// minimum [`Sources`] ([`Touches::minimum_sources`]).
+    pub touches: Touches,
 }
 
-/// Who may run a command ([`CommandSpec::sources`]).
+/// What a command reaches besides the project's files and Lector's own state
+/// ([`CommandSpec::touches`]). Every flag raises the minimum [`Sources`]: a person at a keyboard
+/// must have chosen to send something over the network, use the user's credentials or drive an
+/// agent; answering an agent's question in the user's name happens only in Lector's window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Touches {
+    /// Talks to another machine (git fetch / pull / push, a code host's API).
+    pub network: bool,
+    /// Uses the user's credentials (git credential helpers and askpass, forge tokens).
+    pub credentials: bool,
+    /// Starts, prompts or cancels an agent: makes another program act on the project.
+    pub steers_agent: bool,
+    /// Answers for the user (an agent's permission request).
+    pub answers_for_user: bool,
+}
+
+impl Touches {
+    /// The least restrictive [`Sources`] a command touching these may have: `UiOnly` when it
+    /// answers for the user, `Interactive` when it uses the network or credentials or steers an
+    /// agent, else `All`.
+    pub fn minimum_sources(self) -> Sources {
+        if self.answers_for_user {
+            Sources::UiOnly
+        } else if self.network || self.credentials || self.steers_agent {
+            Sources::Interactive
+        } else {
+            Sources::All
+        }
+    }
+}
+
+/// Who may run a command ([`CommandSpec::allowed_sources`]), from widest to narrowest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Sources {
     /// Every front-end: the GUI, the CLI, MCP clients, agents, internal callers.
     #[default]
     All,
+    /// A person at a keyboard chose it: the GUI ([`Source::Ui`]), the CLI ([`Source::Cli`],
+    /// `lector run` in a terminal or a script the user started) and Lector itself
+    /// ([`Source::Internal`]). MCP clients and agents are refused, with or without
+    /// `--allow-writes`: network, credentials and agent control (ADR 0010).
+    Interactive,
     /// Only the GUI ([`Source::Ui`]): its view fronts it (the Pull Requests panel fetching a
-    /// pull request); the CLI, MCP and agents are refused.
+    /// pull request, answering an agent's permission request); the CLI, MCP and agents are
+    /// refused.
     UiOnly,
 }
 
@@ -101,7 +144,24 @@ impl Sources {
     pub fn allows(self, source: Source) -> bool {
         match self {
             Sources::All => true,
+            Sources::Interactive => {
+                matches!(source, Source::Ui | Source::Cli | Source::Internal)
+            }
             Sources::UiOnly => source == Source::Ui,
+        }
+    }
+
+    /// The narrower of two.
+    pub fn stricter(self, other: Sources) -> Sources {
+        self.max(other)
+    }
+
+    /// Stable name for `--json` / `commands.list` (`all`, `interactive`, `ui_only`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Sources::All => "all",
+            Sources::Interactive => "interactive",
+            Sources::UiOnly => "ui_only",
         }
     }
 }
@@ -126,6 +186,7 @@ impl CommandSpec {
             ui_action: None,
             ui_flow: None,
             sources: Sources::All,
+            touches: Touches::default(),
         }
     }
 
@@ -159,6 +220,41 @@ impl CommandSpec {
     pub fn ui_only(mut self) -> Self {
         self.sources = Sources::UiOnly;
         self
+    }
+
+    /// Declares that it talks to another machine ([`Touches::network`]): at least
+    /// [`Sources::Interactive`].
+    pub fn uses_network(mut self) -> Self {
+        self.touches.network = true;
+        self
+    }
+
+    /// Declares that it uses the user's credentials ([`Touches::credentials`]): at least
+    /// [`Sources::Interactive`].
+    pub fn uses_credentials(mut self) -> Self {
+        self.touches.credentials = true;
+        self
+    }
+
+    /// Declares that it starts, prompts or cancels an agent ([`Touches::steers_agent`]): at
+    /// least [`Sources::Interactive`].
+    pub fn steers_agent(mut self) -> Self {
+        self.touches.steers_agent = true;
+        self
+    }
+
+    /// Declares that it answers for the user ([`Touches::answers_for_user`]):
+    /// [`Sources::UiOnly`].
+    pub fn answers_for_user(mut self) -> Self {
+        self.touches.answers_for_user = true;
+        self
+    }
+
+    /// Who may run it: the stricter of [`CommandSpec::sources`] and
+    /// [`Touches::minimum_sources`]. The one value [`CommandRegistry::invoke`],
+    /// [`CommandRegistry::list_for`] and the palette use.
+    pub fn allowed_sources(&self) -> Sources {
+        self.sources.stricter(self.touches.minimum_sources())
     }
 
     /// Marks the command destructive.
@@ -210,8 +306,22 @@ impl CommandSpec {
         if let Some(a) = self.ui_flow {
             v["ui_flow"] = json!(a);
         }
-        if self.sources == Sources::UiOnly {
+        let sources = self.allowed_sources();
+        if sources == Sources::UiOnly {
             v["ui_only"] = json!(true);
+        }
+        v["sources"] = json!(sources.as_str());
+        if self.touches.network {
+            v["network"] = json!(true);
+        }
+        if self.touches.credentials {
+            v["credentials"] = json!(true);
+        }
+        if self.touches.steers_agent {
+            v["steers_agent"] = json!(true);
+        }
+        if self.touches.answers_for_user {
+            v["answers_for_user"] = json!(true);
         }
         v
     }
@@ -326,44 +436,57 @@ impl CommandContext {
         matches!(self.source, Source::Mcp | Source::Agent)
     }
 
-    /// Checks a resolved path argument. For [sandboxed](Self::is_sandboxed) callers the
-    /// path must lie inside the project root after resolving `..` and symlinks of its
-    /// deepest existing ancestor, and outside any `.git` directory; other callers pass.
+    /// Checks a path argument the command will read. For [sandboxed](Self::is_sandboxed)
+    /// callers the path goes through [`lector_fs::Confinement::read`] ([`confinement`]): it
+    /// must resolve (symlinks included) inside the project, outside every git directory and
+    /// outside Lector's own data and settings; the resolved path is returned. Other callers
+    /// get the path back unchanged.
     pub fn confine_path(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        self.confine_as(path, lector_fs::Access::Read)
+    }
+
+    /// [`CommandContext::confine_path`] for a path the command will write: a final-component
+    /// symlink is refused too ([`lector_fs::Confinement::write`]). Commands that write such a
+    /// path pass [`CommandContext::save_confinement`] on to the save so the write itself does
+    /// not follow a link that appears after this check.
+    pub fn confine_write_path(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        self.confine_as(path, lector_fs::Access::Write)
+    }
+
+    /// The confinement a write from this context must stay in (`Some` for sandboxed callers),
+    /// for [`crate::documents::SaveRequest::confine`].
+    pub fn save_confinement(&self) -> anyhow::Result<Option<lector_fs::Confinement>> {
+        if !self.is_sandboxed() {
+            return Ok(None);
+        }
+        Ok(Some(confinement(
+            &self.core,
+            self.require_project()?.root(),
+        )?))
+    }
+
+    fn confine_as(&self, path: PathBuf, access: lector_fs::Access) -> anyhow::Result<PathBuf> {
         if !self.is_sandboxed() {
             return Ok(path);
         }
-        let outside = || anyhow::anyhow!("{} is outside the project", path.display());
         let root = self.require_project()?.root();
-        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let mut lexical = PathBuf::new();
-        for c in path.components() {
-            match c {
-                std::path::Component::ParentDir => {
-                    if !lexical.pop() {
-                        return Err(outside());
-                    }
-                }
-                std::path::Component::CurDir => {}
-                other => lexical.push(other.as_os_str()),
-            }
-        }
-        let mut existing = lexical.as_path();
-        while std::fs::symlink_metadata(existing).is_err() {
-            existing = existing.parent().ok_or_else(outside)?;
-        }
-        let real = dunce::canonicalize(existing).map_err(|_| outside())?;
-        let rest = lexical.strip_prefix(existing).map_err(|_| outside())?;
-        let resolved = real.join(rest);
-        let rel = resolved.strip_prefix(&root).map_err(|_| outside())?;
-        if rel
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
-        {
-            anyhow::bail!("{} is inside .git", path.display());
-        }
-        Ok(lexical)
+        Ok(confinement(&self.core, root)?.check(&path, access)?.path())
     }
+}
+
+/// The one confinement of sandboxed callers (agents, MCP clients) to a project `root`
+/// (ADR 0010): [`lector_fs::Confinement`] for the root, also forbidding Lector's data directory
+/// (the core's shadow directory and `lector_config::paths::data_dir`) and its settings
+/// directory when the project contains them (portable mode, overrides), so an agent cannot
+/// reach backups, logs or `settings.toml` (which chooses programs to run).
+pub fn confinement(
+    core: &AppCore,
+    root: &std::path::Path,
+) -> Result<lector_fs::Confinement, lector_fs::ConfineError> {
+    Ok(lector_fs::Confinement::new(root)?
+        .forbid(&pull_request::shadow_data_dir(core))
+        .forbid(&lector_config::paths::data_dir())
+        .forbid(&lector_config::paths::config_dir()))
 }
 
 /// A request for the front-end, carried in [`Outcome::ui`]. Headless callers may
@@ -574,7 +697,7 @@ impl CommandRegistry {
         self.commands
             .read()
             .values()
-            .filter(|c| c.spec().sources.allows(source))
+            .filter(|c| c.spec().allowed_sources().allows(source))
             .cloned()
             .collect()
     }
@@ -602,11 +725,20 @@ impl CommandRegistry {
             .get(id)
             .ok_or_else(|| CommandError::Unknown(id.to_string()))?;
         let spec = command.spec();
-        if !spec.sources.allows(cx.source) {
-            return Err(CommandError::Unavailable(format!(
-                "`{}` runs only from Lector's window, not from the CLI, MCP clients or agents",
-                spec.id
-            )));
+        match spec.allowed_sources() {
+            sources if sources.allows(cx.source) => {}
+            Sources::Interactive => {
+                return Err(CommandError::Unavailable(format!(
+                    "`{}` runs only when a person starts it (Lector's window or `lector run`), not from MCP clients or agents: it uses the network, the user's credentials or controls an agent",
+                    spec.id
+                )))
+            }
+            _ => {
+                return Err(CommandError::Unavailable(format!(
+                    "`{}` runs only from Lector's window, not from the CLI, MCP clients or agents",
+                    spec.id
+                )))
+            }
         }
         let args = if args.is_null() { json!({}) } else { args };
         schema::validate(&spec.args_schema, &args).map_err(CommandError::InvalidArgs)?;
@@ -806,6 +938,59 @@ mod tests {
             // Every schema accepts its own minimal valid input shape.
             assert!(spec.to_json()["args"].is_object());
         }
+    }
+
+    /// ADR 0010, item 3: what a command touches sets its minimum sources; the declared
+    /// `sources` can narrow but never widen it, and `invoke` enforces the result.
+    #[test]
+    fn touches_decide_the_minimum_sources() {
+        let net =
+            CommandSpec::write("t.net", "Net", "Test", json!({"type": "object"})).uses_network();
+        assert_eq!(net.allowed_sources(), Sources::Interactive);
+        let mut widened = net.clone();
+        widened.sources = Sources::All;
+        assert_eq!(widened.allowed_sources(), Sources::Interactive);
+        let answer = CommandSpec::write("t.ans", "Ans", "Test", json!({"type": "object"}))
+            .steers_agent()
+            .answers_for_user();
+        assert_eq!(answer.allowed_sources(), Sources::UiOnly);
+        let creds = CommandSpec::read("t.cred", "Cred", "Test", json!({"type": "object"}))
+            .uses_credentials()
+            .ui_only();
+        assert_eq!(creds.allowed_sources(), Sources::UiOnly);
+        for (sources, allowed) in [
+            (Sources::All, [true, true, true, true, true]),
+            (Sources::Interactive, [true, true, false, false, true]),
+            (Sources::UiOnly, [true, false, false, false, false]),
+        ] {
+            let got = [
+                Source::Ui,
+                Source::Cli,
+                Source::Mcp,
+                Source::Agent,
+                Source::Internal,
+            ]
+            .map(|s| sources.allows(s));
+            assert_eq!(got, allowed, "{sources:?}");
+        }
+        assert_eq!(net.to_json()["sources"], "interactive");
+        assert_eq!(net.to_json()["network"], true);
+        assert!(net.to_json().get("ui_only").is_none());
+
+        let core = AppCore::open(CoreOptions::for_tests());
+        let r = core.registry();
+        r.register(FnCommand::new(widened, |_, _| Ok(Outcome::new("ran"))));
+        let mcp = CommandContext::new(core.clone(), None, Source::Mcp);
+        assert!(matches!(
+            r.invoke("t.net", json!({}), &mcp),
+            Err(CommandError::Unavailable(_))
+        ));
+        assert!(!r
+            .list_for(Source::Mcp)
+            .iter()
+            .any(|c| c.spec().id == "t.net"));
+        let cli = CommandContext::new(core.clone(), None, Source::Cli);
+        assert!(r.invoke("t.net", json!({}), &cli).is_ok());
     }
 
     #[test]

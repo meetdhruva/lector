@@ -8,7 +8,7 @@
 //! undone again). When files changed since, Undo refuses and asks whether to restore
 //! anyway.
 
-use lector_ui::background::{background, view_key, JobKind, Priority};
+use lector_ui::background::{background, background_described, view_key, JobKind, Priority};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -123,9 +123,11 @@ pub fn undo_entry(
 ) {
     let journal = journal(cx);
     let ctx = context_for(store, cx);
-    // A write the user asked for: never replaced, survives the panel closing.
-    let key = view_key(JobKind::GitWrite, store.entity_id());
-    let work = background(cx, key, Priority::Visible, move |_| {
+    // A write the user asked for: never replaced, survives the window closing (dropping its
+    // task detaches it); serial with the repository's other git writes.
+    let key = crate::staging::git_write_key(store, cx);
+    let what = format!("undo of activity entry {id}");
+    let work = background_described(cx, key, Priority::Visible, what, move |_| {
         journal.undo(id, &ctx, mode)
     });
     let store = store.clone();

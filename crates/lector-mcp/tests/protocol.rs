@@ -736,3 +736,62 @@ fn ui_only_commands_are_neither_listed_nor_callable_with_or_without_writes() {
         assert!(text.contains("only from Lector's window"), "{text}");
     }
 }
+
+/// ADR 0010, item 1: a project that commits `docs -> .git` and `cfg -> .git/config` gives MCP
+/// clients no way into `.git`, through resources or tool path arguments, with or without
+/// `--allow-writes`.
+#[cfg(unix)]
+#[test]
+fn links_into_git_are_refused_for_resources_and_tools() {
+    let fx = fixture();
+    std::os::unix::fs::symlink(".git", fx.repo.join("docs")).expect("symlink");
+    std::os::unix::fs::symlink(".git/config", fx.repo.join("cfg")).expect("symlink");
+    let config = std::fs::read(fx.repo.join(".git/config")).expect("config");
+    let mut msgs = handshake();
+    msgs.extend([
+        req(
+            2,
+            "resources/read",
+            json!({ "uri": "lector://document/docs/config" }),
+        ),
+        req(
+            3,
+            "resources/read",
+            json!({ "uri": "lector://document/cfg" }),
+        ),
+        call(4, "document_read", json!({ "path": "docs/config" })),
+        call(5, "document_read", json!({ "path": "cfg" })),
+        call(
+            6,
+            "document_apply_edits",
+            json!({ "path": "docs/config", "edits": [{ "range": [0, 0], "new_text": "x" }] }),
+        ),
+        call(7, "document_save", json!({ "path": "cfg", "force": true })),
+        call(
+            8,
+            "git_stage",
+            json!({ "paths": ["docs/hooks/pre-commit"] }),
+        ),
+        call(
+            9,
+            "git_accept_file",
+            json!({ "path": "cfg", "side": "ours" }),
+        ),
+        call(10, "document_read", json!({ "path": "docs/../README.md" })),
+    ]);
+    let out = converse(&fx.server(true), &msgs);
+    for id in [2, 3] {
+        assert_eq!(response(&out, id)["error"]["code"], -32002, "{out:?}");
+    }
+    for id in 4..=9 {
+        let r = &response(&out, id)["result"];
+        assert_eq!(r["isError"], true, "call {id} must be refused: {r}");
+        assert!(!r.to_string().contains("[core]"), "{r}");
+    }
+    assert_eq!(response(&out, 10)["result"]["isError"], false, "{out:?}");
+    assert_eq!(
+        std::fs::read(fx.repo.join(".git/config")).expect("config"),
+        config
+    );
+    assert!(!fx.repo.join(".git/hooks/pre-commit").exists());
+}

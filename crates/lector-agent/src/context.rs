@@ -6,15 +6,17 @@ use lector_app::Project;
 use serde_json::{json, Value};
 
 use crate::model::PromptContext;
-use crate::paths::{file_uri, relative, resolve_in_root};
+use crate::paths::{confine, file_uri};
+use lector_fs::Access;
 
 /// Biggest file sent as context (larger ones are sent as links only).
 pub const MAX_CONTEXT_BYTES: usize = 256 * 1024;
 
 /// The current text of a project file: the open document (unsaved edits included) or disk.
 pub fn current_text(core: &AppCore, project: &Project, path: &str) -> Option<(String, String)> {
-    let abs = resolve_in_root(project.root(), path).ok()?;
-    let rel = relative(project.root(), &abs);
+    let target = confine(core, project.root(), path, Access::Read).ok()?;
+    let abs = target.path();
+    let rel = target.relative_slash();
     let store = DocumentStore::for_core(core);
     if let Some(h) = store.get(&abs) {
         let snap = h.snapshot();
@@ -22,7 +24,7 @@ pub fn current_text(core: &AppCore, project: &Project, path: &str) -> Option<(St
             return Some((rel, t.text_for_range(0..t.len()).into_owned()));
         }
     }
-    let bytes = std::fs::read(&abs).ok()?;
+    let bytes = target.read().ok()?;
     Some((rel, String::from_utf8(bytes).ok()?))
 }
 
@@ -70,7 +72,9 @@ fn file_block(
     lines: Option<(u32, u32)>,
     embedded: bool,
 ) -> Value {
-    let abs = resolve_in_root(project.root(), path).unwrap_or_else(|_| project.root().join(path));
+    let abs = confine(core, project.root(), path, Access::Read)
+        .map(|c| c.path())
+        .unwrap_or_else(|_| project.root().join(path));
     let mut uri = file_uri(&abs);
     let Some((rel, text)) = current_text(core, project, path) else {
         return json!({ "type": "resource_link", "uri": uri, "name": path });

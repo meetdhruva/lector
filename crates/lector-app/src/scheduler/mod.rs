@@ -5,6 +5,11 @@
 //!   that [replace](JobKind::replaces); [`Scheduler::cancel_subject`] cancels everything of a
 //!   document, repository, view... that closes. A cancelled job that has not started never runs;
 //!   a running one sees its [`CancelToken`]; either way its result is never delivered.
+//! * **Writes the user asked for** ([`JobKind::is_write`]) are never replaced, not cancelled with
+//!   their subject, and once queued they run even if their token was cancelled before they
+//!   started (the bridge's task was dropped because its view closed); their result is then
+//!   dropped. Only [`Scheduler::cancel_key`] keeps a queued write from starting; a write that
+//!   started runs to completion.
 //! * **Compute lane**: `default_workers()` general workers serve the highest non-empty
 //!   priority first (FIFO within a priority), plus **one worker reserved for `Interactive`
 //!   jobs**, so a keystroke-driven job runs at once even when every general worker is busy
@@ -13,6 +18,11 @@
 //! * **Blocking lane**: kinds that wait on somebody else (network, language servers, agents,
 //!   the user, external programs) run on their own threads, started on demand up to
 //!   [`BLOCKING_MAX`] and stopped after 30 s idle, so they never occupy the compute workers.
+//! * **Serial lane**: git writes (hooks, signing, pinentry: other people's programs with no
+//!   timeout) run one per key at a time, in submission order, each key's jobs on a thread of
+//!   its own (started on demand, stopped after 30 s idle). The key's subject is the repository,
+//!   so one repository has one git write at a time (git requires it) while repositories do not
+//!   wait for each other; the lane takes neither compute workers nor blocking-lane slots.
 //! * A job that panics is caught: the worker survives, the panic is logged (and written to the
 //!   crash log by the process's panic hook, see `health`) and the waiter gets
 //!   [`JobError::Panicked`].
@@ -20,11 +30,15 @@
 //!   inline if it has not started, so waiting on the compute pool cannot deadlock it; jobs of the
 //!   other lanes are waited for (never run inline on a compute worker).
 //! * **Guaranteed lane**: kinds that other jobs or a person wait on (credential prompts, agent
-//!   requests and turns, cancel/undo, terminal kill escalation) always start at once, so a
+//!   requests and turns, cancel/undo of a turn, terminal kill escalation) always start at once, so a
 //!   blocking lane full of waiters cannot keep them from starting.
 //! * Quitting: [`Scheduler::begin_quit`] cancels everything but writes, [`Scheduler::drain`]
-//!   lets writes finish within a bound, [`Scheduler::shutdown`] cancels the rest and waits a
-//!   bounded time for the threads (orchestrated by `lector_app::shutdown`).
+//!   lets writes finish within a bound (queued serial writes keep their order), and reports
+//!   the ones it gave up on by kind, subject and description ([`AbandonedWrite`]);
+//!   [`Scheduler::shutdown`] cancels the rest and waits a bounded time for the threads
+//!   (orchestrated by `lector_app::shutdown`).
+//! * The scheduler's lock is never held while user code runs (job bodies, runners, cancel
+//!   hooks, destructors of dropped bodies); debug builds assert it.
 //! * [`Scheduler::debounce`] coalesces calls with the same key: only the last closure runs,
 //!   `delay` after the last call.
 //! * [`Scheduler::with_runner`] hands every job to a runner instead of threads (the GPUI
@@ -36,6 +50,7 @@
 
 pub mod key;
 mod pool;
+mod ticket;
 
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -46,10 +61,11 @@ use std::time::Duration;
 use futures::channel::oneshot;
 use lector_base::CancelToken;
 
-pub use key::{AtQuit, JobKey, JobKind, Lane, Subject};
-pub use pool::{Body, DrainReport, Runner};
+pub use key::{AtQuit, JobKey, JobKind, Lane, Subject, Writes};
+pub use pool::{AbandonedWrite, Body, DrainReport, Runner};
 
 use pool::{Inner, Job, Registration};
+use ticket::Ticket;
 
 /// Most threads the blocking lane runs at once; further blocking jobs queue by priority.
 pub const BLOCKING_MAX: usize = 16;
@@ -193,7 +209,20 @@ impl Scheduler {
         prio: Priority,
         f: impl FnOnce(&CancelToken) -> T + Send + 'static,
     ) -> JobHandle<T> {
-        self.try_spawn(key, prio, f).0
+        self.try_spawn(key, prio, None, f).0
+    }
+
+    /// [`Scheduler::spawn`] with a description of what the job does (a command id such as
+    /// `"git.commit"`): a write abandoned at quit is reported with it ([`AbandonedWrite`]).
+    pub fn spawn_described<T: Send + 'static>(
+        &self,
+        key: JobKey,
+        prio: Priority,
+        what: impl Into<String>,
+        f: impl FnOnce(&CancelToken) -> T + Send + 'static,
+    ) -> JobHandle<T> {
+        let what: Arc<str> = Arc::from(what.into());
+        self.try_spawn(key, prio, Some(what), f).0
     }
 
     /// [`Scheduler::spawn`], also telling whether the job was accepted (`false`: refused after
@@ -202,25 +231,26 @@ impl Scheduler {
         &self,
         key: JobKey,
         prio: Priority,
+        what: Option<Arc<str>>,
         f: impl FnOnce(&CancelToken) -> T + Send + 'static,
     ) -> (JobHandle<T>, bool) {
         let prio = prio.for_kind(key.kind);
-        let token = CancelToken::new();
+        let ticket = Ticket::new(key.kind.runs_once_queued());
+        let token = ticket.token().clone();
         let (tx, rx) = oneshot::channel();
         let finished = Arc::new(AtomicBool::new(false));
         let id = self.inner().next_id();
         let reg = Registration::new(self.inner(), key.clone(), id);
         let body = guarded(
             key.kind,
-            token.clone(),
+            ticket.clone(),
             finished.clone(),
             f,
             tx,
             reg.clone(),
         );
-        let accepted = self
-            .inner()
-            .submit(prio, token.clone(), Job::new(id, key, body));
+        let job = Job::new(id, key, prio, body).described(what);
+        let accepted = self.inner().submit(ticket, job);
         let handle = JobHandle {
             id,
             token,
@@ -243,13 +273,13 @@ impl Scheduler {
         f: impl FnOnce(&CancelToken) + Send + 'static,
     ) {
         let prio = prio.for_kind(key.kind);
-        let token = CancelToken::new();
+        let ticket = Ticket::new(key.kind.runs_once_queued());
         let (tx, _rx) = oneshot::channel();
         let id = self.inner().next_id();
         let reg = Registration::new(self.inner(), key.clone(), id);
         let finished = Arc::new(AtomicBool::new(false));
-        let body = guarded(key.kind, token.clone(), finished, f, tx, reg);
-        self.inner().debounce(id, key, delay, prio, token, body);
+        let body = guarded(key.kind, ticket.clone(), finished, f, tx, reg);
+        self.inner().debounce(id, key, delay, prio, ticket, body);
     }
 
     /// A [`lector_base::thread::TaskRunner`] that runs each task as a job with `key` at `prio`:
@@ -268,7 +298,7 @@ impl Scheduler {
                 must_run,
             });
             let job = pending.clone();
-            let (_, accepted) = scheduler.try_spawn(key.clone(), prio, move |_| job.run());
+            let (_, accepted) = scheduler.try_spawn(key.clone(), prio, None, move |_| job.run());
             if accepted {
                 return Ok(());
             }
@@ -280,7 +310,9 @@ impl Scheduler {
         })
     }
 
-    /// Cancels every job with `key` and any pending debounce for it.
+    /// Cancels every job with `key` and any pending debounce for it. This is the one explicit
+    /// way to cancel a [write](JobKind::is_write), and it only keeps a queued write from
+    /// starting: a write that already started runs to completion and reports its result.
     pub fn cancel_key(&self, key: &JobKey) {
         self.inner().cancel_key(key);
     }
@@ -335,6 +367,19 @@ impl Scheduler {
             .drain(now + bound, now + network_grace.min(bound))
     }
 
+    /// A scheduler like [`Scheduler::with_limits`] whose on-demand threads exit after `idle`
+    /// without work (30 s otherwise).
+    #[cfg(test)]
+    pub(crate) fn with_idle_timeout(
+        workers: usize,
+        blocking_max: usize,
+        idle: Duration,
+    ) -> Scheduler {
+        Scheduler {
+            owner: Arc::new(Owner(Inner::start_with_idle(workers, blocking_max, idle))),
+        }
+    }
+
     /// Whether [`Scheduler::shutdown`] was called.
     pub fn is_shut_down(&self) -> bool {
         self.inner().is_shut_down()
@@ -368,11 +413,12 @@ impl Drop for PendingTask {
     }
 }
 
-/// Wraps `f`: skipped when cancelled before it starts, panics caught and reported, the result
-/// sent only if the token is still not cancelled once `f` returns.
+/// Wraps `f`: skipped when its ticket does not let it start (a read whose token was cancelled,
+/// a write the scheduler revoked), panics caught and reported, the result sent only if the
+/// token is still not cancelled once `f` returns.
 fn guarded<T: Send + 'static>(
     kind: JobKind,
-    token: CancelToken,
+    ticket: Ticket,
     finished: Arc<AtomicBool>,
     f: impl FnOnce(&CancelToken) -> T + Send + 'static,
     tx: oneshot::Sender<Result<T, JobError>>,
@@ -381,10 +427,11 @@ fn guarded<T: Send + 'static>(
     Box::new(move || {
         // Held until the body returns; the handle keeps the job registered after that.
         let _reg = reg;
-        let outcome = if token.is_cancelled() {
+        let token = ticket.token();
+        let outcome = if !ticket.start() {
             Err(JobError::Cancelled)
         } else {
-            match catch_unwind(AssertUnwindSafe(|| f(&token))) {
+            match catch_unwind(AssertUnwindSafe(|| f(token))) {
                 Ok(_) if token.is_cancelled() => Err(JobError::Cancelled),
                 Ok(value) => Ok(value),
                 Err(payload) => {
@@ -439,7 +486,9 @@ impl<T> std::fmt::Debug for JobHandle<T> {
 }
 
 impl<T> JobHandle<T> {
-    /// Requests cancellation; the handle then resolves to an error.
+    /// Requests cancellation; the handle then resolves to an error. A job that has not started
+    /// is skipped, except a [write](JobKind::is_write), which still runs (only its result is
+    /// dropped; see [`Scheduler::cancel_key`]).
     pub fn cancel(&self) {
         self.token.cancel();
     }
@@ -532,3 +581,5 @@ impl<T: Send + 'static> JobHandle<T> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_tests;

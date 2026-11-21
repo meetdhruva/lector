@@ -137,7 +137,9 @@ pub struct IndexRecord {
 /// Options of [`ShadowRepo::fetch_with`].
 #[derive(Clone, Default)]
 pub struct FetchOptions {
-    /// Extra HTTP header for git (`Authorization: Basic ...`); never logged.
+    /// Extra HTTP header for git (`Authorization: Basic ...`); never logged, passed through
+    /// `GIT_CONFIG_*` (not argv), and sent with `http.followRedirects=false` so it reaches only
+    /// the URL's host.
     pub http_header: Option<String>,
 }
 
@@ -954,9 +956,12 @@ impl ShadowRepo {
             cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
         }
         if let Some(header) = &opts.http_header {
-            cmd.env("GIT_CONFIG_COUNT", "1")
+            // The header goes to the URL's host only: no redirects (which could lead elsewhere).
+            cmd.env("GIT_CONFIG_COUNT", "2")
                 .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                .env("GIT_CONFIG_VALUE_0", header);
+                .env("GIT_CONFIG_VALUE_0", header)
+                .env("GIT_CONFIG_KEY_1", "http.followRedirects")
+                .env("GIT_CONFIG_VALUE_1", "false");
         }
         exec(cmd, "git fetch", None).map_err(|e| match (&opts.http_header, e) {
             // Never echo the header back in an error.

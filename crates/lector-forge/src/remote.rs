@@ -1,4 +1,12 @@
 //! Recognising GitHub / GitLab remotes.
+//!
+//! **Host policy (ADR 0010, item 2).** A remote is a forge only when its host is exactly
+//! `github.com` / `gitlab.com` (or `www.github.com` / `www.gitlab.com`) or is listed by the user
+//! in `[forge] github_hosts` / `gitlab_hosts` ([`ForgeHosts`], which a project's settings cannot
+//! set). Nothing is guessed from a name: `github.example.com` or `gitlab.evil.example` are not
+//! forges unless listed, so a repository cannot make Lector send a token to a server it names.
+//! The API of `github.com` / `gitlab.com` is always reached over HTTPS, whatever scheme the
+//! remote uses. Which token a recognised host gets is decided in `auth` ([`crate::auth_token`]).
 
 use std::collections::BTreeMap;
 
@@ -103,12 +111,22 @@ fn clean_path(path: &str) -> Option<String> {
     (!p.is_empty() && p.contains('/')).then(|| p.to_string())
 }
 
-/// Detects github.com and gitlab.com remotes (plus `github.*` / `gitlab.*` hosts).
+/// Whether `host` (lowercase, optionally with `:port`) is one of the two public forges,
+/// `github.com` or `gitlab.com`: the only hosts that receive the `GITHUB_TOKEN` / `GH_TOKEN` and
+/// `GITLAB_TOKEN` environment tokens.
+pub fn is_public_forge_host(host: &str) -> bool {
+    let bare = host.split(':').next().unwrap_or(host);
+    bare.eq_ignore_ascii_case("github.com") || bare.eq_ignore_ascii_case("gitlab.com")
+}
+
+/// Detects github.com and gitlab.com remotes only (no user-listed hosts); see
+/// [`detect_with`] and the [host policy](self).
 pub fn detect(remote_url: &str) -> Option<ForgeRemote> {
     detect_with(remote_url, &ForgeHosts::default())
 }
 
-/// Detects a remote using the configured hosts.
+/// Detects a remote: `github.com`, `gitlab.com` (and their `www.` names) or a host the user
+/// listed in `hosts`; anything else is `None` (see the [host policy](self)).
 pub fn detect_with(remote_url: &str, hosts: &ForgeHosts) -> Option<ForgeRemote> {
     let (scheme, host, path) = parse_remote_url(remote_url)?;
     let bare_host = host.split(':').next().unwrap_or(&host).to_string();
@@ -121,26 +139,27 @@ pub fn detect_with(remote_url: &str, hosts: &ForgeHosts) -> Option<ForgeRemote> 
         || listed(&hosts.github)
     {
         ForgeKind::Github
-    } else if bare_host == "gitlab.com" || listed(&hosts.gitlab) || bare_host.starts_with("gitlab.")
-    {
+    } else if bare_host == "gitlab.com" || bare_host == "www.gitlab.com" || listed(&hosts.gitlab) {
         ForgeKind::Gitlab
-    } else if bare_host.starts_with("github.") {
-        ForgeKind::Github
     } else {
         return None;
     };
-    let host = if bare_host == "www.github.com" {
-        "github.com".to_string()
-    } else {
-        host
+    let (host, bare_host) = match bare_host.strip_prefix("www.") {
+        Some(public @ ("github.com" | "gitlab.com")) => (public.to_string(), public.to_string()),
+        _ => (host, bare_host),
     };
+    let public = is_public_forge_host(&bare_host);
     if kind == ForgeKind::Github && path.split('/').count() != 2 {
         return None;
     }
     let (owner, name) = path.rsplit_once('/')?;
-    let web_scheme = if scheme == "http" { "http" } else { "https" };
-    // An SSH port is not the web port.
-    let web_host = if scheme.contains("ssh") {
+    let web_scheme = if scheme == "http" && !public {
+        "http"
+    } else {
+        "https"
+    };
+    // An SSH port is not the web port; the public forges serve their API on the default port.
+    let web_host = if scheme.contains("ssh") || public {
         bare_host.clone()
     } else {
         host.clone()
@@ -249,6 +268,33 @@ mod tests {
         let sh = detect_with("https://git.corp/team/app", &hosts).expect("gitlab");
         assert_eq!(sh.kind, ForgeKind::Gitlab);
         assert_eq!(sh.api_base, "http://127.0.0.1:9/api/v4");
-        assert!(detect("https://gitlab.example.org/a/b").is_some());
+        let www = detect("https://www.gitlab.com/g/p").expect("www.gitlab.com");
+        assert_eq!(
+            (www.host.as_str(), www.kind),
+            ("gitlab.com", ForgeKind::Gitlab)
+        );
+        let plain = detect("http://gitlab.com/g/p").expect("gitlab over http");
+        assert_eq!(plain.api_base, "https://gitlab.com/api/v4");
+    }
+
+    /// ADR 0010, item 2: a host is a forge only when it is exactly github.com / gitlab.com or
+    /// listed by the user; names that merely start with `github.` / `gitlab.` are not.
+    #[test]
+    fn look_alike_hosts_are_not_forges() {
+        for url in [
+            "https://github.evil.example/a/b.git",
+            "git@gitlab.evil.example:a/b.git",
+            "https://gitlab.example.org/a/b",
+            "https://github.com.evil.example/a/b",
+            "https://evilgithub.com/a/b",
+            "ssh://git@notgitlab.com/a/b",
+        ] {
+            assert!(detect(url).is_none(), "{url}");
+            assert!(detect_with(url, &ForgeHosts::default()).is_none(), "{url}");
+        }
+        assert!(is_public_forge_host("github.com"));
+        assert!(is_public_forge_host("gitlab.com:443"));
+        assert!(!is_public_forge_host("github.evil.example"));
+        assert!(!is_public_forge_host("code.corp"));
     }
 }

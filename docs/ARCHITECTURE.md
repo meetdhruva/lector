@@ -263,7 +263,8 @@ and caching goes through the `DerivedCache` it is given. **Start at**
 `lector_review::conflicts::parse_conflicts`, `lector_review::content::DerivedCache`.
 
 ### lector-app (app)
-The headless core and the only stateful layer. **Owns** the `AppCore` (scheduler, command
+The headless core and the only stateful layer. **Owns** the `AppCore` (scheduler with its
+compute, blocking, serial and guaranteed lanes, command
 registry, journal, state store, git service, document store), the open project, documents,
 commands, undo, the content cache, review data, provenance, comments, crash log and session
 health, and the quit sequence. **Must not** depend on GPUI or tokio, or on `lector-forge`.
@@ -376,18 +377,27 @@ enumerates the registry and round-trips each undoable one.
 2. The scheduler (`lector_app::Scheduler::global()`, shared with the CLI and `lector mcp`) puts
    the job on the lane its kind declares (`JobKind::lane`): **compute** (general workers plus one
    worker reserved for the few kinds that may be `Interactive`), **blocking** (waits on the
-   network, a language server or an external program; bounded by `BLOCKING_MAX`) or **guaranteed**
-   (askpass prompts, agent requests and turns, cancel/undo, terminal kill: always start at once).
-3. A newer job with the same key replaces an older one for kinds that `replaces()`; closing a
-   subject (`Scheduler::cancel_subject`, called when a document, a `RepoState` or a view is
-   dropped; `background::cancel_on_release` for windows) cancels its jobs, except writes.
+   network, a language server or an external program; bounded by `BLOCKING_MAX`), **serial**
+   (git writes, keyed by repository: one at a time per repository in submission order, each
+   repository's writes on a thread of their own, bounded by neither the compute workers nor
+   `BLOCKING_MAX`, so slow hooks or a signing pinentry never stall open, save or highlighting;
+   also terminal session saves, per panel) or **guaranteed** (askpass prompts, agent requests
+   and turns, stopping and undoing a turn, terminal kill: always start at once).
+3. Whether a kind is a write the user asked for is one predicate, `JobKind::is_write`, and every
+   write policy follows from it ([ADR 0010](adr/0010-audit-corrections.md)). A newer job with the
+   same key replaces an older one for kinds that `replaces()` (never a write); closing a subject
+   (`Scheduler::cancel_subject`, called when a document, a `RepoState` or a view is dropped;
+   `background::cancel_on_release` for windows) cancels its jobs, except writes.
 4. The job runs with a `lector_base::CancelToken`; a panic is caught and becomes
-   `JobError::Panicked`.
+   `JobError::Panicked`. A read whose token was cancelled before it started is skipped; a write
+   runs once queued even then (its result is dropped): only `Scheduler::cancel_key` keeps a
+   queued write from starting, and a write that started runs to completion.
 5. The result is delivered on the main thread as a `BackgroundTask<T>` future of
    `Result<T, JobError>`. A job stays registered under its key and subject until its result is
    taken or dropped, and delivery checks and unregisters in one step, so a job replaced or
    cancelled after it finished still never delivers. Dropping the task cancels the job
-   synchronously.
+   synchronously, except a write's task, which detaches it: closing the panel, tab or window
+   that started a stage, commit, discard, save or undo never loses it.
 6. Below `lector-app`, crates do not schedule: they expose blocking, cancellable functions, and an
    owner thread with short work to hand off calls a `lector_base::thread::TaskRunner` its caller
    supplies (`Scheduler::task_runner`). A runner takes the task or hands it back for the caller
@@ -395,14 +405,19 @@ enumerates the registry and round-trips each undoable one.
 7. Quit (`lector_app::shutdown::shutdown` with `QuitBounds::default()`): cancel every non-write job
    and refuse new ones (`Scheduler::begin_quit`), drain writes (`Scheduler::drain`: 10 s, network
    writes 2 s) while child processes are alive, stop every supervised process tree
-   (`Supervisor::shutdown`), stop the scheduler. Writes given up on are reported in the
-   `ShutdownReport` and the crash log. Terminals are killed by their own quit hook before this
+   (`Supervisor::shutdown`), stop the scheduler. Undoing an agent turn (a local restore) drains
+   fully; stopping a turn gets the network grace. Writes given up on are reported in the
+   `ShutdownReport` and the crash log with their kind, command (`Scheduler::spawn_described`,
+   `background::background_described`), repository and whether they were still running.
+   Terminals are killed by their own quit hook before this
    (`lector_ui_terminal::kill_all`); each kill escalation is a `TerminalKill` job the drain waits
    for.
 
 Lanes, kinds, priorities and the quit policy per kind are in the rustdoc of
-`lector_app::scheduler` and `lector_app::scheduler::key`; the decision is
-[ADR 0003](adr/0003-one-scheduler.md).
+`lector_app::scheduler` and `lector_app::scheduler::key`; the scheduler's lock is never held
+while user code runs (job bodies, runners, cancel hooks, destructors), which debug builds
+assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
+[ADR 0010](adr/0010-audit-corrections.md) items 4 and 5.
 
 ### A credential prompt (askpass)
 1. A network git command (fetch, pull, push) is started by a `git_sync` command. `SyncHost`

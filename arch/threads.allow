@@ -24,4 +24,11 @@ kind:pipe-reader   # pumps a child's stdout/stderr
 kind:pipe-writer   # pumps a child's stdin (outlives the spawn call) without deadlocking against full pipes
 kind:acp-reader   # agent client: ACP connection reader
 kind:picker-worker   # the file picker's matching thread
-kind:mock-server   # mock forge server used by tests
+kind:mock-server   # mock forge server used by tests and examples (test-only, see below; kept here because the lector-base unit test compares this list with ThreadKind::ALL)
+
+# Kinds that only test-support code may spawn (ADR 0010 item 8). `lector_forge::mock` is compiled
+# into the library so that integration tests and examples can use it; no production code may
+# spawn this kind. The checker fails when a `test-only` kind is spawned outside the `test-file`
+# globs, and when either entry matches nothing.
+test-only:mock-server   # the mock forge server's accept loop and connections
+test-file:crates/lector-forge/src/mock.rs   # the only file that may spawn a test-only kind

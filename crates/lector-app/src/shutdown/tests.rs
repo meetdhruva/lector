@@ -1,5 +1,5 @@
 use super::*;
-use crate::scheduler::{JobKey, Priority, Subject};
+use crate::scheduler::{JobKey, JobKind, Priority, Subject};
 use lector_process::Supervisor;
 // Only the Unix-only git test uses these.
 #[cfg(unix)]
@@ -122,7 +122,8 @@ fn quit_gives_up_on_a_hung_network_write_within_its_grace_and_reports_it() {
     );
     let took = started.elapsed();
     assert!(took < Duration::from_secs(2), "{took:?}");
-    assert_eq!(report.abandoned, vec![JobKind::ForgeWrite]);
+    let kinds: Vec<JobKind> = report.abandoned.iter().map(|a| a.kind).collect();
+    assert_eq!(kinds, vec![JobKind::ForgeWrite]);
     let reports = crate::health::report_files(crashes.path());
     assert_eq!(reports.len(), 1);
     let text = std::fs::read_to_string(&reports[0]).expect("report");

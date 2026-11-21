@@ -553,6 +553,8 @@ fn fetch() -> FnCommand {
             ),
         )
         .not_undoable("Fetching only moves remote-tracking branches to where the remote has them; the next fetch would move them again.")
+        .uses_network()
+        .uses_credentials()
         .with_ui_flow("git::Fetch"),
         |cx, args| {
             let repo = cx.require_repo()?;
@@ -602,6 +604,8 @@ fn pull() -> FnCommand {
             ),
         )
         .undoable()
+        .uses_network()
+        .uses_credentials()
         .with_ui_flow("git::Pull"),
         |cx, args| {
             let repo = cx.require_repo()?;
@@ -676,6 +680,8 @@ fn push() -> FnCommand {
             ),
         )
         .not_undoable("A push changes the remote, which others may already have fetched.")
+        .uses_network()
+        .uses_credentials()
         .with_ui_flow("git::Push"),
         |cx, args| {
             let repo = cx.require_repo()?;

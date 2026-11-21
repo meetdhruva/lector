@@ -650,8 +650,8 @@ impl AgentPanel {
         }
         cx.notify();
         let worker = session.clone();
-        // A write the user asked for (and talks to the agent): never replaced or dropped.
-        let key = view_key(JobKind::AgentControl, cx.entity_id());
+        // A local restore the user asked for: never replaced or dropped, drained fully at quit.
+        let key = view_key(JobKind::AgentUndo, cx.entity_id());
         let work = background(cx, key, Priority::Visible, move |_| {
             worker.undo_turn(id, force, Source::Ui)
         });

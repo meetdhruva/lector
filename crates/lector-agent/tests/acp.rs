@@ -72,6 +72,10 @@ struct Fx {
 
 impl Fx {
     fn new() -> Option<Fx> {
+        Fx::with_git(true)
+    }
+
+    fn with_git(with_git: bool) -> Option<Fx> {
         hermetic_git();
         let py = python()?;
         let work = tempfile::tempdir().unwrap();
@@ -80,9 +84,11 @@ impl Fx {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
-        git(&root, &["init", "-q", "-b", "main"]);
-        git(&root, &["add", "-A"]);
-        git(&root, &["commit", "-q", "-m", "init"]);
+        if with_git {
+            git(&root, &["init", "-q", "-b", "main"]);
+            git(&root, &["add", "-A"]);
+            git(&root, &["commit", "-q", "-m", "init"]);
+        }
         let core = AppCore::open(CoreOptions {
             data_dir: Some(data.path().to_path_buf()),
             ..CoreOptions::for_tests()
@@ -590,5 +596,72 @@ fn ignored_files_are_backed_up_and_dangling_links_refused() {
         .undo(entry.id, &cx, lector_app::journal::UndoMode::Check)
         .unwrap();
     assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
+    s.stop();
+}
+
+/// The audit's case (ADR 0010, item 1): a project that commits `docs -> .git` and
+/// `cfg -> .git/config`. Every write and read through them is refused and `.git` is untouched.
+#[cfg(unix)]
+#[test]
+fn links_into_git_are_refused_for_reads_and_writes() {
+    let fx = fx!();
+    std::os::unix::fs::symlink(".git", fx.root.join("docs")).unwrap();
+    std::os::unix::fs::symlink(".git/config", fx.root.join("cfg")).unwrap();
+    let config_before = fs::read(fx.root.join(".git/config")).unwrap();
+    let s = fx.start();
+    let t = fx.run(
+        &s,
+        "write docs/hooks/pre-commit evil\nwrite docs/config evil\nwrite docs/newdir/x evil\nwrite cfg evil\nread docs/config\nread cfg",
+    );
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 4, "{answer}");
+    assert_eq!(answer.matches("READ-ERROR:").count(), 2, "{answer}");
+    assert!(!answer.contains("READ:["), "{answer}");
+    assert!(!fx.root.join(".git/hooks/pre-commit").exists());
+    assert!(!fx.root.join(".git/newdir").exists());
+    assert_eq!(
+        fs::read(fx.root.join(".git/config")).unwrap(),
+        config_before
+    );
+    assert!(t.written.is_empty());
+    s.stop();
+}
+
+/// ADR 0010, item 6: in a folder without git there is no shadow repository, so no backup and
+/// no undo; the write is refused and the file is unchanged. Reads still work.
+#[test]
+fn writes_in_a_folder_without_git_are_refused() {
+    let Some(fx) = Fx::with_git(false) else {
+        eprintln!("python3 not found: skipping");
+        return;
+    };
+    let s = fx.start();
+    let t = fx.run(
+        &s,
+        "write a.txt agent\\n\nwrite new.txt agent\\n\nread a.txt",
+    );
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 2, "{answer}");
+    assert!(answer.contains("not a git repository"), "{answer}");
+    assert!(answer.contains("READ:one"), "{answer}");
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+    assert!(fx.read("new.txt").is_none());
+    assert!(t.written.is_empty());
+    s.stop();
+}
+
+/// ADR 0010, item 6: when the backup cannot be taken (here the shadow directory is blocked by a
+/// file, so neither the turn checkpoint nor a per-file backup exists) the write is refused.
+#[test]
+fn writes_whose_backup_fails_are_refused() {
+    let fx = fx!();
+    let data = Journal::of(&fx.core).unwrap().data_dir().to_path_buf();
+    fs::write(data.join("shadow"), "not a directory").unwrap();
+    let s = fx.start();
+    let t = fx.run(&s, "write a.txt agent\\n");
+    let answer = t.answer();
+    assert!(answer.contains("WRITE-ERROR:"), "{answer}");
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+    assert!(t.written.is_empty());
     s.stop();
 }

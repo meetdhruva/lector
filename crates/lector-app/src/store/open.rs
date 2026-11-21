@@ -379,14 +379,7 @@ fn reserve_aside(path: &Path) -> std::io::Result<PathBuf> {
             name.push(format!("-{n}"));
         }
         let candidate = PathBuf::from(name);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(&candidate) {
+        match lector_base::private::create_new(&candidate) {
             Ok(_) => return Ok(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
             Err(e) => return Err(e),

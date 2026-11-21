@@ -181,7 +181,8 @@ impl SessionHealth {
         };
         let path = paths.sessions.join(format!("{}.json", record.id));
         if let Err(e) =
-            fs::create_dir_all(&paths.sessions).and_then(|()| write_record(&path, &record))
+            lector_base::private::create_dir_all(&paths.sessions)
+                .and_then(|()| write_record(&path, &record))
         {
             tracing::warn!("session health: cannot write {}: {e}", path.display());
         }
@@ -223,7 +224,7 @@ impl SessionHealth {
 }
 
 /// Writes `record` to `path` through a temporary file in the same directory, so readers never
-/// see a half-written record.
+/// see a half-written record. The file is owner-only (`lector_base::private`).
 pub(crate) fn write_record(path: &Path, record: &SessionRecord) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(record).map_err(io::Error::other)?;
     let name = path
@@ -231,7 +232,7 @@ pub(crate) fn write_record(path: &Path, record: &SessionRecord) -> io::Result<()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    fs::write(&tmp, json)?;
+    lector_base::private::write(&tmp, &json)?;
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
@@ -293,10 +294,7 @@ fn freeze_abnormal_sessions(dir: &Path) {
         }
         if record.resolved(false) == SessionState::Abnormal {
             // `create_new`: several processes starting at once agree, nobody overwrites.
-            let _ = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&marker);
+            let _ = lector_base::private::create_new(&marker);
         }
     }
 }

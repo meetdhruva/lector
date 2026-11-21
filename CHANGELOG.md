@@ -39,7 +39,20 @@ Changes:
   else is cancelled at once. Before, Lector did not wait for any of them: a save still in progress
   was lost (never half-written: saves replace the file in one step), and a git command still running,
   such as a commit, was killed by the process stop that quitting does. A write that could not finish
-  in time is named in the log and the crash log (`lector health`).
+  in time is named in the log and the crash log (`lector health`), with the command and the
+  repository, and whether it was still running.
+- **Closing a panel, tab or window no longer drops a write you asked for.** A stage, unstage,
+  discard, commit, undo, save or pull-request comment that was still waiting for a worker when its
+  view closed now runs (the result is simply not shown). Before, it was silently skipped.
+- **Commits with slow hooks no longer hold up the editor.** Git writes (which run your hooks and
+  may wait for a signing passphrase) run on threads of their own, one at a time per repository and
+  in the order you made them, instead of on the workers that open, save and highlight files: two
+  slow pre-commit hooks could stall opening a file. Terminal tab saves are kept in order too.
+- **Undoing an agent turn finishes when you quit** (up to the 10-second bound) instead of being cut
+  off after 2 seconds with files partly restored; stopping a turn keeps its short grace.
+- Replacing a background request no longer runs its cleanup (such as telling a language server
+  to drop the old request) while every other background job waits for it, and cleanup that starts
+  more background work can no longer hang the app.
 - **A credential prompt or an agent's question always appears**, even while many network operations
   or agent sessions are busy: what other work waits on no longer queues behind them.
 - **The Changes panel's mode menu no longer runs git when it opens**, and Review Branch no longer

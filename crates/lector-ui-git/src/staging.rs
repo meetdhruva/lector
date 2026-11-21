@@ -14,7 +14,7 @@ use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_git::{Changeset, FileChange, OperationKind};
 use lector_review::review::{self, HunkAction, LineSelection};
-use lector_ui::background::{background, view_key, JobKind, Priority};
+use lector_ui::background::{background_described, view, JobKey, JobKind, Priority, Subject};
 use serde_json::{json, Value};
 
 use crate::activity;
@@ -222,11 +222,12 @@ fn run_op_with(
     };
     let core = lector_ui::commands_bridge::core(cx);
     let (id, args) = op.command(allow_without_backup);
-    // A write the user asked for: never replaced, survives the panel closing.
-    let key = view_key(JobKind::GitWrite, store.entity_id());
+    // A write the user asked for: never replaced, survives the panel closing (dropping its task
+    // detaches it); one git write per repository at a time, in order.
+    let key = git_write_key(store, cx);
     let work = {
         let core = core.clone();
-        background(cx, key, Priority::Visible, move |_| {
+        background_described(cx, key, Priority::Visible, id, move |_| {
             // The journal records every write command; idempotent.
             Journal::install(&core);
             let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
@@ -306,6 +307,20 @@ fn confirm_without_backup(store: &Entity<GitStore>, op: GitOp, reason: String, c
             .detach();
         });
     });
+}
+
+/// The key of a git write on `store`'s repository: the serial lane runs one per repository at a
+/// time, in submission order, whichever view started it.
+pub fn git_write_key(store: &Entity<GitStore>, cx: &App) -> JobKey {
+    let workdir = store
+        .read(cx)
+        .project()
+        .and_then(|p| p.repo().map(|r| r.workdir().to_path_buf()));
+    let subject = match workdir {
+        Some(dir) => Subject::repo(dir),
+        None => view(store.entity_id()),
+    };
+    JobKey::new(JobKind::GitWrite, subject)
 }
 
 /// Paths to unstage for a staged change (both sides of a rename).
@@ -492,5 +507,163 @@ mod tests {
 
     fn wait<T: 'static>(cx: &mut VisualTestContext, task: Task<T>) -> T {
         cx.executor().block_test(task)
+    }
+
+    fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A workspace window on a fresh repository whose `a.txt` has an unstaged change; the core
+    /// keeps its journal in `data`.
+    fn workspace_on_repo<'a>(
+        cx: &'a mut TestAppContext,
+        root: &std::path::Path,
+        data: &std::path::Path,
+    ) -> (
+        Entity<Workspace>,
+        &'a mut VisualTestContext,
+        Entity<GitStore>,
+        AppCore,
+    ) {
+        cx.executor().allow_parking();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Ada Lovelace"]);
+        git(root, &["config", "user.email", "ada@example.com"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(root, &["add", "a.txt"]);
+        git(root, &["commit", "-q", "-m", "initial"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        let mut settings = lector_config::Settings::default();
+        settings.lsp.enabled = false;
+        settings.session.restore = false;
+        let core = AppCore::open(CoreOptions {
+            data_dir: Some(data.to_path_buf()),
+            ..CoreOptions::for_tests()
+        });
+        let global = core.clone();
+        cx.update(|cx| {
+            lector_ui::ThemeState::init(
+                cx,
+                lector_theme::ThemeRegistry::new(),
+                lector_ui::ThemeMode::Dark,
+                lector_theme::Appearance::Dark,
+            );
+            cx.set_global(lector_ui::code_view::EditorSettings::default());
+            cx.set_global(lector_ui::settings::AppSettings {
+                settings: std::sync::Arc::new(settings.clone()),
+                warnings: Default::default(),
+            });
+            cx.set_global(lector_ui::commands_bridge::CoreGlobal(global));
+            crate::init(cx);
+        });
+        let project = Project::open(root, settings).unwrap();
+        let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
+        cx.run_until_parked();
+        let store = cx
+            .update(|_, cx| crate::store_for(ws.entity_id(), cx))
+            .expect("git store for the workspace");
+        (ws, cx, store, core)
+    }
+
+    /// ADR 0010 item 4: closing the window (which drops the panel's `op_task`) right after
+    /// "Stage", before the queued write ran, still stages; a read started the same way is
+    /// cancelled.
+    #[gpui::test]
+    fn closing_the_window_with_a_queued_stage_still_stages(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (_ws, cx, store, _core) = workspace_on_repo(cx, &root, data.path());
+        let read_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cx.update(|window, cx| {
+            let stage = run_op(&store, GitOp::Stage(vec!["a.txt".into()]), cx);
+            let r = read_ran.clone();
+            let key = lector_ui::background::view_key(JobKind::GitChangeset, store.entity_id());
+            let read = lector_ui::background::background(cx, key, Priority::Visible, move |_| {
+                r.store(true, std::sync::atomic::Ordering::SeqCst)
+            });
+            // What closing the Changes panel or the window does to its tasks.
+            drop(stage);
+            drop(read);
+            window.remove_window();
+        });
+        for _ in 0..50 {
+            cx.run_until_parked();
+            if git_out(&root, &["diff", "--cached", "--name-only"]).contains("a.txt") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            git_out(&root, &["diff", "--cached", "--name-only"]).trim(),
+            "a.txt",
+            "the stage happened after the window closed"
+        );
+        assert!(
+            !read_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the read was cancelled"
+        );
+    }
+
+    /// A commit still running (its pre-commit hook sleeps) when its view closes completes,
+    /// and the journal records it (real scheduler threads, the composer's job).
+    #[cfg(unix)]
+    #[gpui::test]
+    fn closing_the_window_during_a_commit_completes_it_and_journals_it(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (_ws, cx, store, core) = workspace_on_repo(cx, &root, data.path());
+        git(&root, &["add", "a.txt"]);
+        let marker = root.join(".git/hook-started");
+        let hook = root.join(".git/hooks/pre-commit");
+        let script = format!("#!/bin/sh\ntouch \"{}\"\nsleep 1\n", marker.display());
+        std::fs::write(&hook, script).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let scheduler = lector_ui::background::Scheduler::new(2);
+        let task = cx.update(|_, cx| {
+            let project = store.read(cx).project().cloned();
+            let core = lector_ui::commands_bridge::core(cx);
+            let key = git_write_key(&store, cx);
+            lector_ui::background::background_on(
+                &scheduler,
+                cx,
+                key,
+                Priority::Visible,
+                move |_| {
+                    Journal::install(&core);
+                    let ctx = CommandContext::new(core.clone(), project, Source::Ui);
+                    core.registry()
+                        .invoke("git.commit", json!({ "message": "closing commit" }), &ctx)
+                        .map(|_| ())
+                },
+            )
+        });
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(std::time::Instant::now() < end, "the hook started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        cx.update(|window, _| {
+            drop(task);
+            window.remove_window();
+        });
+        cx.run_until_parked();
+        assert!(scheduler.wait_idle(std::time::Duration::from_secs(10)));
+        assert!(git_out(&root, &["log", "--format=%s"]).contains("closing commit"));
+        let journal = Journal::of(&core).expect("journal installed");
+        assert!(
+            journal.list(10).iter().any(|e| e.command == "git.commit"),
+            "the commit is journaled"
+        );
     }
 }

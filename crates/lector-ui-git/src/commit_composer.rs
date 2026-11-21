@@ -10,7 +10,7 @@ use gpui::{
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_ui::actions::git as git_actions;
-use lector_ui::background::{background, view_key, JobKind, Priority};
+use lector_ui::background::{background, background_described, view_key, JobKind, Priority};
 use lector_ui::components::text_area::{first_line_chars, TextArea, TextAreaEvent};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
@@ -18,7 +18,7 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
 
-use crate::staging::{command_error_text, git_error_text, notify_repo_changed};
+use crate::staging::{command_error_text, git_error_text, git_write_key, notify_repo_changed};
 use crate::store::{GitStore, GitStoreEvent};
 
 /// Conventional subject length (soft limit) and hard limit.
@@ -286,9 +286,10 @@ impl CommitComposer {
         let core = lector_ui::commands_bridge::core(cx);
         // The registry's `git.commit` (journaled like every write, ADR 0002). Its data has the
         // recorded subject and, for the toast's "Push" button (v0.7), the upstream state.
-        // A write the user asked for: never replaced, survives the composer closing.
-        let key = view_key(JobKind::GitWrite, cx.entity_id());
-        let work = background(cx, key, Priority::Visible, move |_| {
+        // A write the user asked for: never replaced, survives the composer closing (dropping
+        // its task detaches it); serial with the repository's other git writes.
+        let key = git_write_key(&self.store, cx);
+        let work = background_described(cx, key, Priority::Visible, "git.commit", move |_| {
             Journal::install(&core);
             let ctx = CommandContext::new(core.clone(), Some(project), Source::Ui);
             let outcome = core.registry().invoke("git.commit", args, &ctx)?;

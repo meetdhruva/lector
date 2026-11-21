@@ -1,0 +1,60 @@
+# Concepts that have ONE implementation only (arch-check dupes, ADR 0005, ADR 0010).
+#
+# Adding a concept is a few lines: a name, the ADR, the `owner` (path globs of the files that may
+# implement it; `*` stays inside a directory, `**` crosses directories) and name globs for what
+# implements it:
+#   struct = names of `struct` / `enum` / `union` definitions
+#   fn     = names of functions and methods (free or in an impl, trait declarations included)
+#   module = names of a file stem, a directory below `src/`, or an inline `mod`
+# In non-test code, every definition that matches and is not in the owner's files is reported. An
+# owner that does not exist yet is fine: until it does, every match is a duplicate.
+#   delegate = [{ file, fn, why }]: a reviewed thin wrapper of the owner that has one of the names
+#   (the reason is required; an entry whose function is gone is an error).
+
+[[concept]]
+name = "cancel token"
+adr = "0005"
+owner = ["crates/lector-base/**"]
+struct = ["CancelToken"]
+
+[[concept]]
+name = "fuzzy scorer"
+adr = "0005"
+owner = ["crates/lector-base/**", "crates/lector-search/src/picker**"]
+fn = ["fuzzy", "fuzzy_*", "*_fuzzy"]
+module = ["fuzzy"]
+
+[[concept]]
+name = "path confinement"
+adr = "0010"
+# `lector_fs::confine` is the only code that decides whether a caller-supplied path is inside a
+# root (ADR 0010 item 1). Change the owner here if the module moves.
+owner = ["crates/lector-fs/src/confine**"]
+fn = ["confine*", "resolve_in_root", "*_in_root"]
+module = ["confine*"]
+# Reviewed wrappers: each only builds or calls `lector_fs::Confinement` and decides nothing
+# about what is inside a root. A new function with one of the names above is a duplicate until a
+# reviewer reads it and lists it here; a delegate whose function is gone fails as stale.
+delegate = [
+  { file = "crates/lector-agent/src/paths.rs", fn = "confine", why = "one line: lector_app::commands::confinement(..).check(path, access)" },
+  { file = "crates/lector-app/src/commands/mod.rs", fn = "confine_path", why = "confine_as(path, Access::Read)" },
+  { file = "crates/lector-app/src/commands/mod.rs", fn = "confine_write_path", why = "confine_as(path, Access::Write)" },
+  { file = "crates/lector-app/src/commands/mod.rs", fn = "confine_as", why = "returns the path unchanged for trusted callers, else lector_fs::Confinement::check" },
+  { file = "crates/lector-app/src/commands/mod.rs", fn = "confinement", why = "configures lector_fs::Confinement (forbid data, config and shadow dirs); the rules are lector_fs's" },
+  { file = "crates/lector-app/src/commands/git_write.rs", fn = "confine_rel", why = "calls CommandContext::confine_path for sandboxed callers" },
+]
+
+[[concept]]
+name = "credential redaction"
+adr = "0010"
+# One place decides what in a git message or URL is a credential.
+owner = ["crates/lector-git/src/sync.rs"]
+fn = ["redact_credentials*", "redact_url*", "redact_scheme_urls", "redact_scp_like", "scrub_credentials*", "strip_userinfo*", "mask_secret*", "mask_token*"]
+
+[[concept]]
+name = "debounce"
+adr = "0003"
+# The scheduler owns debouncing (ADR 0003); other code asks it for a debounced job.
+owner = ["crates/lector-app/src/scheduler/**"]
+struct = ["Debounce*"]
+fn = ["*debounce_loop*", "run_debounce*", "debounce_timer*"]

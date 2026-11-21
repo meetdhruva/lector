@@ -345,13 +345,14 @@ fn file_name(time: u64) -> String {
 }
 
 /// Writes `text` as a new report in `dir` (created if needed) and prunes the directory to the
-/// newest `keep` reports. The file appears atomically.
+/// newest `keep` reports. The file appears atomically. The directory is `0700` and the report
+/// `0600` (`lector_base::private`).
 pub fn write_report(dir: &Path, time: u64, text: &str, keep: usize) -> io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
+    lector_base::private::create_dir_all(dir)?;
     let name = file_name(time);
     let tmp = dir.join(format!(".{name}.tmp"));
     let path = dir.join(&name);
-    fs::write(&tmp, text)?;
+    lector_base::private::write(&tmp, text.as_bytes())?;
     if let Err(e) = fs::rename(&tmp, &path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);

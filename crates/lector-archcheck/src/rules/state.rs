@@ -1,32 +1,50 @@
 //! `state` (ADR 0004): Lector-owned state lives in the database, not in ad-hoc files.
 //!
-//! **Heuristic.** In non-test code outside the modules listed in `arch/state.allow` the rule
-//! looks at statements (token runs between `;`, `{` and `}`) and reports:
+//! **Heuristic.** In non-test code outside the files listed in `arch/state.allow` the rule looks
+//! at statements (token runs between `;`, `{` and `}`) and reports:
 //!
-//! 1. a `.join(...)` whose argument contains a string literal ending in `.json`, `.redb`,
-//!    `.db` or `.toml`, in a statement that also mentions `data_dir`, `state_dir` or
-//!    `config_dir` (a call, a field, a parameter of that name) or a local variable that was
-//!    bound from such an expression earlier in the same block;
-//! 2. a `.join(format!("...{}.json", ..))` (a file named per key, the shape of a hand-rolled
-//!    state store) with any receiver;
-//! 3. otherwise, `fs::write`, `File::create`, `File::create_new` or `OpenOptions` in a
-//!    statement that mentions a string literal ending in `.json`.
+//! 1. **a file or directory created under a path derived from a data/config/state dir**,
+//!    whatever its name or extension: a file-creating call (`fs::write`, `fs::copy`,
+//!    `fs::rename`, `fs::create_dir*`, `File::create*`, `OpenOptions` with write/append/create,
+//!    `lector_fs::write_atomic`, through any alias) in a statement that mentions such a path. A
+//!    path is *derived* when it comes from `data_dir()` / `config_dir()` / `state_dir()` / any
+//!    other `pub fn` of `lector-config`'s `paths.rs` that returns a `PathBuf` (derived from the
+//!    source, so a new directory helper counts at once; the ones that only join an exempt
+//!    `literal:` name, `settings_file()` and `keymap_file()`, do not), a parameter or field named
+//!    like one, or a local variable that was bound or mutated from such an expression earlier in
+//!    the function (`let mut p = data_dir(); p.push("x"); fs::write(&p, ..)`; `let q =
+//!    p.with_extension("bin")`; `p = data_dir().join(..)`; `p.set_file_name(..)`). Scoping is by
+//!    block: a binding is visible only inside the block that declared it, and a later
+//!    `let dir = <untainted>` shadows an earlier tainted `dir`;
+//! 2. a `.join(...)` whose argument contains a string literal ending in a state-file extension
+//!    (`.json`, `.redb`, `.db`, `.toml`, `.ron`, `.bin`, `.dat`, `.yaml`, `.yml`, `.sqlite*`,
+//!    `.jsonl`, `.ndjson`, `.cbor`, `.msgpack`), directly or through a local variable bound from a
+//!    literal or `format!` earlier (`let name = format!("{}-state.bin", n);
+//!    data_dir().join(name)`), in a statement that also mentions a derived dir;
+//! 3. a `.join(format!("...{}.json", ..))` (a file named per key, the shape of a hand-rolled state
+//!    store) with any receiver;
+//! 4. otherwise, a file-creating call in a statement that mentions a string literal with a
+//!    state-file extension.
 //!
-//! In (1), a name declared in the same file as `const NAME: &str = "x.json";` (or `static`)
-//! counts as its literal, so `data_dir().join(STATE_FILE)` is caught too.
+//! In (2) a name declared in the same file as `const NAME: &str = "x.json";` (or `static`) counts
+//! as its literal. File names listed as `literal:<name>` in the allow file (`settings.toml`,
+//! `keymap.toml`: user-edited files, ADR 0004 decision 2) are exempt.
 //!
-//! File names listed as `literal:<name>` in the allow file (`settings.toml`, `keymap.toml`:
-//! user-edited files, ADR 0004 decision 2) are exempt from (1).
+//! Allowance hygiene: a file entry that exempts nothing and a `literal:` entry that exempted
+//! nothing are violations.
 //!
-//! What it cannot see: a file name held in a `const` of another file, or built by `format!`
-//! from a variable;
-//! a path received as a function parameter with another name; a path joined across two
-//! statements through a field; persistence through a library that picks its own path;
-//! writes of files with other extensions. Expect misses rather than false positives.
+//! What it cannot see: a path passed to a helper function that does the write (the parameter is
+//! then a plain name; the helper's own file is checked only when it names a dir or a state
+//! literal itself), a path built across two statements through a field or a collection, a file
+//! name held in a `const` of another file, persistence through a library that picks its own path,
+//! and writes in macro bodies. Expect misses rather than false positives.
 
+use crate::alias::{Globals, Resolver};
 use crate::config::{AllowList, Config};
+use crate::items::fn_items;
 use crate::lexer::TokKind;
 use crate::report::{RuleOutput, Unit, Violation};
+use crate::rules::detect::fs_writes;
 use crate::rules::str_value;
 use crate::source::SourceFile;
 
@@ -34,13 +52,48 @@ use crate::source::SourceFile;
 pub const RULE: &str = "state";
 
 const DIR_NAMES: &[&str] = &["data_dir", "state_dir", "config_dir"];
-const STATE_EXTENSIONS: &[&str] = &[".json", ".redb", ".db", ".toml"];
+const STATE_EXTENSIONS: &[&str] = &[
+    ".json", ".redb", ".db", ".toml", ".ron", ".bin", ".dat", ".yaml", ".yml", ".sqlite",
+    ".sqlite3", ".jsonl", ".ndjson", ".cbor", ".msgpack",
+];
+const PATH_PATH: &str = "crates/lector-config/src/paths.rs";
+const MUTATORS: &[&str] = &["push", "extend", "set_file_name", "set_extension"];
 
 /// Run the rule over all files.
 pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
     let allow = cfg.allow("state");
-    let found = files.iter().flat_map(|f| scan_file(f, &allow)).collect();
+    let globals = Globals::build(files);
+    let sources = derive_sources(files, &allow);
+    let mut found: Vec<Violation> = files
+        .iter()
+        .flat_map(|f| scan_file_with(f, &allow, &globals, &sources))
+        .collect();
+    found.extend(allow.stale_violations(RULE, &|_| false));
     RuleOutput::new(RULE, found, Unit::Count)
+}
+
+/// Names that yield a path under the data/config/state directories: the fixed ones plus every
+/// `pub fn ... -> PathBuf` of `lector-config`'s `paths.rs` that does not just name an exempt file.
+pub fn derive_sources(files: &[SourceFile], allow: &AllowList) -> Vec<String> {
+    let mut out: Vec<String> = DIR_NAMES.iter().map(|s| (*s).to_string()).collect();
+    let exempt = allow.tagged("literal");
+    for f in files.iter().filter(|f| f.path == PATH_PATH) {
+        for it in fn_items(f) {
+            let returns_path = (it.ret.0..it.ret.1).any(|k| f.tok(k) == "PathBuf");
+            if !it.is_pub || !returns_path || f.is_test(it.name_idx) {
+                continue;
+            }
+            let names_exempt = it.body.is_some_and(|(a, b)| {
+                (a..b).any(|k| {
+                    f.tokens()[k].kind == TokKind::Str && exempt.contains(&str_value(f.tok(k)))
+                })
+            });
+            if !names_exempt && !out.contains(&it.name) {
+                out.push(it.name.clone());
+            }
+        }
+    }
+    out
 }
 
 struct Chunk {
@@ -72,6 +125,10 @@ fn is_str(f: &SourceFile, i: usize) -> bool {
     f.tokens().get(i).is_some_and(|t| t.kind == TokKind::Str)
 }
 
+fn is_ident(f: &SourceFile, i: usize) -> bool {
+    f.tokens().get(i).is_some_and(|t| t.kind == TokKind::Ident)
+}
+
 /// `const NAME: &str = "...";` / `static NAME: &str = "...";` items of non-test code:
 /// (name, literal value).
 fn named_file_literals(f: &SourceFile) -> Vec<(String, String)> {
@@ -82,12 +139,7 @@ fn named_file_literals(f: &SourceFile) -> Vec<(String, String)> {
             continue;
         }
         let name = i + 1;
-        if !f
-            .tokens()
-            .get(name)
-            .is_some_and(|t| t.kind == TokKind::Ident)
-            || f.tok(name + 1) != ":"
-        {
+        if !is_ident(f, name) || f.tok(name + 1) != ":" {
             continue;
         }
         // The type must mention `str`, and the value must be one string literal.
@@ -107,13 +159,40 @@ fn named_file_literals(f: &SourceFile) -> Vec<(String, String)> {
     out
 }
 
-/// Findings in one file.
+/// A local variable seen so far.
+struct Bind {
+    name: String,
+    block: usize,
+    /// Holds a path under a data/config/state dir.
+    tainted: bool,
+    /// String literals of the expressions it was bound from.
+    lits: Vec<String>,
+}
+
+fn has_state_ext(v: &str) -> bool {
+    STATE_EXTENSIONS.iter().any(|e| v.ends_with(e))
+}
+
+/// Findings in one file (no workspace table, the fixed dir names).
 pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
-    if f.test_only || allow.matches_path(&f.path) {
+    let sources: Vec<String> = DIR_NAMES.iter().map(|s| (*s).to_string()).collect();
+    scan_file_with(f, allow, &Globals::default(), &sources)
+}
+
+/// Findings in one file.
+pub fn scan_file_with(
+    f: &SourceFile,
+    allow: &AllowList,
+    globals: &Globals,
+    sources: &[String],
+) -> Vec<Violation> {
+    if f.test_only {
         return Vec::new();
     }
     let exempt: Vec<&str> = allow.tagged("literal");
     let named = named_file_literals(f);
+    let r = Resolver::new(f, globals);
+    let sinks = fs_writes(f, &r, true);
     let mut out = Vec::new();
     // Block structure: every `{` opens a block with a parent; `block_at[i]` is the innermost
     // block containing token `i`. A binding is visible only inside the block that declared it.
@@ -145,66 +224,113 @@ pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
             b = parent[b];
         }
     };
-    // `let` bindings seen so far: (name, declaring block, holds a dir). The latest visible one
-    // wins, so `let dir = <untainted>` shadows an earlier tainted `dir`.
-    let mut bindings: Vec<(String, usize, bool)> = Vec::new();
+    let mut binds: Vec<Bind> = Vec::new();
     for c in chunks(f) {
         let here = block_at[c.start];
         if (c.start..c.end).all(|i| f.is_test(i)) {
             continue;
         }
-        let is_dir = |t: &str, bindings: &[(String, usize, bool)]| {
-            DIR_NAMES.contains(&t)
-                || bindings
-                    .iter()
-                    .rev()
-                    .find(|(n, blk, _)| n == t && visible(*blk, here))
-                    .is_some_and(|(_, _, held)| *held)
+        let latest = |t: &str, binds: &[Bind]| {
+            binds
+                .iter()
+                .rposition(|b| b.name == t && visible(b.block, here))
         };
-        // For `let name = <expr>` only the expression counts; the new name is bound afterwards.
+        let is_dir = |t: &str, binds: &[Bind]| {
+            sources.iter().any(|s| s == t) || latest(t, binds).is_some_and(|k| binds[k].tainted)
+        };
+        // `let name = <expr>`, `name = <expr>` and `name.push(<expr>)`: only the expression
+        // counts; the name is bound or updated afterwards.
         let mut scan_from = c.start;
-        let mut binding: Option<String> = None;
+        let mut binding: Option<(String, bool)> = None; // (name, is a new `let`)
         if f.tok(c.start) == "let" {
             let mut k = c.start + 1;
             if f.tok(k) == "mut" {
                 k += 1;
             }
             let eq = (k..c.end).find(|j| f.tok(*j) == "=");
-            if let (Some(eq), true) = (
-                eq,
-                f.tokens().get(k).is_some_and(|t| t.kind == TokKind::Ident),
-            ) {
+            if let (Some(eq), true) = (eq, is_ident(f, k)) {
                 scan_from = eq + 1;
-                binding = Some(f.tok(k).to_string());
+                binding = Some((f.tok(k).to_string(), true));
+            }
+        } else if is_ident(f, c.start) && f.tok(c.start + 1) == "=" && f.tok(c.start + 2) != "=" {
+            scan_from = c.start + 2;
+            binding = Some((f.tok(c.start).to_string(), false));
+        } else if is_ident(f, c.start)
+            && f.tok(c.start + 1) == "."
+            && MUTATORS.contains(&f.tok(c.start + 2))
+            && f.tok(c.start + 3) == "("
+        {
+            scan_from = c.start + 3;
+            binding = Some((f.tok(c.start).to_string(), false));
+        }
+        let has_source = (scan_from..c.end).any(|i| is_dir(f.tok(i), &binds));
+        let mut lits: Vec<String> = (scan_from..c.end)
+            .filter(|i| is_str(f, *i))
+            .map(|i| str_value(f.tok(i)).to_string())
+            .collect();
+        // Literals of tainted or literal-holding variables used in the expression.
+        for i in scan_from..c.end {
+            if let Some(k) = latest(f.tok(i), &binds) {
+                lits.extend(binds[k].lits.iter().cloned());
             }
         }
-        let has_source = (scan_from..c.end).any(|i| is_dir(f.tok(i), &bindings));
-        if let Some(name) = binding {
-            bindings.push((name, here, has_source));
+        if let Some((name, is_let)) = binding {
+            let existing = (!is_let).then(|| latest(&name, &binds)).flatten();
+            match existing {
+                Some(k) => {
+                    binds[k].tainted |= has_source;
+                    binds[k].lits.extend(lits.iter().cloned());
+                }
+                None => binds.push(Bind {
+                    name,
+                    block: here,
+                    tainted: has_source,
+                    lits: lits.clone(),
+                }),
+            }
         }
+        let mentions_dir = (c.start..c.end).any(|i| is_dir(f.tok(i), &binds));
+        // The literals the whole statement can see: its own and those of the variables in it.
+        let mut stmt_lits: Vec<String> = (c.start..c.end)
+            .filter(|i| is_str(f, *i))
+            .map(|i| str_value(f.tok(i)).to_string())
+            .collect();
+        for i in c.start..c.end {
+            if let Some(k) = latest(f.tok(i), &binds) {
+                stmt_lits.extend(binds[k].lits.iter().cloned());
+            }
+        }
+        let exempted = stmt_lits.iter().find(|l| exempt.contains(&l.as_str()));
         let mut found_join = false;
         for i in c.start..c.end {
             if f.is_test(i) || !f.seq(i, &[".", "join", "("]) {
                 continue;
             }
             let close = f.close_of(i + 2);
-            let literal = (i + 3..close).find_map(|k| {
-                let v = if is_str(f, k) {
-                    str_value(f.tok(k))
-                } else {
-                    named
-                        .iter()
-                        .find(|(n, _)| n == f.tok(k) && f.tok(k + 1) != "(")
-                        .map(|(_, v)| v.as_str())?
-                };
-                (STATE_EXTENSIONS.iter().any(|e| v.ends_with(e)) && !exempt.contains(&v))
-                    .then(|| v.to_string())
-            });
-            let Some(lit) = literal else { continue };
+            let mut candidates: Vec<String> = Vec::new();
+            for k in i + 3..close {
+                if is_str(f, k) {
+                    candidates.push(str_value(f.tok(k)).to_string());
+                } else if let Some((_, v)) = named
+                    .iter()
+                    .find(|(n, _)| n == f.tok(k) && f.tok(k + 1) != "(")
+                {
+                    candidates.push(v.clone());
+                } else if let Some(b) = latest(f.tok(k), &binds) {
+                    candidates.extend(binds[b].lits.iter().cloned());
+                }
+            }
+            let Some(lit) = candidates.iter().find(|v| has_state_ext(v)).cloned() else {
+                continue;
+            };
+            if exempt.contains(&lit.as_str()) {
+                allow.mark_tagged("literal", &lit);
+                continue;
+            }
             let per_key = (i + 3..close).any(|k| f.seq(k, &["format", "!"])) && lit.contains('{');
-            if has_source || per_key {
+            if mentions_dir || per_key {
                 found_join = true;
-                let what = if has_source {
+                let what = if mentions_dir {
                     "path under a data/config/state dir"
                 } else {
                     "per-key state file"
@@ -217,30 +343,43 @@ pub fn scan_file(f: &SourceFile, allow: &AllowList) -> Vec<Violation> {
                 ));
             }
         }
-        if !found_join {
-            let json_literal =
-                (c.start..c.end).any(|i| is_str(f, i) && str_value(f.tok(i)).ends_with(".json"));
-            if json_literal {
-                for i in c.start..c.end {
-                    if f.is_test(i) {
-                        continue;
-                    }
-                    let sink = f.seq(i, &["fs", "::", "write"])
-                        || f.seq(i, &["File", "::", "create"])
-                        || f.seq(i, &["File", "::", "create_new"])
-                        || (f.tok(i) == "OpenOptions" && f.tok(i + 1) == "::");
-                    if sink {
-                        out.push(Violation::new(
-                            RULE,
-                            &f.path,
-                            f.line(i),
-                            "file write whose path is a `*.json` literal; persist through lector_app::store (ADR 0004)",
-                        ));
-                        break;
-                    }
+        // File-creating calls.
+        let chunk_sinks: Vec<_> = sinks
+            .iter()
+            .filter(|h| h.tok >= c.start && h.tok < c.end && !f.is_test(h.tok))
+            .filter(|h| {
+                h.what != "OpenOptions"
+                    || (c.start..c.end).any(|i| {
+                        matches!(
+                            f.tok(i),
+                            "write" | "append" | "create" | "create_new" | "truncate"
+                        )
+                    })
+            })
+            .collect();
+        if let (false, Some(h)) = (found_join, chunk_sinks.first()) {
+            let state_literal = stmt_lits.iter().any(|l| has_state_ext(l));
+            if mentions_dir || state_literal {
+                if let Some(l) = exempted {
+                    allow.mark_tagged("literal", l);
+                } else {
+                    let why = if mentions_dir {
+                        "a path under a data/config/state dir"
+                    } else {
+                        "a path with a state-file name"
+                    };
+                    out.push(Violation::new(
+                        RULE,
+                        &f.path,
+                        f.line(h.tok),
+                        format!("`{}` creates a file at {why}; persist through lector_app::store (ADR 0004)", h.what),
+                    ));
                 }
             }
         }
+    }
+    if !out.is_empty() && allow.exempt_path(&f.path) {
+        out.clear();
     }
     out
 }
@@ -361,5 +500,124 @@ mod tests {
     fn strings_and_comments_do_not_trigger() {
         let src = "// data_dir().join(\"a.json\")\nfn a() { let s = \"data_dir().join(\\\"a.json\\\")\"; }";
         assert!(run("crates/x/src/a.rs", src).is_empty());
+    }
+
+    // Bypasses the audit demonstrated: each of these used to pass.
+
+    #[test]
+    fn bypass_a_path_built_with_push_and_written() {
+        let src = "fn save() {\n    let mut p = data_dir();\n    p.push(\"x.json\");\n    std::fs::write(&p, data).ok();\n}";
+        let v = run("crates/x/src/a.rs", src);
+        assert_eq!(v.iter().map(|v| v.line).collect::<Vec<_>>(), [4], "{v:?}");
+    }
+
+    #[test]
+    fn bypass_per_key_file_with_a_bin_extension() {
+        let src = "fn p(n: u32) -> PathBuf { data_dir().join(format!(\"{}-state.bin\", n)) }";
+        assert_eq!(run("crates/x/src/a.rs", src).len(), 1);
+        let ron = "fn p() -> PathBuf { config_dir().join(\"layout.ron\") }";
+        assert_eq!(run("crates/x/src/a.rs", ron).len(), 1);
+    }
+
+    #[test]
+    fn bypass_a_file_name_formatted_in_an_earlier_statement() {
+        let src = "fn p(n: u32) {\n    let name = format!(\"{}-state.bin\", n);\n    let q = data_dir().join(name);\n    let r = data_dir().join(&name);\n}";
+        let v = run("crates/x/src/a.rs", src);
+        assert_eq!(
+            v.iter().map(|v| v.line).collect::<Vec<_>>(),
+            [3, 4],
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn bypass_any_extension_counts_when_a_file_is_created_under_a_dir() {
+        let src = "fn a() {\n    let p = data_dir().join(\"cache\");\n    std::fs::write(&p, b);\n    let q = p.with_extension(\"anything\");\n    File::create(q);\n    std::fs::create_dir_all(config_dir().join(\"x\"));\n    let mut o = OpenOptions::new();\n    o.append(true);\n}";
+        let v = run("crates/x/src/a.rs", src);
+        assert_eq!(
+            v.iter().map(|v| v.line).collect::<Vec<_>>(),
+            [3, 5, 6],
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn taint_follows_assignments_and_mutations_and_aliased_sinks() {
+        let src = "use std::fs as f;\nfn a(project: &Path) {\n    let mut p = project.to_path_buf();\n    p = data_dir();\n    p.set_file_name(\"z\");\n    f::write(&p, b);\n}\nfn b(project: &Path) {\n    let mut p = project.to_path_buf();\n    p.push(data_dir());\n    f::write(p, b);\n}";
+        let v = run("crates/x/src/a.rs", src);
+        assert_eq!(
+            v.iter().map(|v| v.line).collect::<Vec<_>>(),
+            [6, 11],
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn writes_elsewhere_are_not_state() {
+        let src = "fn a(project: &Path, dir: &Path) {\n    let p = project.join(\"out\");\n    std::fs::write(p, b);\n    std::fs::write(dir.join(\"x\"), b);\n    let q = data_dir();\n    let q = project;\n    std::fs::write(q, b);\n    let t = data_dir().join(\"logs\");\n    let n = t.exists();\n}";
+        assert!(
+            run("crates/x/src/a.rs", src).is_empty(),
+            "{:?}",
+            run("crates/x/src/a.rs", src)
+        );
+    }
+
+    #[test]
+    fn exempt_literals_stay_exempt_for_writes_and_are_marked_used() {
+        let allow = AllowList::from_entries(["literal:settings.toml"]);
+        let src = "fn a() { let p = config_dir().join(\"settings.toml\"); std::fs::write(&p, b); }";
+        assert!(scan_file(&file("crates/x/src/a.rs", src), &allow).is_empty());
+        assert!(allow.unused().is_empty());
+        let other = AllowList::from_entries(["literal:keymap.toml"]);
+        assert_eq!(scan_file(&file("crates/x/src/a.rs", src), &other).len(), 2);
+        assert_eq!(other.unused().len(), 1);
+    }
+
+    #[test]
+    fn file_allowances_are_narrow_and_stale_ones_fail() {
+        let files = [
+            file(
+                "crates/lector-app/src/store/db.rs",
+                "fn p() { data_dir().join(\"lector.redb\"); }",
+            ),
+            file(
+                "crates/lector-app/src/store/new_file.rs",
+                "fn p() { data_dir().join(\"x.bin\"); }",
+            ),
+            file("crates/lector-app/src/health/gone.rs", "fn p() {}"),
+        ];
+        let mut cfg = Config::default();
+        cfg.set_allow(
+            "state",
+            AllowList::from_entries([
+                "crates/lector-app/src/store/db.rs",
+                "crates/lector-app/src/health/gone.rs",
+            ]),
+        );
+        let out = check(&files, &cfg);
+        let msgs: Vec<String> = out
+            .violations
+            .iter()
+            .map(|v| format!("{}: {}", v.file, v.message))
+            .collect();
+        assert_eq!(out.violations.len(), 2, "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("store/new_file.rs")));
+        assert!(msgs
+            .iter()
+            .any(|m| m.contains("stale allowance") && m.contains("gone.rs")));
+    }
+
+    #[test]
+    fn sources_are_derived_from_lector_config_paths() {
+        let paths = file(
+            "crates/lector-config/src/paths.rs",
+            "pub fn config_dir() -> PathBuf { x }\npub fn cache_dir() -> PathBuf { y }\npub fn settings_file() -> PathBuf { config_dir().join(\"settings.toml\") }\npub fn portable_root() -> Option<&'static Path> { None }\nfn private_dir() -> PathBuf { z }",
+        );
+        let allow = AllowList::from_entries(["literal:settings.toml"]);
+        let sources = derive_sources(&[paths], &allow);
+        assert!(sources.contains(&"cache_dir".to_string()));
+        assert!(!sources.contains(&"settings_file".to_string()));
+        assert!(!sources.contains(&"portable_root".to_string()));
+        assert!(!sources.contains(&"private_dir".to_string()));
     }
 }

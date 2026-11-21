@@ -183,10 +183,28 @@ fn path_args(cx: &CommandContext, repo: &Repo, args: &Value) -> anyhow::Result<V
     if out.is_empty() {
         bail!("no paths given");
     }
+    for rel in &out {
+        confine_rel(cx, repo, rel)?;
+    }
     Ok(out)
 }
 
+/// For sandboxed callers (MCP, agents): the path must pass [`CommandContext::confine_path`]
+/// (inside the project, outside `.git`, symlinks resolved).
+fn confine_rel(cx: &CommandContext, repo: &Repo, rel: &str) -> anyhow::Result<()> {
+    if cx.is_sandboxed() {
+        cx.confine_path(repo.workdir().join(rel))?;
+    }
+    Ok(())
+}
+
 fn one_path(cx: &CommandContext, repo: &Repo, args: &Value) -> anyhow::Result<String> {
+    let rel = one_path_unchecked(cx, repo, args)?;
+    confine_rel(cx, repo, &rel)?;
+    Ok(rel)
+}
+
+fn one_path_unchecked(cx: &CommandContext, repo: &Repo, args: &Value) -> anyhow::Result<String> {
     match args.get("path").and_then(Value::as_str) {
         Some(p) => rel_path(repo, p),
         None => {
@@ -980,8 +998,14 @@ fn accept_file() -> FnCommand {
             )?;
             let edits = conflicts::resolve_all(&text, &parse.regions, resolution);
             let resolved = conflicts::apply_edits(&text, &edits);
-            lector_fs::write_atomic(&abs, resolved.as_bytes())
-                .with_context(|| format!("cannot write {rel}"))?;
+            match cx.save_confinement()? {
+                // Sandboxed callers never write through a link.
+                Some(c) => c
+                    .write(&abs)?
+                    .write(resolved.as_bytes(), lector_fs::CreateDirs::No)?,
+                None => lector_fs::write_atomic(&abs, resolved.as_bytes())
+                    .with_context(|| format!("cannot write {rel}"))?,
+            }
             Ok(finish(Outcome::new(summary), files_undo(backup, &rels), repo, &rels))
         },
     )

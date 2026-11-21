@@ -4,8 +4,12 @@
 //!
 //! Commands act on the project's current session ([`AgentManager::session_for`]).
 //! `agent.start`, `agent.prompt`, `agent.undo_turn`, `agent.answer_permission` and
-//! `agent.send_comments` are `writes = true` (they lead to file writes; MCP needs
-//! `--allow-writes`). The agent's own writes and every turn are journaled by the session
+//! `agent.send_comments` are `writes = true` (they lead to file writes). Who may run them
+//! (ADR 0010, item 3): `agent.start`, `agent.prompt`, `agent.cancel` and `agent.send_comments`
+//! steer an agent and are `Sources::Interactive` (the GUI and `lector run`, never MCP clients or
+//! agents, with or without `--allow-writes`); `agent.answer_permission` answers for the user
+//! and is `Sources::UiOnly`; `agent.undo_turn` is a local write any source with write access
+//! may run. The agent's own writes and every turn are journaled by the session
 //! (`agent.write_file`, `agent.turn`, undoable).
 
 use std::time::Duration;
@@ -186,6 +190,7 @@ fn register_into(r: &CommandRegistry) {
                 ),
             )
             .not_undoable("Starting a session launches the agent process; end it from the agent panel.")
+            .steers_agent()
             .with_ui_flow("agent::NewSession"),
             |cx, args| {
                 let project = cx.require_project()?;
@@ -224,7 +229,8 @@ fn register_into(r: &CommandRegistry) {
                     &["text"],
                 ),
             )
-            .not_undoable("A prompt goes to the agent process; undo the edits of the turn it starts with agent.undo_turn."),
+            .not_undoable("A prompt goes to the agent process; undo the edits of the turn it starts with agent.undo_turn.")
+            .steers_agent(),
             |cx, args| {
                 let session = session_of(cx)?;
                 let text = args["text"].as_str().unwrap_or_default().to_string();
@@ -254,7 +260,8 @@ fn register_into(r: &CommandRegistry) {
                 "Agent",
                 object(&[], &[]),
             )
-            .with_ui_action("agent::Cancel"),
+            .with_ui_action("agent::Cancel")
+            .steers_agent(),
             |cx, _| {
                 let session = session_of(cx)?;
                 session.cancel();
@@ -359,7 +366,8 @@ fn register_into(r: &CommandRegistry) {
                     &["id", "choice"],
                 ),
             )
-            .not_undoable("The answer goes to the agent process, which acts on it at once."),
+            .not_undoable("The answer goes to the agent process, which acts on it at once.")
+            .answers_for_user(),
             |cx, args| {
                 let session = session_of(cx)?;
                 let id = PermissionRequestId(args["id"].as_u64().unwrap_or(0));
@@ -391,6 +399,7 @@ fn register_into(r: &CommandRegistry) {
                 ),
             )
             .not_undoable("Feedback goes to the agent as a prompt; undo the edits of the turn it starts with agent.undo_turn.")
+            .steers_agent()
             .with_ui_flow("agent::SendFeedback"),
             |cx, args| {
                 let session = session_of(cx)?;

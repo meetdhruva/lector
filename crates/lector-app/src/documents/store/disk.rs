@@ -112,7 +112,12 @@ impl DocHandle {
                 }
             }
         }
-        lector_fs::write_atomic(&target, &bytes)?;
+        match &req.confine {
+            Some(confinement) => confinement
+                .write(&target)?
+                .write(&bytes, lector_fs::CreateDirs::No)?,
+            None => lector_fs::write_atomic(&target, &bytes)?,
+        }
         let new_stamp = lector_fs::stamp(&target).ok();
         // 4. Bookkeeping.
         let mut fx = Fx::default();

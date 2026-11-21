@@ -1,8 +1,10 @@
 //! Checked-in configuration: `arch/layers.toml` and the `arch/*.allow` files.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::error::{ArchError, Result};
 
@@ -31,19 +33,48 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     go(pattern.as_bytes(), text.as_bytes())
 }
 
+/// Split `tag:value` into its tag and value, when the entry has a single-colon separator.
+/// `kind:pty-reader` and `RISK_PATTERNS: std::sync::OnceLock<X>` are tagged; `Repo::identity` and
+/// `crates/a/**` are not (a `::` is a path separator, not a tag separator).
+pub fn split_tag(entry: &str) -> Option<(&str, &str)> {
+    let b = entry.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b':' {
+            if b.get(i + 1) == Some(&b':') {
+                i += 2;
+                continue;
+            }
+            return Some((entry[..i].trim(), entry[i + 1..].trim()));
+        }
+        i += 1;
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    text: String,
+    line: usize,
+}
+
 /// A reviewed allowance list (`arch/*.allow`).
 ///
 /// One entry per line; `#` starts a comment. Every entry needs a reason: an inline `# reason`
 /// or a comment line above it in the same block (blocks are separated by blank lines).
 /// Plain entries are path globs or item names (depending on the file); `tag:value` entries
-/// (`kind:pty-reader`, `literal:settings.toml`, `crate:lector-text`) carry a typed value.
+/// (`kind:pty-reader`, `literal:settings.toml`, `crate:lector-text`, `NAME: Type`) carry a typed
+/// value. An entry that exempts nothing is stale: rules report it through [`AllowList::unused`]
+/// (lookups that succeed mark their entry as used; the mark is shared by clones).
 #[derive(Debug, Clone, Default)]
 pub struct AllowList {
-    entries: Vec<String>,
+    file: String,
+    entries: Vec<Entry>,
+    used: Rc<RefCell<BTreeSet<usize>>>,
 }
 
 impl AllowList {
-    /// Parse `text`; `name` is only used in error messages.
+    /// Parse `text`; `name` is the file name used in messages (`arch/threads.allow`).
     pub fn parse(name: &str, text: &str) -> Result<AllowList> {
         let mut entries = Vec::new();
         let mut block_reason = false;
@@ -69,45 +100,165 @@ impl AllowList {
                     idx + 1
                 )));
             }
-            entries.push(entry.to_string());
+            entries.push(Entry {
+                text: entry.to_string(),
+                line: idx + 1,
+            });
         }
-        Ok(AllowList { entries })
+        Ok(AllowList {
+            file: name.to_string(),
+            entries,
+            used: Rc::default(),
+        })
     }
 
     /// Build a list directly from entries (tests).
     pub fn from_entries<I: IntoIterator<Item = S>, S: Into<String>>(entries: I) -> AllowList {
         AllowList {
-            entries: entries.into_iter().map(Into::into).collect(),
+            file: "<test>".to_string(),
+            entries: entries
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| Entry {
+                    text: e.into(),
+                    line: i + 1,
+                })
+                .collect(),
+            used: Rc::default(),
         }
     }
 
-    /// True when a plain entry (glob) matches the repository-relative `path`.
+    fn mark(&self, idx: usize) {
+        self.used.borrow_mut().insert(idx);
+    }
+
+    fn is_plain(e: &Entry) -> bool {
+        split_tag(&e.text).is_none()
+    }
+
+    /// True when a plain entry (glob) matches the repository-relative `path`. Does not mark.
     pub fn matches_path(&self, path: &str) -> bool {
         self.entries
             .iter()
-            .filter(|e| !e.contains(':'))
-            .any(|e| glob_match(e, path))
+            .any(|e| Self::is_plain(e) && glob_match(&e.text, path))
     }
 
-    /// True when a plain entry equals `name`.
+    /// Like [`AllowList::matches_path`], and marks every matching entry as used: call it only
+    /// when the path really has something to be exempted from.
+    pub fn exempt_path(&self, path: &str) -> bool {
+        let mut hit = false;
+        for (i, e) in self.entries.iter().enumerate() {
+            if Self::is_plain(e) && glob_match(&e.text, path) {
+                self.mark(i);
+                hit = true;
+            }
+        }
+        hit
+    }
+
+    /// True when a plain entry equals `name`; marks it as used.
     pub fn contains(&self, name: &str) -> bool {
-        self.entries.iter().any(|e| e == name)
+        let mut hit = false;
+        for (i, e) in self.entries.iter().enumerate() {
+            if Self::is_plain(e) && e.text == name {
+                self.mark(i);
+                hit = true;
+            }
+        }
+        hit
     }
 
-    /// Values of the `tag:value` entries with this tag.
+    /// Values of the `tag:value` entries with this tag (does not mark).
     pub fn tagged(&self, tag: &str) -> Vec<&str> {
         self.entries
             .iter()
-            .filter_map(|e| e.strip_prefix(tag).and_then(|r| r.strip_prefix(':')))
+            .filter_map(|e| {
+                split_tag(&e.text)
+                    .filter(|(t, _)| *t == tag)
+                    .map(|(_, v)| v)
+            })
             .collect()
+    }
+
+    /// Mark the `tag:value` entry as used.
+    pub fn mark_tagged(&self, tag: &str, value: &str) {
+        for (i, e) in self.entries.iter().enumerate() {
+            if split_tag(&e.text).is_some_and(|(t, v)| t == tag && v == value) {
+                self.mark(i);
+            }
+        }
+    }
+
+    /// Every tagged entry as `(tag, value)` (`NAME: Type` entries use this).
+    pub fn pairs(&self) -> Vec<(&str, &str)> {
+        self.entries
+            .iter()
+            .filter_map(|e| split_tag(&e.text))
+            .collect()
+    }
+
+    /// Mark the entry `tag: value` (exact, whitespace-insensitive on the value) as used.
+    pub fn mark_pair(&self, tag: &str, value: &str) {
+        let norm = |s: &str| s.split_whitespace().collect::<String>();
+        for (i, e) in self.entries.iter().enumerate() {
+            if split_tag(&e.text).is_some_and(|(t, v)| t == tag && norm(v) == norm(value)) {
+                self.mark(i);
+            }
+        }
     }
 
     /// All plain entries.
     pub fn plain(&self) -> Vec<&str> {
         self.entries
             .iter()
-            .filter(|e| !e.contains(':'))
-            .map(String::as_str)
+            .filter(|e| Self::is_plain(e))
+            .map(|e| e.text.as_str())
+            .collect()
+    }
+
+    /// All entries as written.
+    pub fn all(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.text.as_str()).collect()
+    }
+
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when there are no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Entries never marked as used: `(line, entry)`.
+    pub fn unused(&self) -> Vec<(usize, &str)> {
+        let used = self.used.borrow();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !used.contains(i))
+            .map(|(_, e)| (e.line, e.text.as_str()))
+            .collect()
+    }
+
+    /// One violation per stale entry (an entry that exempted nothing in this run).
+    pub fn stale_violations(
+        &self,
+        rule: &'static str,
+        skip: &dyn Fn(&str) -> bool,
+    ) -> Vec<crate::report::Violation> {
+        self.unused()
+            .into_iter()
+            .filter(|(_, e)| !skip(e))
+            .map(|(line, e)| {
+                crate::report::Violation::new(
+                    rule,
+                    &self.file,
+                    line as u32,
+                    format!("stale allowance `{e}`: it exempts nothing any more; remove it"),
+                )
+            })
             .collect()
     }
 }
@@ -269,6 +420,8 @@ impl Layers {
 pub struct Config {
     /// `arch/layers.toml`, when present.
     pub layers: Option<Layers>,
+    /// `arch/one-impl.toml`: concepts with one implementation only.
+    pub concepts: Vec<Concept>,
     allow: BTreeMap<String, AllowList>,
 }
 
@@ -283,7 +436,93 @@ pub const ALLOW_FILES: &[&str] = &[
     "git-ambiguous",
     "store-ambiguous",
     "unsafe",
+    "git-callers",
+    "fs-writers",
 ];
+
+/// A concept that may have one implementation only (`arch/one-impl.toml`).
+#[derive(Debug, Clone, Default)]
+pub struct Concept {
+    /// Human-readable name ("cancel token").
+    pub name: String,
+    /// ADR number.
+    pub adr: String,
+    /// Path globs of the files that may implement it.
+    pub owner: Vec<String>,
+    /// Name globs of `struct` / `enum` definitions.
+    pub structs: Vec<String>,
+    /// Name globs of `fn` definitions.
+    pub fns: Vec<String>,
+    /// Name globs of module names (file stems, directories, inline `mod`).
+    pub modules: Vec<String>,
+    /// Reviewed delegations: a function outside the owner that matches a name pattern but only
+    /// calls the owner (a thin wrapper), each with the file, the function and the reason.
+    pub delegates: Vec<Delegate>,
+}
+
+/// One reviewed delegation of a [`Concept`] (`delegate = [{ file, fn, why }]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Delegate {
+    /// Path of the file.
+    pub file: String,
+    /// Function name.
+    pub name: String,
+    /// Why the function is a wrapper of the owner and not a second implementation.
+    pub why: String,
+}
+
+impl Concept {
+    /// Parse the text of `arch/one-impl.toml`.
+    pub fn parse_all(text: &str) -> Result<Vec<Concept>> {
+        let doc: toml::Table = text
+            .parse()
+            .map_err(|e| ArchError::Config(format!("arch/one-impl.toml: {e}")))?;
+        let mut out = Vec::new();
+        for c in tables_of(&doc, "concept") {
+            let mut concept = Concept {
+                name: str_of(c, "name", "a [[concept]]")?,
+                adr: str_of(c, "adr", "a [[concept]]")?,
+                owner: strs_of(c, "owner"),
+                structs: strs_of(c, "struct"),
+                fns: strs_of(c, "fn"),
+                modules: strs_of(c, "module"),
+                delegates: Vec::new(),
+            };
+            for d in tables_of(c, "delegate") {
+                let field = |k: &str| d.get(k).and_then(|v| v.as_str()).map(str::to_string);
+                let (Some(file), Some(name), Some(why)) =
+                    (field("file"), field("fn"), field("why"))
+                else {
+                    return Err(ArchError::Config(format!(
+                        "arch/one-impl.toml: a `delegate` of `{}` needs `file`, `fn` and `why`",
+                        concept.name
+                    )));
+                };
+                if why.trim().is_empty() {
+                    return Err(ArchError::Config(format!(
+                        "arch/one-impl.toml: the delegate `{name}` of `{}` needs a reason",
+                        concept.name
+                    )));
+                }
+                concept.delegates.push(Delegate { file, name, why });
+            }
+            if concept.owner.is_empty() {
+                return Err(ArchError::Config(format!(
+                    "arch/one-impl.toml: concept `{}` needs an `owner` (path globs)",
+                    concept.name
+                )));
+            }
+            if concept.structs.is_empty() && concept.fns.is_empty() && concept.modules.is_empty() {
+                return Err(ArchError::Config(format!(
+                    "arch/one-impl.toml: concept `{}` has no `struct`, `fn` or `module` pattern",
+                    concept.name
+                )));
+            }
+            out.push(concept);
+        }
+        Ok(out)
+    }
+}
 
 impl Config {
     /// Read `<root>/arch`. Missing files are empty; malformed ones are errors.
@@ -295,6 +534,11 @@ impl Config {
             Ok(text) => cfg.layers = Some(Layers::parse(&text.replace("\r\n", "\n"))?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(ArchError::io("arch/layers.toml", e)),
+        }
+        match fs::read_to_string(dir.join("one-impl.toml")) {
+            Ok(text) => cfg.concepts = Concept::parse_all(&text.replace("\r\n", "\n"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ArchError::io("arch/one-impl.toml", e)),
         }
         for name in ALLOW_FILES {
             let rel = format!("arch/{name}.allow");

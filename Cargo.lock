@@ -4657,6 +4657,8 @@ dependencies = [
  "lector-base",
  "lector-text",
  "notify",
+ "proptest",
+ "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.21",
 ]

@@ -181,7 +181,7 @@ pub(crate) fn builder(mode: ConcurrencyMode) -> Builder {
 /// lock from corruption ([`crate::store::Store::open`]).
 pub(crate) fn open_file(path: &Path) -> Result<Database, redb::DatabaseError> {
     if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)?;
+        lector_base::private::create_dir_all(dir)?;
     }
     create_private(path)?;
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
@@ -203,14 +203,7 @@ pub(crate) fn open_file(path: &Path) -> Result<Database, redb::DatabaseError> {
 /// database holds comments, the journal and project paths) unless it exists; an existing file
 /// keeps the mode its owner gave it. redb initializes an empty file as a new database.
 pub(crate) fn create_private(path: &Path) -> std::io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(path) {
+    match lector_base::private::create_new(path) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),

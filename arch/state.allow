@@ -1,13 +1,20 @@
-# Modules that may build paths under the data/config/state dirs (ADR 0004).
+# Files that may create files under the data/config/state dirs (ADR 0004, ADR 0010 item 8).
+# Single files, not directories: a new file in the same directory is checked. An entry that
+# exempts nothing is an error. Entries of the form `literal:NAME` exempt a file name written as a
+# string (user-edited files, see below).
 
 # The state store: its own database file (`data_dir()/lector.redb`, Store::default_path) and the
-# legacy JSON file names its one-time import of 0.3-0.7.1 state reads (store/legacy.rs).
-crates/lector-app/src/store/**
+# legacy JSON file names its one-time import of 0.3-0.7.1 state reads.
+crates/lector-app/src/store/mod.rs
+crates/lector-app/src/store/legacy.rs
 
-# Logs and crash reports stay files so that they work when the database does not (ADR 0004,
-# decision 2): the log file and the crash/session health records.
-crates/lector/src/logging.rs
-crates/lector-app/src/health/**
+# Crash and session health records stay files so that they work when the database does not
+# (ADR 0004, decision 2): `<key>.json` per session.
+crates/lector-app/src/health/session.rs
+
+# The architecture ratchet's own file (`arch/baseline.toml` inside the repository being checked).
+# It is not user state: `data_dir` is not involved, the name only looks like a state file.
+crates/lector-archcheck/src/baseline.rs
 
 # User-edited files stay files in the config dir (ADR 0004, decision 2).
 literal:settings.toml

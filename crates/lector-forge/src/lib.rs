@@ -7,7 +7,12 @@
 //! * [`detect`] / [`detect_with`] recognise a git remote URL as a GitHub (github.com or
 //!   Enterprise) or GitLab (gitlab.com or self-hosted) repository → [`ForgeRemote`].
 //! * [`auth_token`] finds a token: environment, the `gh` / `glab` CLIs, the OS keychain.
-//!   Tokens never appear in logs or `Debug` output.
+//!   Tokens never appear in logs or `Debug` output. A token goes only to the host it belongs
+//!   to: the `GITHUB_TOKEN` / `GH_TOKEN` / `GITLAB_TOKEN` variables only to `github.com` /
+//!   `gitlab.com`; a host listed in `[forge]` needs its own token (`LECTOR_FORGE_TOKEN_<HOST>`,
+//!   `gh` / `glab` logged in to that host, or the keychain entry for that host); see the
+//!   `auth` rules on [`auth_token`]. Requests carrying a token go only over HTTPS (or to
+//!   loopback), never follow a redirect with it, and never follow a `Link` to another origin.
 //! * [`connect`] returns a [`Forge`] (GitHub REST v3 + GraphQL for review threads,
 //!   GitLab REST v4): list pull/merge requests, details, review threads mapped to
 //!   (path, 0-based line, side), submit a review, reply, resolve.
@@ -16,9 +21,10 @@
 //! Pull-request heads and bases are fetched by the caller into Lector's shadow repository
 //! (`refs/lector/pr/<n>/{head,base}`, see `fetch_refspecs` on [`Forge`]), never into the
 //! user's repository. GitLab has no "request changes": it is reported as unsupported in
-//! [`SubmittedReview`]. Pagination follows `Link: rel="next"` up to 10 pages. Which hosts are
-//! GitHub or GitLab comes from the user's `[forge]` settings, which a project's
-//! `.lector/settings.toml` cannot set, so a repository cannot send a token to another server.
+//! [`SubmittedReview`]. Pagination follows `Link: rel="next"` up to 10 pages. A host is GitHub or
+//! GitLab only when it is exactly `github.com` / `gitlab.com` (or `www.`) or listed in the user's
+//! `[forge]` settings, which a project's `.lector/settings.toml` cannot set, so a repository
+//! cannot send a token to another server (no `github.*` / `gitlab.*` guessing; ADR 0010).
 #![forbid(unsafe_code)]
 
 mod auth;
@@ -33,10 +39,12 @@ mod time;
 use serde::{Deserialize, Serialize};
 
 pub use crate::auth::{
-    auth_token, auth_token_with, delete_token, store_token, token_help, Token, TokenSource,
-    TokenSources,
+    auth_token, auth_token_with, delete_token, env_vars, host_env_var, store_token, token_help,
+    Token, TokenSource, TokenSources, CLI_SCRUBBED_ENV,
 };
-pub use crate::remote::{detect, detect_with, parse_remote_url, ForgeHosts, ForgeRemote};
+pub use crate::remote::{
+    detect, detect_with, is_public_forge_host, parse_remote_url, ForgeHosts, ForgeRemote,
+};
 pub use crate::time::parse_rfc3339;
 
 /// Which code host.
@@ -400,8 +408,27 @@ pub fn connect(remote: &ForgeRemote, token: Token) -> Box<dyn Forge> {
     }
 }
 
-/// The `Authorization` header git should send to fetch over HTTPS with `token`
-/// (`Basic` with `x-access-token` / `oauth2`), for `ShadowRepo::fetch_with`.
+/// The `Authorization` header git should send to fetch `remote`'s pull requests with `token`,
+/// for `ShadowRepo::fetch_with`; `None` unless the fetch goes to the host the token belongs to:
+/// the remote URL must be HTTPS (or HTTP to a loopback address), and re-detecting it with the
+/// user's `hosts` must give the same host and kind, so the header is built only for
+/// `github.com`, `gitlab.com` or a host the user listed (ADR 0010, item 2). The fetch itself
+/// runs with redirects off (`lector_git::ShadowRepo::fetch_with`).
+pub fn fetch_auth_header(
+    remote: &ForgeRemote,
+    hosts: &ForgeHosts,
+    token: &Token,
+) -> Option<String> {
+    let url = remote.remote_url.trim();
+    let secure =
+        url.starts_with("https://") || (url.starts_with("http://") && http::is_loopback(url));
+    let again = detect_with(url, hosts)?;
+    (secure && again.host == remote.host && again.kind == remote.kind)
+        .then(|| git_auth_header(remote.kind, token))
+}
+
+/// The raw `Authorization: Basic` header for `token` (`x-access-token` / `oauth2` user). Use
+/// [`fetch_auth_header`], which checks the host first.
 pub fn git_auth_header(kind: ForgeKind, token: &Token) -> String {
     let user = match kind {
         ForgeKind::Github => "x-access-token",
@@ -441,6 +468,35 @@ mod tests {
     fn auth_header_is_basic() {
         let h = git_auth_header(ForgeKind::Github, &Token::new("abc"));
         assert_eq!(h, "Authorization: Basic eC1hY2Nlc3MtdG9rZW46YWJj");
+    }
+
+    /// ADR 0010, item 2: the pull-request fetch header exists only for a trusted host over
+    /// HTTPS.
+    #[test]
+    fn fetch_header_only_for_trusted_hosts() {
+        let t = Token::new("abc");
+        let hosts = ForgeHosts {
+            github: vec!["code.corp".into()],
+            ..Default::default()
+        };
+        let gh = detect("https://github.com/a/b.git").expect("gh");
+        assert!(fetch_auth_header(&gh, &hosts, &t).is_some());
+        let ghe = detect_with("https://code.corp/a/b.git", &hosts).expect("ghe");
+        assert!(fetch_auth_header(&ghe, &hosts, &t).is_some());
+        // Not listed any more (settings changed): no header.
+        assert!(fetch_auth_header(&ghe, &ForgeHosts::default(), &t).is_none());
+        // ssh and plain http: no header.
+        let ssh = detect("git@github.com:a/b.git").expect("ssh");
+        assert!(fetch_auth_header(&ssh, &hosts, &t).is_none());
+        let plain = detect_with("http://code.corp/a/b.git", &hosts).expect("http");
+        assert!(fetch_auth_header(&plain, &hosts, &t).is_none());
+        // A remote whose URL was swapped for a look-alike host.
+        let mut forged = gh.clone();
+        forged.remote_url = "https://github.evil.example/a/b.git".into();
+        assert!(fetch_auth_header(&forged, &hosts, &t).is_none());
+        let mut other = gh;
+        other.remote_url = "https://gitlab.com/a/b.git".into();
+        assert!(fetch_auth_header(&other, &hosts, &t).is_none());
     }
 
     #[test]
