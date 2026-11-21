@@ -1,11 +1,12 @@
 //! Lector's own small UI state for the update and health notices (v0.7): which one-time
-//! questions were already asked and answered. Stored in `<data dir>/notices.json`, never in the
-//! user's settings or project (see "Write policy" in `docs/ARCHITECTURE.md`).
+//! questions were already asked and answered. Stored in Lector's state store
+//! (`lector_app::store`, concern `notices`), never in the user's settings or project (see
+//! "Write policy" in `docs/ARCHITECTURE.md`). The `notices.json` of 0.7.0 and 0.7.1 is
+//! imported into the store once.
 //!
-//! UI-free: everything here is plain data and file reads and writes of that one file.
+//! UI-free: plain data, and reads and atomic read-modify-writes of the store's value.
 
-use std::path::{Path, PathBuf};
-
+use lector_app::store::Single;
 use lector_config::UpdateCheck;
 use lector_forge::releases::UpdateStatus;
 use serde::{Deserialize, Serialize};
@@ -27,29 +28,32 @@ pub struct Notices {
     pub pending_update: Option<UpdateStatus>,
 }
 
-/// `<data dir>/notices.json`.
-pub fn notices_file() -> PathBuf {
-    lector_config::paths::data_dir().join("notices.json")
-}
+/// The store's handle for the notices.
+pub type NoticesStore = Single<Notices>;
 
 impl Notices {
-    /// Reads the file; a missing or unreadable file is the empty state.
-    pub fn load(path: &Path) -> Notices {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+    /// Reads the stored value; a missing or unreadable value is the empty state.
+    pub fn load(store: &NoticesStore) -> Notices {
+        match store.get() {
+            Ok(n) => n.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("notices: {e}");
+                Notices::default()
+            }
+        }
     }
 
-    /// Writes the file (temporary file + rename) into Lector's own data directory.
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)
+    /// Applies `f` to the stored value in one transaction (so two windows or processes
+    /// answering at once do not undo each other) and returns its result with the new value.
+    pub fn update<R>(
+        store: &NoticesStore,
+        f: impl FnOnce(&mut Notices) -> R,
+    ) -> lector_app::store::StoreResult<(R, Notices)> {
+        store.update(|v| {
+            let n = v.get_or_insert_with(Notices::default);
+            let r = f(n);
+            (r, n.clone())
+        })
     }
 
     /// Whether automatic checks are on: the user's choice here wins over `[updates] check`.
@@ -148,16 +152,43 @@ mod tests {
     }
 
     #[test]
-    fn the_file_round_trips_and_a_broken_file_is_empty() {
+    fn the_store_round_trips_and_updates_are_atomic() {
+        let store = lector_app::store::Store::in_memory();
+        let notices: NoticesStore = store.notices();
+        assert_eq!(Notices::load(&notices), Notices::default());
+        let ((), n) = Notices::update(&notices, |n| {
+            n.answer_update_question(true);
+            n.acknowledged_crash = Some("s9".into());
+        })
+        .expect("update");
+        assert_eq!(Notices::load(&notices), n);
+        let (on, _) =
+            Notices::update(&notices, |n| n.toggle_auto_check(UpdateCheck::Off)).expect("toggle");
+        assert!(!on);
+        assert_eq!(Notices::load(&notices).auto_update_check, Some(false));
+        assert_eq!(
+            Notices::load(&notices).acknowledged_crash.as_deref(),
+            Some("s9")
+        );
+    }
+
+    /// The `notices.json` 0.7.1 wrote (fixture produced by the 0.7.1 code) reads back from the
+    /// store after the import, field for field.
+    #[test]
+    fn the_notices_of_0_7_1_are_imported() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sub/notices.json");
-        assert_eq!(Notices::load(&path), Notices::default());
-        let mut n = Notices::default();
-        n.answer_update_question(true);
-        n.acknowledged_crash = Some("s9".into());
-        n.save(&path).expect("save");
-        assert_eq!(Notices::load(&path), n);
-        std::fs::write(&path, "{ not json").expect("write");
-        assert_eq!(Notices::load(&path), Notices::default());
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lector-app/tests/fixtures/state-0.7.1/notices.json");
+        std::fs::copy(&fixture, dir.path().join("notices.json")).expect("copy");
+        let store = lector_app::store::Store::in_memory();
+        store.import_legacy(dir.path());
+        let n = Notices::load(&store.notices());
+        assert!(n.updates_asked);
+        assert_eq!(n.auto_update_check, Some(true));
+        assert_eq!(n.acknowledged_crash.as_deref(), Some("1795240000-4242"));
+        assert!(matches!(
+            n.pending_update,
+            Some(UpdateStatus::Available { ref version, verified: true, .. }) if version == "0.8.0"
+        ));
     }
 }

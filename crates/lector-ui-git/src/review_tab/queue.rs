@@ -95,7 +95,7 @@ impl ReviewView {
         };
         let languages = project.languages().clone();
         let settings = store.settings(cx);
-        let opts = lector_review::review::diff_options(&settings.diff);
+        let opts = lector_review::review::diff_options(settings.diff.ignore_whitespace);
         let detect = settings.review.detect_moved;
         self.queue.risk_order = settings.review.risk_order;
         let root = repo.workdir().to_path_buf();

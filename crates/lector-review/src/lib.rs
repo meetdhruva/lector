@@ -50,4 +50,4 @@ pub(crate) fn check_cancel(cancel: &lector_base::CancelToken) -> Result<()> {
 /// `Result` alias for the review analysis.
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub use content::{ContentId, DerivedCache, NoCache};
+pub use content::{content_hash, ContentId, DerivedCache, NoCache};

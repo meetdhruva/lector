@@ -2,8 +2,10 @@
 
 Lector is a **reading-first** code viewer and git review tool with light editing.
 v0.1 was strictly read-only; since v0.2 it writes to the user's files or repository
-only on explicit user actions (see "Write policy"). Its own settings, session and
-review state live under the platform config/data directories.
+only on explicit user actions (see "Write policy"). Its own settings live under the
+platform config directory; its own state (sessions, recent projects, review marks,
+notices...) lives in one versioned database in the data directory (`lector_app::store`,
+ADR 0004).
 
 ## Principles
 
@@ -64,7 +66,7 @@ L6 frontend
   lector-ui-git      -> lector-app, lector-base, lector-buffer, lector-config, lector-diff,
                         lector-forge, lector-fs, lector-git, lector-icons, lector-review,
                         lector-syntax, lector-text, lector-theme, lector-ui
-  lector-ui-terminal -> lector-config, lector-terminal, lector-theme, lector-ui
+  lector-ui-terminal -> lector-app, lector-config, lector-terminal, lector-theme, lector-ui
 L5 client
   lector-agent       -> lector-app, lector-base, lector-buffer, lector-config, lector-diff,
                         lector-fs, lector-git, lector-process, lector-review, lector-syntax
@@ -78,8 +80,8 @@ L4 app
                         lector-syntax, lector-text
 L3 analysis
   lector-perf        -> lector-buffer, lector-diff, lector-search, lector-syntax, lector-text
-  lector-review      -> lector-base, lector-buffer, lector-config, lector-diff, lector-fs,
-                        lector-git, lector-syntax, lector-text
+  lector-review      -> lector-base, lector-buffer, lector-diff, lector-fs, lector-git,
+                        lector-syntax, lector-text
 L2 service
   lector-buffer      -> lector-text
   lector-fs          -> lector-text
@@ -898,11 +900,9 @@ pub fn default_settings_toml() -> &'static str;   // documented, commented defau
 pub struct KeyBinding { pub keys: String /* "cmd-p" / "ctrl-shift-f" (gpui syntax) */, pub action: String, pub context: Option<String> }
 pub fn default_keymap(platform: Platform) -> Vec<KeyBinding>;   pub fn load_keymap() -> (Vec<KeyBinding>, Vec<String>);
 pub mod paths { pub fn portable_root() -> Option<&'static Path> /* <exe dir>/lector-data */; pub fn is_portable() -> bool; pub fn config_dir() -> PathBuf; pub fn data_dir() -> PathBuf; pub fn settings_file() -> PathBuf; pub fn keymap_file() -> PathBuf; pub fn themes_dir() -> PathBuf; pub fn log_file() -> PathBuf; }
-pub struct SessionStore; // load(root) -> Option<Session>, save(root, &Session) — JSON under data_dir/sessions/<hash>.json
-pub struct RecentProjects; // new(), list() -> Vec<PathBuf> (newest first), most_recent_existing(), record(root), remove(root) — data_dir/recent.json, max 20
-pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is_viewed/set_viewed, persisted JSON
-// v0.4: ReviewStore::with_backend(Arc<dyn ReviewBackend { get, set, len }>) (lector-app's Db implements it);
-// session_key(root) -> String; SessionStore::new / RecentProjects::new are deprecated (Db-backed stores in lector-app).
+// 0.8 (ADR 0004): lector-config holds only paths, settings and keymap parsing. Sessions, recent projects and
+// viewed marks (the old SessionStore / RecentProjects / ReviewStore, session_key, content_hash) moved to
+// `lector_app::store` (see "lector-app" → "store"); `content_hash` is `lector_review::content_hash`.
 // Additions (lector-config): `load_settings_for(Option<&Path>)`, `Settings` sub-structs (ThemeSettings, DiffSettings,
 // FileSettings, LspSettings{enabled, servers: BTreeMap<String, ServerOverride{command,args,enabled}>}, GitSettings,
 // SessionSettings); `buffer_font_family: Vec<String>` (accepts a string or list in TOML); `Platform::{MacOS,Linux,Windows}`
@@ -912,12 +912,6 @@ pub struct ReviewStore;  // viewed-file state per (repo root, changeset key): is
 // only (dropped from the project layer with a warning): nothing fetches on a timer unless the user opts in.
 // Project layer (`<project>/.lector/settings.toml`) cannot set `[forge]`, `agent.servers`, `lsp.servers.*.command` /
 // `args` or `lsp.servers.*.enabled = true` (dropped with a warning): opening a project never runs a program it chose.
-// SessionStore::{new(), with_dir(dir), load(&root) -> Option<Session>, save(&root, &Session) -> io::Result<()>};
-// Session { panes: Vec<PaneState{tabs: Vec<TabState{kind: TabKind, scroll_row, active}>}>, axis, active_pane,
-//           sidebar_visible, sidebar_width, sidebar_tab, window: Option<WindowBounds> };
-// TabKind::{File{path}, Diff{changeset_key, path}, Commit{oid}, Other{label}}.
-// ReviewStore::{open(file), default(), is_viewed(repo, changeset, path, content_hash), set_viewed(repo, changeset, path,
-//   content_hash, viewed) -> io::Result<()>}; `content_hash(bytes) -> String` (sha256 hex). Clone + Send + Sync.
 ```
 
 ### lector-theme
@@ -1029,7 +1023,7 @@ pub mod review {   // lector_review::review (the two Project wrappers are in lec
   pub struct ChangesetView { pub key: String, pub title: String, pub changeset: Changeset, pub files: Vec<ReviewFile> }
   pub struct ReviewFile { pub change: FileChange, pub display_path: String, pub stats: Option<DiffStats>, pub viewed: bool,
                           pub content_hash: String, pub binary: bool }   // + path()
-  pub fn load_changeset(project: &Project, cs: &Changeset, store: &ReviewStore) -> Result<ChangesetView>;
+  pub fn load_changeset(project: &Project, cs: &Changeset, store: &lector_app::store::ReviewMarks) -> Result<ChangesetView>;
   pub struct FileDiff;  // old/new Text + Syntax, LineDiff, split + unified rows, lazy inline refinement, binary/image/too-large flags
   pub fn load_file_diff(project: &Project, change: &FileChange, opts: &DiffOptions) -> Result<FileDiff>;
 }
@@ -1051,7 +1045,9 @@ proximity, indexes the open document on demand, and falls back to tags when LSP 
 
 Notes on `review` (as implemented): every function has a `*_with(repo, ..)` variant over the core services
 (`load_changeset_with(repo, cs, viewed, opts)`, `load_file_diff_with(repo, languages, change, opts, cache)`); the `Project`
-versions use `settings.diff` (`diff_options(&DiffSettings)`: ignore_whitespace → `Whitespace::IgnoreAll`).
+versions use `settings.diff` (`diff_options(ignore_whitespace: bool)`: true → `Whitespace::IgnoreAll`; 0.8: a plain
+value, so `lector-review` does not depend on `lector-config`). `lector_review::content_hash(bytes) -> String` (hex
+SHA-256; identical output to 0.7.1's `lector_config::content_hash`, which stored marks depend on).
 `lector-review` writes nothing (checked by `arch-check purity`): the viewed marks come in as a read-only input,
 `viewed: &dyn ViewedMarks` (`is_viewed(changeset_key, path, content_hash)`; any `Fn(&str, &str, &str) -> bool` is one,
 `NoMarks` has none), and `load_changeset_cancellable` / `load_vs_workdir_cancellable` take a `lector_base::CancelToken`
@@ -1060,8 +1056,8 @@ versions use `settings.diff` (`diff_options(&DiffSettings)`: ignore_whitespace �
   `range:<from>..<to>`, `branch:<base>...<branch>`. Titles (`changeset_title`): "Working tree", "abc1234 Fix parser",
   "main…feature", "a..b".
 * `ReviewFile.content_hash` = sha256 of both sides' identities (blob oid, or content hash for index/workdir sides), so a
-  `ReviewStore` mark stops counting when either side changes; the mark is written by
-  `ReviewService::set_viewed(root, key, &mut file, bool)` (lector-app; same store and `review.json` format as 0.7.1).
+  viewed mark stops counting when either side changes; the mark is written by
+  `ReviewService::set_viewed(root, key, &mut file, bool)` (lector-app; `store::ReviewMarks`, concern `review_state`).
   Stats are computed eagerly on up to 4 threads for changesets ≤ `MAX_EAGER_STATS` (3000 files; 500 files ≈ 30 ms).
 * `FileDiff { change, kind: DiffKind::{Text, Binary, Image(ImageFormat), TooLarge}, old/new: DiffSide, diff, split,
   unified, options }`; `DiffSide { path, exists, size, text, bytes (images), language, syntax, encoding }` with
@@ -1083,7 +1079,7 @@ diff pane item (split/unified), changeset review, History panel with graph,
 commit detail, Branches/Tags/Stashes panel, blame gutter, file/line history.
 
 As implemented (`init` uses `cx.observe_new::<Workspace>`; nothing is registered outside a git repository):
-* `store::GitStore` (one per window): the workspace's `Project`, `HeadInfo`, `status`, `ReviewStore`, the panel
+* `store::GitStore` (one per window): the workspace's `Project`, `HeadInfo`, `status`, `ReviewMarks`, the panel
   entities (`views: Option<GitViews>`); refreshes HEAD+status in the background on `WorkspaceEvent::{GitStateChanged,
   FilesChanged}` and polls every 3 s while the window is active (coalesced); emits `GitStoreEvent::Changed`. It sets
   the status-bar branch label ("main ↑2 ↓1") via `Workspace::set_branch`.
@@ -1495,7 +1491,7 @@ final newline, CRLF, autocrlf, deleted/added files), proptests in `lector_diff::
 
 ### lector-app `review_service` (ADR 0001, ADR 0002; all methods blocking, run on background threads)
 The one way views, the CLI and agents get review data: `AppCore::review() -> ReviewService` (cheap to clone; holds the
-`ReviewStore` of the core's database and the process-wide `ContentCache`, which is the `DerivedCache` of every call;
+`ReviewMarks` of the core's state store and the process-wide `ContentCache`, which is the `DerivedCache` of every call;
 `ReviewService::{new(store), with_cache(store, cache), without_marks()}`). Every analysis method takes a
 `&lector_base::CancelToken` and returns
 `lector_review::Error::Cancelled` (`None` for `default_base`) once it is set; results are the plain `lector-review` types.
@@ -1516,11 +1512,89 @@ pub mod apply { // writes a hunk patch computed by lector_review::review::hunk_p
   pub fn apply_hunk_action_if_unchanged(repo, changeset, change, action, selection, algorithm, expected_content_id) -> lector_review::Result<bool>;
 }
 ```
-The repository is passed in (a window's repo, or a pull request's shadow repo); the viewed marks keep their 0.7.1 store
-and file format (`review.json` / the database backend) until ADR 0004 moves them. `arch-check purity` keeps
+The repository is passed in (a window's repo, or a pull request's shadow repo); the viewed marks live in the state store
+(`lector_app::store::ReviewMarks`, concern `review_state`; the `review.json` of 0.3 is imported once). `arch-check purity` keeps
 `crates/lector-review` free of writes (git write API, `lector-config` stores, processes, file writes). Tests:
-`crates/lector-app/tests/review_service.rs` (equals the direct loaders cold and warm, viewed round trip, the 0.7.1
-`review.json` fixture, cancellation).
+`crates/lector-app/tests/review_service.rs` (equals the direct loaders cold and warm, viewed round trip across a
+restart, the 0.7.1 `review.json` fixture imported, a store that refuses writes, cancellation).
+
+### lector-app `store` (ADR 0004) — as implemented
+All of Lector's own state lives in one redb database, `data_dir()/lector.redb`, behind `lector_app::store`. Files that
+people edit (`settings.toml`, `keymap.toml`, a project's `.lector/settings.toml`), the log and crash reports
+(`lector_app::health`, which must work when the database does not) stay files. `AppCore::store()`; `AppCore::db()` is
+`store().db()`.
+```rust
+pub struct Store;  // Clone + Send + Sync
+impl Store {
+  pub fn default_path() -> PathBuf;                       // data_dir()/lector.redb
+  pub fn open(path: &Path) -> Store;                      // never fails; see mode()
+  pub fn in_memory() -> Store;  pub fn from_db(db: Db) -> Store;
+  pub fn mode(&self) -> StoreMode;                        // ReadWrite | ReadOnly { reason }
+  pub fn recovered_from(&self) -> Option<&Path>;          // copy of a damaged file set aside at open
+  pub fn db(&self) -> &Db;                                // comments, journal, kv, cache (unchanged API)
+  pub fn recent_projects(&self) -> RecentProjects;        // list, most_recent_existing, record, remove (max 20)
+  pub fn window_sessions(&self) -> WindowSessions;        // load(root), get_key(key), save(root, &Session)
+  pub fn terminal_sessions(&self) -> TerminalSessions;    // get, tabs, save, update(root, |tabs| ..), entries
+  pub fn review_marks(&self) -> ReviewMarks;              // is_viewed, viewed_hash, set_viewed, len (max 20 000)
+  pub fn hunk_reviews(&self) -> HunkReviewStore;          // reviewed hunks (kv `review.hunks/...`)
+  pub fn notices<T: Serialize + DeserializeOwned>(&self) -> Single<T>;       // lector-ui-agent's Notices
+  pub fn update_state<T: Serialize + DeserializeOwned>(&self) -> Single<T>;  // lector_forge::releases::UpdateState
+  pub fn import_legacy(&self, data_dir: &Path) -> ImportReport;              // once; renames files to *.imported
+}
+pub struct Concern { pub name: &'static str /* = table */, pub version: u64, pub migrate: Option<Migration> }
+pub type Migration = fn(from: u64, value: &[u8]) -> Result<Vec<u8>, String>;
+pub enum Access { Current, Older(u64), Newer(u64) }
+pub struct Keyspace<T>;  // new(db, &'static Concern); get, entries, len, put, remove, update(key, |&mut Option<T>| -> R) -> R, access
+pub struct Single<T>;    // one value: get, put, update(|&mut Option<T>| -> R), access
+pub enum StoreError { Db(DbError), NewerSchema { concern, found, known }, Migration { concern, from, reason }, Value { concern, source } }
+// Value types owned by the store: Session, PaneState, TabState, TabKind, Axis, WindowBounds (moved from lector-config),
+// SavedTab, TerminalSession (moved from lector-ui-terminal); session_key(root) (16 hex of SHA-256 of the canonical root).
+```
+| concern | table | version | value | written by | legacy file imported |
+|---|---|---|---|---|---|
+| `recent_projects` | `recent` | 1 | path → stamp | `lector-ui` (open, welcome) | `recent.json` (0.3) |
+| `window_sessions` | `sessions` | 1 | `Session` | `lector-ui` workspace | `sessions/<key>.json` (0.3) |
+| `terminal_sessions` | `terminal_sessions` | 1 | `TerminalSession` | `lector-ui-terminal` | `terminal/sessions.json` (0.7.0), `terminal/sessions/<hash>.json` (0.7.1) |
+| `review_state` | `review` (+ kv `review.hunks/`) | 1 | `{hash, at}` | `ReviewService::set_viewed` | `review.json` (0.3), `review-state.json` |
+| `notices` | `notices` | 1 | `Notices` (ui-agent) | `lector-ui-agent` update hub | `notices.json` (0.7) |
+| `update_state` | `update_state` | 1 | `UpdateState` (forge) | `lector-ui-agent` update check | `update-state.json` (0.7) |
+
+* **Transactions.** Each write is one redb write transaction; `update` reads, modifies and writes inside one. redb
+  serializes write transactions between threads and, through its writer lock, between processes: concurrent updates of
+  one key (or of different keys) lose nothing (the 0.7.0 terminal-tab loss is a regression test).
+* **Versions.** `store_meta` holds `version:<concern>` (absent = 1). Older: values migrate on read, the whole concern on
+  its first write (same transaction). Newer (written by a later Lector): reads see nothing (logged once), writes fail
+  with `NewerSchema`; nothing is overwritten.
+* **Processes and locks** (`store::open`). Processes share the file in `MultiWriter` mode (0.7.1 uses the same redb and
+  mode, so it can run alongside). A file held by a process that excludes this one (`DatabaseAlreadyOpen`: an
+  `ExclusiveWriter` writer — platforms without byte-range locks, redb < 4.3; `LockProtocolMismatch`; Windows sharing/lock
+  violation) is retried for ~1 s, then the process runs with `StoreMode::ReadOnly`: an in-memory database seeded from
+  the file when it can be opened read-only (not while an exclusive writer holds it), never written back, no private copy.
+  What that process loses: every state change it makes (recent projects, window and terminal sessions, viewed and hunk
+  marks, comments, journal entries — so undo of its own writes is available only until it exits — notices, update-check
+  state) is gone when it exits. It is said for as long as it lasts: `StoreMode::indicator() -> StateIndicator { label:
+  "State not saved", detail }` is a status bar item in every window (detail on hover and click; also a 20 s toast at
+  startup), `lector health` prints the same line (`Store::probe(path) -> Probe::{Missing, Healthy, ReadOnly, Damaged}`,
+  a read-only look that creates, writes and recovers nothing and answers what `Store::open` would do: `RepairAborted` (a repair a writable open does) counts as healthy only when the file opens for writing, which is checked without writing; permission, other I/O and upgrade errors, a read-only file or file system, a missing file whose folder is not writable and a damaged file whose folder is not writable are read-only; JSON field `state`), and headless commands (`lector
+  <subcommand>`, `lector mcp`) print `StoreMode::headless_warning()` once on stderr at their first state change
+  (`Store::on_read_only_write`; cache writes do not count). The same applies to a file written by a newer Lector (detected
+  through a read-only handle before any writable open) or one that cannot be written (permissions, old redb format).
+* **Corruption.** A file redb reports as corrupt (`Corrupted`, `UnexpectedEof`, `InvalidData`) is believed only when it
+  stays so for ~500 ms (a file another process is initialising looks the same for a moment). Recovery runs under a
+  cross-process lock (`lector.redb.recovery-lock`, a redb file held in `ExclusiveWriter` mode: an OS lock the OS
+  releases when the holder dies); under it the file is opened again first (another process may have recovered it: then
+  it is used as is). Otherwise it is renamed onto a name reserved with `create_new` + 0600
+  (`lector.redb.corrupt-<unix secs>[-n]`; the damaged file is made 0600 before the rename; copy + remove only if the
+  rename fails) and a fresh database is created before the lock is released (`recovered_from()`; the UI says so).
+* **File mode.** A new `lector.redb` is created 0600 on Unix whatever the umask (it holds comments, the journal and
+  project paths); an existing file keeps its mode.
+* **Import** (`store::legacy`): per file, marker `import:<rel path>` in `store_meta` written in the same transaction as
+  the values; values never overwrite what the store holds; v0.3 files already copied by 0.4–0.7.1 (`meta.imported_v03`)
+  are only marked; then renamed to `<name>.imported` (never deleted; a failed rename is retried next start). Regular files
+  only (no symbolic links, no linked directories), at most `MAX_LEGACY_BYTES` (8 MiB); a malformed file is left in place
+  and logged. Nothing is imported in read-only state. Tests: `store/tests.rs`, `store/tests_import.rs` (failure injected
+  at every step of every file), `tests/state_upgrade.rs` (fixtures written by the 0.7.1 code, second start, a second
+  process during the import).
 
 ### Merge conflicts (v0.3) — lector-git, lector-review — as implemented
 ```rust
@@ -1643,7 +1717,7 @@ pub struct Outcome { pub summary: String, pub undo: Option<UndoRecord>, pub data
 pub trait ActivitySink: Send + Sync { fn record(&self, r: ActivityRecord) -> Option<u64>; }   // the journal implements it
 pub enum UiRequest { OpenPath { path: PathBuf, point: Option<Point> }, OpenChangeset(Changeset), Toast(String), Refresh }
 pub struct CommandRegistry;  // register, get(id), list(), invoke(id, args, cx) -> Result<Outcome> — invoke records to the journal
-pub struct AppCore;          // Clone handle: scheduler, registry, journal, db, git service, document store
+pub struct AppCore;          // Clone handle: scheduler, registry, journal, state store (+ its db), git service, document store
 
 // git_service.rs (Agent APP)
 pub struct GitService;       // process-wide; one RepoState per repository shared by all windows
@@ -1651,10 +1725,10 @@ impl GitService { pub fn repo(&self, workdir: &Path) -> Option<Arc<RepoState>>; 
 pub struct RepoState;        // snapshot() -> Arc<GitSnapshot { head, status, operation, conflicts, generation }>;
                              // subscribe(cb) -> Subscription; refresh() (coalesced); driven by the fs watcher, slow poll only as fallback
 
-// db/ (Agent APP) — redb file at data_dir()/lector.redb
-pub struct Db;               // open(path), tables: review (viewed marks), comments, sessions, recent, kv, cache (bytes by key, LRU-trimmed)
-                             // one-time import of the v0.3 JSON stores (review.json, sessions/*.json, recent.json); keep the public
-                             // ReviewStore / SessionStore / RecentProjects APIs working (backed by Db)
+// store/ (ADR 0004) — every piece of Lector's own state, versioned, in data_dir()/lector.redb; see "lector-app `store`"
+pub struct Store;            // open(path) (never fails; mode()), in_memory(); typed concerns + db() for comments/journal/kv/cache
+// db/ — the redb database under the store
+pub struct Db;               // open(path) (strict), tables: review (viewed marks), comments, sessions, recent, kv, cache (bytes by key, LRU-trimmed), journal
 
 // journal/ (Agent SAFE) — as implemented, see "Activity journal and undo" below
 pub struct Journal;          // append-only, persisted in Db; list(limit), get(id), undo(id, &CommandContext, UndoMode) -> Result<ActivityEntry, UndoError>, subscribe(cb)
@@ -1723,18 +1797,16 @@ pub struct DocHandle;        // Clone; snapshot() -> DocSnapshot { text, version
   missing args default from `Focus`.
 * **Db** (`lector_app::db`): redb 4.5, tables `meta` (schema version, flags, comment seq), `review`, `comments`
   (`Comment { id, repo, changeset, path, line, anchor_text, body, created, resolved }`: `add_comment`, `update_comment`,
-  `delete_comment`, `comments(repo, changeset?)`), `sessions` (key = `lector_config::session_key(root)`), `recent`, `kv`
+  `delete_comment`, `comments(repo, changeset?)`), `sessions` (key = `lector_app::store::session_key(root)`), `recent`, `kv`
   (`kv_get/put`, `kv_get_json/put_json`, `kv_scan(prefix)`), `cache` (`cache_get/put`, LRU by write time, trimmed to
   `CACHE_MAX_BYTES` = 64 MB every 64 puts, `trim_cache`), `journal` (`append_journal`, `journal_get/put/list/trim`).
-  `SCHEMA_VERSION = 1`; migrations run in one write transaction on open; a newer file → `DbError::TooNew`. Opened in
-  redb's `MultiWriter` mode (several Lector processes share the file; falls back to `ExclusiveWriter`); if opening fails
-  (lock held by an incompatible process, corruption) `open_or_fallback` uses a private temp copy (deleted on drop), then
-  memory — `Db::mode() -> DbMode::{File, TempCopy, Memory}`. `import_v03(data_dir)` imports review.json, sessions/*.json and
-  recent.json once (flag in `meta`; files are kept). Stores: `Db::review_store()` → `lector_config::ReviewStore::with_backend`
-  (new `ReviewBackend` trait in lector-config; since step 2 `lector-review` no longer sees the store: `ReviewService` reads and writes it),
-  `Db::session_store() -> DbSessionStore { load, save }`, `Db::recent_projects() -> DbRecentProjects { list,
-  most_recent_existing, record, remove }`. The JSON `SessionStore::new` / `RecentProjects::new` are `#[deprecated]`;
-  `ReviewStore::open` stays for tests/import.
+  `SCHEMA_VERSION = 1` (kept at 1 in 0.8 so that 0.7.1 can still share the file; the store's concerns version
+  themselves in `store_meta`); migrations run in one write transaction on open; a newer file → `DbError::TooNew`.
+  `Db::open(path)` is strict (opened in redb's `MultiWriter` mode, `ExclusiveWriter` where byte-range locks are
+  unsupported); the user's database is opened by `Store::open` (sharing, locks, corruption: see "lector-app `store`").
+  `Db::mode() -> DbMode::{File(path), ReadOnly { path, reason }, Memory}`. The 0.3 import (`import_v03`), the private
+  temp copy (`open_or_fallback`, `DbMode::TempCopy`) and the `review_store()` / `session_store()` / `recent_projects()`
+  adapters are gone (0.8): see the store.
 * **GitService**: `GitService::{new(scheduler), without_watching, repo(path), repo_for(&Repo), live_repos}` keeps weak
   refs keyed by canonical workdir. `RepoState::{repo, workdir, snapshot, subscribe(cb) -> Subscription (drop =
   unsubscribe), refresh (debounced 40 ms, keyed per repo → N windows = one computation), refresh_and_notify (publish even
@@ -2274,12 +2346,11 @@ panel_for(workspace_id, cx); kill_all(cx)
 - **Lifecycle.** On exit: "[Process exited with code N]" banner, the tab stays until a key or close
   (`terminal.close_on_exit`). Kill asks first only when shell integration reports a running command. App quit:
   sessions saved and every terminal killed (`kill_all`); dropping a view kills its process tree. Session restore
-  (`terminal.restore`): panel tabs/splits and custom names, **one file per project root**
-  (`<data dir>/terminal/sessions/<FNV-1a of the root>.json`, `{version, root, tabs}`; `session::project_file`), so several windows (or
-  two Lector processes) saving at once never read-modify-write a shared file; each write goes through a uniquely named temp file
-  (process id + counter) and an atomic rename, serialized in-process by a mutex. The single `sessions.json` of 0.7.0 and earlier is
-  only read, as a fallback for a root without a file of its own, and never rewritten (an emptied project keeps an empty file so its
-  legacy entry does not come back). (≤ 12 tabs × 4 splits), fresh shells in the saved folders, started lazily (see "Lazy session
+  (`terminal.restore`): panel tabs/splits and custom names, one row per project root in the state store
+  (`Store::terminal_sessions()`, concern `terminal_sessions`, key = the root; `session::{load, save}`), so several windows
+  (or two Lector processes) saving at once each write their own row in one transaction and never lose each other's tabs; an
+  emptied project is kept as an empty list. The 0.7.0 `terminal/sessions.json` and 0.7.1 `terminal/sessions/<hash>.json`
+  files are imported once. (≤ 12 tabs × 4 splits), fresh shells in the saved folders, started lazily (see "Lazy session
   restore" above); editor-area terminals are not restored.
 - **Settings** (`[terminal]`, `lector_config::TerminalSettings`): `shell`, `profiles`, `default_profile`, `env` (user-only),
   `font_family`, `font_size`, `line_height` (unset: code font, 1.2), `scrollback` (10000, user-only), `cursor_style`,
@@ -2721,7 +2792,7 @@ Two UI-free crates, layered `lector (bin) → lector-cli → lector-mcp → lect
   undo      {undone: <id>, entry: <the entry the undo recorded>}
   health    {sessions, running, clean, abnormal, panics, crash_free_rate: 0..1|null, by_version: [{version, sessions, clean,
              abnormal, panics}], crash_reports, crash_dir, last_crashes: [{file, path, time, version, os, thread, location,
-             message}]}                                                       // newest first, at most `-n` (default 5)
+             message}], state: null|"<line>"}                                // newest first, at most `-n` (default 5); state: 0.8, the state store's problem if any
   ```
   `risk.reasons[].kind` is the snake_case `lector_review::risk::RiskKind` (`public_api_changed`, `panic_added`, ...).
   Moved blocks come from `lector_diff::moves` (within a file: `detect_moved`; between files of the changeset:
@@ -2952,7 +3023,7 @@ Menus, window chrome and the welcome view (v0.2 "ease of access"):
 ```
 Startup (`lector` binary): settings (`load_settings_for(root)`) and `Project::open` run on a thread while GPUI starts;
 `lector_ui::init(cx, themes, mode, settings)` applies settings/keymap, then `lector_ui_git::init(cx)`, then
-`open_workspace_window` restores the session (`SessionStore`) and opens the CLI file. Watchers: project root
+`open_workspace_window` restores the session (`Store::window_sessions`) and opens the CLI file. Watchers: project root
 (`lector_fs::watch`, 120 ms debounce: reload open docs, rescan on create/remove, git status + gutters on
 `GitStateChanged`) and Lector's config dir (live-reload settings, keymap, themes). LSP documents are opened
 (warm-up) when a file loads; status polled every second for the status bar.
@@ -2982,7 +3053,7 @@ Notes (as implemented, lector-ui integration):
   remote images are not fetched).
 * Navigation history: jumps (definition, pickers, search/references results, cross-file opens) and in-file moves of
   ≥ 20 rows after an 800 ms rest are recorded in `NavHistory`.
-* Session: saved 1 s after tab/pane changes and on quit (`SessionStore`); restore re-creates panes along the saved
+* Session: saved 1 s after tab/pane changes and on quit (`Store::window_sessions`); restore re-creates panes along the saved
   axis, files at their scroll rows, sidebar visibility/width/panel. Pane item views and the sidebar render through
   `AnyView::cached` so a scrolling view does not re-render its siblings.
 * Not yet applied from settings: `show_whitespace`, `scroll_beyond_last_line`.
@@ -3343,9 +3414,11 @@ pub struct UpdateOptions { api_base, repo, public_key: Option<String>, platform:
 * `lector_config::should_check_now(last_checked, now, UpdateCheck) -> bool`: false when off; true when never
   checked, at least 24 h (`CHECK_INTERVAL_SECS`) after the last request, or when the stored time is more than a day
   in the future (clock changes). A manual "Check for updates now" ignores it and works with `check = "off"`.
-* State (`last_checked`, `ETag`, cached release list) lives in `lector_config::update_state_file()`
-  (`<data dir>/update-state.json`); the caller loads it, passes it to `check_for_update_with`, and saves it. A
-  corrupt or missing file is an empty state. The one-time "ask the user" flag is the UI's concern.
+* State (`last_checked`, `ETag`, cached release list) is the plain value `lector_forge::releases::UpdateState` (serde;
+  unknown fields ignored, missing ones default; the forge crate opens no file for it). The caller keeps it in the state
+  store (`Store::update_state::<UpdateState>()`, concern `update_state`; `update_model::{load_state, run_check}`), loads
+  it, passes it to `check_for_update_with`, and stores it. A missing or unreadable value is an empty state. The one-time
+  "ask the user" flag is the UI's concern.
 * UI contract: show "Lector X is available" and one button that opens `notes_url` or the asset URL in the browser
   (or the package-manager command); show the SHA-256 and a verified / "not verified" label. No download-and-run.
 
@@ -3354,13 +3427,14 @@ pub struct UpdateOptions { api_base, repo, public_key: Option<String>, platform:
 * *Ask once, default off.* On the first run of a build with this feature, a dismissible dialog asks "Check for updates
   automatically? Lector would ask GitHub once a day whether a new version exists. Nothing about you or your code is sent."
   with [Turn on] / [Not now] (Escape counts as "Not now"). Whether it was asked, and the answer, live in Lector's own state
-  (`<data dir>/notices.json`, `lector_ui_agent::notices::Notices`), never in the user's settings or project. The dialog is
+  (`lector_ui_agent::notices::Notices` in the state store, concern `notices`; every change is one read-modify-write
+  transaction, `Notices::update`), never in the user's settings or project. The dialog is
   skipped when `[updates] check = "on"` is already set in settings.toml, in headless screenshot runs (`LECTOR_SCREENSHOT`)
   and with `LECTOR_NO_NOTICES`. A choice made in the dialog or with the toggle wins over `[updates] check`
   (`Notices::effective_check`); there is no settings window with toggles, so the toggle is the Help menu command below.
 * *Schedule.* When on, one background check at startup (`update_model::run_check` → `check_for_update_with` with the persisted
   `UpdateState`) if `should_check_now(last_checked, now, On)`: at most one request per 24 h. Its result is kept in
-  `notices.json` so the quiet **status bar item** "Update X" can show on later starts without a request (dropped when the
+  the notices so the quiet **status bar item** "Update X" can show on later starts without a request (dropped when the
   running version caught up). Nothing runs on a timer after startup.
 * *Help menu.* "Check for Updates…" (`workspace::CheckForUpdates`) always works, also with checks off: it shows a dialog with
   the answer: up to date, could not check (with the reason, e.g. offline or rate limited), or available. "Automatic Update

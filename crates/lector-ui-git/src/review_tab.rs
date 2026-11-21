@@ -1039,16 +1039,16 @@ impl PaneItem for ReviewItem {
         Some(self.key.clone())
     }
 
-    fn tab_kind(&self, cx: &App) -> Option<lector_config::TabKind> {
+    fn tab_kind(&self, cx: &App) -> Option<lector_app::store::TabKind> {
         let v = self.view.read(cx);
         if v.pr.is_some() {
             return None; // pull requests are reopened from the panel
         }
         Some(match (&v.changeset, self.is_commit) {
-            (Changeset::Commit(oid), true) => lector_config::TabKind::Commit {
+            (Changeset::Commit(oid), true) => lector_app::store::TabKind::Commit {
                 oid: oid.to_string(),
             },
-            (cs, _) => lector_config::TabKind::Other {
+            (cs, _) => lector_app::store::TabKind::Other {
                 label: format!("review:{}", changeset_key(cs)),
             },
         })
@@ -1120,12 +1120,12 @@ fn open_item(
 /// Recreates a review/commit tab from the session.
 pub fn restore_item(
     store: &Entity<GitStore>,
-    kind: &lector_config::TabKind,
+    kind: &lector_app::store::TabKind,
     cx: &mut App,
 ) -> Option<Box<dyn PaneItem>> {
     let (cs, commit) = match kind {
-        lector_config::TabKind::Commit { oid } => (Changeset::Commit(oid.parse().ok()?), true),
-        lector_config::TabKind::Other { label } => (
+        lector_app::store::TabKind::Commit { oid } => (Changeset::Commit(oid.parse().ok()?), true),
+        lector_app::store::TabKind::Other { label } => (
             review::parse_changeset_key(label.strip_prefix("review:")?)?,
             false,
         ),

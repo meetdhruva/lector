@@ -15,6 +15,11 @@
 //!
 //! These files are Lector's own state (see "Write policy" in `docs/ARCHITECTURE.md`), written
 //! only while the app starts, ends or panics, never as a side effect of reading.
+//!
+//! **They stay files, outside the state database (`crate::store`, ADR 0004), on purpose:** crash
+//! reporting must work when the database is broken, locked by another process or never opened
+//! (a panic during startup, a damaged `lector.redb`), and a panic hook must not take database
+//! locks. This module is on the `arch/state.allow` list for that reason.
 
 mod crash;
 mod process;

@@ -816,7 +816,7 @@ fn load_diff(
     project: &crate::project::Project,
     change: &lector_git::FileChange,
 ) -> anyhow::Result<review::FileDiff> {
-    let opts = review::diff_options(&project.settings().diff);
+    let opts = review::diff_options(project.settings().diff.ignore_whitespace);
     crate::project::load_file_diff(project, change, &opts).map_err(|e| anyhow!(e.to_string()))
 }
 

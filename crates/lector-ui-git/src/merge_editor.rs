@@ -1376,8 +1376,8 @@ impl PaneItem for MergeItem {
         Some(self.result.clone())
     }
 
-    fn tab_kind(&self, _: &App) -> Option<lector_config::TabKind> {
-        Some(lector_config::TabKind::Other {
+    fn tab_kind(&self, _: &App) -> Option<lector_app::store::TabKind> {
+        Some(lector_app::store::TabKind::Other {
             label: self.key.to_string(),
         })
     }
@@ -1442,10 +1442,10 @@ pub fn rel_path(store: &Entity<GitStore>, abs: &Path, cx: &App) -> Option<String
 /// Recreates a merge tab from the session.
 pub fn restore_item(
     store: &Entity<GitStore>,
-    kind: &lector_config::TabKind,
+    kind: &lector_app::store::TabKind,
     cx: &mut App,
 ) -> Option<Box<dyn PaneItem>> {
-    let lector_config::TabKind::Other { label } = kind else {
+    let lector_app::store::TabKind::Other { label } = kind else {
         return None;
     };
     let rel = label.strip_prefix("merge:")?.to_string();

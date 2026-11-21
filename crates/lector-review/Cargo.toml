@@ -17,13 +17,12 @@ lector-syntax.workspace = true
 lector-diff.workspace = true
 lector-git.workspace = true
 lector-base.workspace = true
-lector-config.workspace = true
 lector-buffer.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
+sha2 = "0.10"
 
 [dev-dependencies]
-lector-config = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 proptest.workspace = true
 criterion = { workspace = true, features = ["cargo_bench_support"] }

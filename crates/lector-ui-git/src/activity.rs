@@ -248,11 +248,11 @@ fn show_in(
 /// Recreates the tab from the session.
 pub fn restore_item(
     store: &Entity<GitStore>,
-    kind: &lector_config::TabKind,
+    kind: &lector_app::store::TabKind,
     cx: &mut App,
 ) -> Option<Box<dyn PaneItem>> {
     match kind {
-        lector_config::TabKind::Other { label } if label == KEY => {
+        lector_app::store::TabKind::Other { label } if label == KEY => {
             let store = store.clone();
             let view = cx.new(|cx| ActivityView::new(store, cx));
             Some(Box::new(ActivityItem { view }))
@@ -696,8 +696,8 @@ impl PaneItem for ActivityItem {
         Some(KEY.into())
     }
 
-    fn tab_kind(&self, _: &App) -> Option<lector_config::TabKind> {
-        Some(lector_config::TabKind::Other { label: KEY.into() })
+    fn tab_kind(&self, _: &App) -> Option<lector_app::store::TabKind> {
+        Some(lector_app::store::TabKind::Other { label: KEY.into() })
     }
 
     fn view(&self) -> AnyView {
