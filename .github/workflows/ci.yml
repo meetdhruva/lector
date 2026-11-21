@@ -54,6 +54,42 @@ jobs:
             target/release/lector.exe
           if-no-files-found: ignore
 
+  # Structural rules and their baseline ratchet (docs/adr/0008-guardrails.md, arch/README.md).
+  # Fails when a violation count rises, a new violating file appears, a count fell without the
+  # baseline being lowered, or the crate graph in docs/ARCHITECTURE.md is stale.
+  architecture:
+    name: architecture
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Architecture rules (ratchet)
+        run: scripts/arch-check all
+      - name: Crate graph is current
+        run: scripts/arch-check graph --check
+
+  # Advisories and licences of the dependency tree (deny.toml); duplicate versions are reported.
+  deny:
+    name: cargo deny
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Advisories and licences
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses
+      - name: Duplicate versions (report only)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans
+
   # Deterministic instruction-count gates (valgrind/callgrind), see docs/PERFORMANCE.md.
   perf:
     name: perf gates

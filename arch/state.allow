@@ -1,0 +1,11 @@
+# Modules that may build paths under the data/config/state dirs (ADR 0004): the database, its
+# future typed store, the path helpers, logging, and crash/session health files.
+crates/lector-app/src/db/**
+crates/lector-app/src/store/**
+crates/lector-config/src/paths.rs
+crates/lector/src/logging.rs
+crates/lector-app/src/health/**
+
+# User-edited files stay files in the config dir (ADR 0004, decision 2).
+literal:settings.toml
+literal:keymap.toml

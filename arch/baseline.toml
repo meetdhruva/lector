@@ -1,0 +1,124 @@
+# Architecture ratchet baseline (see arch/README.md and docs/adr/0008-guardrails.md).
+#
+# rule -> key -> count. Keys are files, except `deps` (crate edges) and `size` (file -> lines).
+# Numbers may only go down. Never raise one: fix the code, or write an ADR.
+# Lower entries with `scripts/arch-check --update`, which refuses to raise anything.
+
+[deps]
+"crate lector-workspace" = 1
+"lector-ui-git -> lector-process" = 1
+
+[writes]
+"crates/lector-ui-git/src/commit_composer.rs" = 1
+"crates/lector-ui-git/src/pull_requests.rs" = 1
+"crates/lector-ui-git/src/sync.rs" = 1
+"crates/lector-ui/src/a11y.rs" = 1
+"crates/lector-ui/src/os.rs" = 4
+
+[threads]
+"crates/lector-agent/src/rpc.rs" = 2
+"crates/lector-agent/src/session.rs" = 2
+"crates/lector-app/src/git_service.rs" = 2
+"crates/lector-forge/src/mock.rs" = 2
+"crates/lector-fs/src/watch.rs" = 1
+"crates/lector-git/src/shadow.rs" = 3
+"crates/lector-git/src/write.rs" = 1
+"crates/lector-lsp/src/client.rs" = 4
+"crates/lector-lsp/src/manager.rs" = 2
+"crates/lector-process/src/askpass/server.rs" = 2
+"crates/lector-process/src/child.rs" = 3
+"crates/lector-process/src/supervisor.rs" = 1
+"crates/lector-search/src/picker.rs" = 2
+"crates/lector-terminal/src/session.rs" = 1
+"crates/lector-ui/src/a11y.rs" = 1
+"crates/lector-ui/src/views/file_finder.rs" = 1
+"crates/lector-ui/src/views/search_panel.rs" = 1
+"crates/lector-ui/src/views/symbol_picker.rs" = 1
+"crates/lector-workspace/src/symbols.rs" = 1
+"crates/lector/src/main.rs" = 1
+
+[background]
+"crates/lector-ui-agent/src/inline_edit.rs" = 1
+"crates/lector-ui-agent/src/panel.rs" = 6
+"crates/lector-ui-agent/src/update_ui.rs" = 1
+"crates/lector-ui-git/src/activity.rs" = 3
+"crates/lector-ui-git/src/blame.rs" = 3
+"crates/lector-ui-git/src/branches_panel.rs" = 1
+"crates/lector-ui-git/src/changes_panel.rs" = 2
+"crates/lector-ui-git/src/commit_composer.rs" = 3
+"crates/lector-ui-git/src/diff_view.rs" = 2
+"crates/lector-ui-git/src/diff_view/comments.rs" = 2
+"crates/lector-ui-git/src/diff_view/review_layer.rs" = 1
+"crates/lector-ui-git/src/history_panel.rs" = 1
+"crates/lector-ui-git/src/inline_conflicts.rs" = 1
+"crates/lector-ui-git/src/lib.rs" = 2
+"crates/lector-ui-git/src/merge_editor.rs" = 1
+"crates/lector-ui-git/src/pull_requests.rs" = 3
+"crates/lector-ui-git/src/review_model.rs" = 2
+"crates/lector-ui-git/src/review_tab.rs" = 1
+"crates/lector-ui-git/src/review_tab/queue.rs" = 1
+"crates/lector-ui-git/src/staging.rs" = 1
+"crates/lector-ui-git/src/sync.rs" = 6
+"crates/lector-ui-terminal/src/lib.rs" = 1
+"crates/lector-ui-terminal/src/panel.rs" = 1
+"crates/lector-ui-terminal/src/view.rs" = 2
+"crates/lector-ui/src/editor/doc_store.rs" = 2
+"crates/lector-ui/src/editor/image_view.rs" = 1
+"crates/lector-ui/src/editor/mod.rs" = 2
+"crates/lector-ui/src/editor/model.rs" = 3
+"crates/lector-ui/src/views/find_bar.rs" = 2
+"crates/lector-ui/src/views/markdown_preview.rs" = 2
+"crates/lector-ui/src/views/references.rs" = 1
+"crates/lector-ui/src/views/workspace/integration.rs" = 7
+
+[state]
+"crates/lector-app/src/core.rs" = 1
+"crates/lector-config/src/recent.rs" = 1
+"crates/lector-config/src/session.rs" = 1
+"crates/lector-config/src/updates.rs" = 1
+"crates/lector-forge/src/releases.rs" = 1
+"crates/lector-ui-agent/src/notices.rs" = 1
+"crates/lector-ui-terminal/src/session.rs" = 2
+
+[dupes]
+"crates/lector-lsp/src/fuzzy.rs" = 1
+"crates/lector-lsp/src/request.rs" = 1
+"crates/lector-process/src/cancel.rs" = 1
+"crates/lector-search/src/cancel.rs" = 1
+"crates/lector-ui/src/fuzzy.rs" = 2
+
+[size]
+"crates/lector-agent/src/inline_edit.rs" = 1725
+"crates/lector-app/src/comments.rs" = 1506
+"crates/lector-app/src/documents/store.rs" = 2349
+"crates/lector-buffer/src/tests.rs" = 3092
+"crates/lector-forge/src/releases.rs" = 1917
+"crates/lector-git/src/shadow.rs" = 2302
+"crates/lector-text/src/rope.rs" = 1541
+"crates/lector-ui-git/src/changes_panel.rs" = 1694
+"crates/lector-ui-git/src/diff_view.rs" = 1993
+"crates/lector-ui-git/src/diff_view/comments.rs" = 1520
+"crates/lector-ui-git/src/sync.rs" = 1944
+"crates/lector-ui-git/src/sync_model.rs" = 1702
+"crates/lector-ui/src/code_view/element.rs" = 2272
+"crates/lector-ui/src/code_view/mod.rs" = 2669
+"crates/lector-ui/src/editor/completion.rs" = 2025
+"crates/lector-ui/src/editor/mod.rs" = 1746
+"crates/lector-ui/src/views/workspace.rs" = 1649
+"crates/lector-ui/src/views/workspace/integration.rs" = 1725
+"crates/lector-workspace/src/review.rs" = 1753
+"crates/lector-workspace/src/risk.rs" = 2697
+"crates/lector-workspace/src/structural.rs" = 1750
+
+[purity]
+
+[hygiene]
+"crates/lector-perf/src/bin/gate_buffer.rs [forbid_unsafe_code]" = 1
+"crates/lector-perf/src/bin/gate_diff.rs [forbid_unsafe_code]" = 1
+"crates/lector-perf/src/bin/gate_search.rs [forbid_unsafe_code]" = 1
+"crates/lector-perf/src/bin/gate_syntax.rs [forbid_unsafe_code]" = 1
+"crates/lector-perf/src/bin/gate_text.rs [forbid_unsafe_code]" = 1
+"crates/lector-perf/src/bin/perf_gate.rs [forbid_unsafe_code]" = 1
+"crates/lector-workspace/src/lib.rs [forbid_unsafe_code]" = 1
+"crates/lector-workspace/src/risk.rs" = 1
+"crates/lector-workspace/src/risk/signals.rs" = 1

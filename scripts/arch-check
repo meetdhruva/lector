@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Architecture ratchet (docs/adr/0008-guardrails.md, arch/README.md).
+#   scripts/arch-check all             every rule against arch/baseline.toml
+#   scripts/arch-check graph --check   the crate graph in docs/ARCHITECTURE.md is current
+#   scripts/arch-check --update        lower the baseline (refuses to raise it)
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+exec cargo run -q -p lector-archcheck -- "$@"

@@ -1,0 +1,3 @@
+# The one GPUI bridge (ADR 0003, decision 2): `background(cx, key, priority, f) -> Task<T>` in
+# lector-ui is the only place UI code may call background_spawn / background_executor. Future file.
+crates/lector-ui/src/background.rs

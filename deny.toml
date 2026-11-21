@@ -1,0 +1,45 @@
+# cargo-deny configuration (docs/adr/0008-guardrails.md).
+# CI runs `cargo deny check advisories licenses` (fails) and `cargo deny check bans` (report only).
+
+[advisories]
+version = 2
+yanked = "warn"
+# Ignore an advisory only with a reason and a note on what removes it.
+ignore = []
+
+[licenses]
+version = 2
+# The project is MIT OR Apache-2.0 and ships third-party notices with cargo-about; this is the same
+# list as `accepted` in about.toml. An SPDX expression passes when one alternative is allowed
+# (the tree contains `Apache-2.0 OR GPL-2.0-only` and `... OR LGPL-2.1-or-later`, which resolve
+# to the permissive side).
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+  "0BSD",
+  "MIT-0",
+  "OFL-1.1",
+  "Unlicense",
+  "CDLA-Permissive-2.0",
+  "bzip2-1.0.6",
+  "NCSA",
+]
+confidence-threshold = 0.9
+# The list mirrors about.toml, which also covers licences that only some targets pull in.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions of one crate are reported, not fatal (ADR 0008).
+multiple-versions = "warn"
+# Workspace crates depend on each other by path.
+wildcards = "allow"

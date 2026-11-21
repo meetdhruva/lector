@@ -1,0 +1,6 @@
+# Write-API names that are also common method names (`Vec::push`, ...). In UI code they are
+# flagged only when the receiver's name contains `repo`, `git` or `shadow`.
+push
+pull
+fetch
+prune

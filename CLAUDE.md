@@ -34,6 +34,13 @@ Read `docs/ARCHITECTURE.md` first: it defines crate boundaries and public API co
   `--update` to re-record, see `docs/PERFORMANCE.md`). `lector health` shows the local crash log.
 - Run the app headless for screenshots: `scripts/screenshot.sh <path> <out.png>`.
 
+## Architecture checks
+- Run `scripts/arch-check all` before pushing; CI runs it (and `graph --check`) on every pull request.
+- Never raise `arch/baseline.toml`: fix the code or write an ADR. When you fix violations, lower the
+  baseline in the same pull request with `scripts/arch-check --update` (it only ever lowers).
+- Allowances (`arch/*.allow`) need a reason comment and a reviewer; see `arch/README.md`.
+- Structural decisions and their reasons live in `docs/adr/`; builders do not change a record, they stop and report.
+
 ## Commits
 - Every commit is authored and committed as
   `meetdhruva <268780292+meetdhruva@users.noreply.github.com>` (set in the repo's git config).

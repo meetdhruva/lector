@@ -1,0 +1,41 @@
+# Public `self` methods of lector-git's Repo / ShadowRepo (write.rs, sync.rs, branch.rs,
+# conflict.rs, shadow.rs) that only READ. Everything else the `writes` rule derives from those
+# files is a write and may be called from a lector-app registry command only (ADR 0002).
+# Reviewed against the 0.7.1 source (each body read; none changes files, index, refs,
+# stashes, config or remotes of the user's repository).
+
+# write.rs / sync.rs / branch.rs / conflict.rs: Repo reads
+identity
+last_commit_message
+push_remote_for
+upstream_status
+branch_tip
+branch_upstream
+stash_at
+stash_index_of
+stash_paths
+stash_apply_paths
+operation
+merge_message
+conflicts
+conflict_stage
+
+# shadow.rs: ShadowRepo reads (nothing is written; fingerprints hash the worktree only)
+note_of
+git_dir
+workdir
+snapshots
+contains
+kind
+entries
+index_entries
+file_at
+changes_between
+changes_to_worktree
+load
+fingerprints
+fingerprint_worktree
+index_fingerprints
+is_ignored
+resolve
+merge_base

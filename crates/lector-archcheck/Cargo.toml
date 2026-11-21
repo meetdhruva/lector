@@ -1,0 +1,25 @@
+[package]
+name = "lector-archcheck"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Architecture ratchet for the Lector workspace (crate edges, call sites, file sizes). Not shipped."
+publish = false
+
+[lib]
+name = "lector_archcheck"
+path = "src/lib.rs"
+
+[[bin]]
+name = "arch-check"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
