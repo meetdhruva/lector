@@ -67,14 +67,14 @@ pub fn core(cx: &App) -> AppCore {
         .unwrap_or_else(AppCore::global)
 }
 
-/// Recent projects (database-backed; replaces `lector_config::RecentProjects`).
-pub fn recent_projects() -> lector_app::db::DbRecentProjects {
-    AppCore::global().db().recent_projects()
+/// Recent projects (state store, ADR 0004).
+pub fn recent_projects() -> lector_app::store::RecentProjects {
+    AppCore::global().store().recent_projects()
 }
 
-/// Window sessions (database-backed; replaces `lector_config::SessionStore`).
-pub fn session_store() -> lector_app::db::DbSessionStore {
-    AppCore::global().db().session_store()
+/// Window sessions (state store, ADR 0004).
+pub fn session_store() -> lector_app::store::WindowSessions {
+    AppCore::global().store().window_sessions()
 }
 
 /// Adds a contributor to [`Focus`] (e.g. lector-ui-git fills the changeset of the active diff).

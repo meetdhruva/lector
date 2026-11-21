@@ -19,6 +19,7 @@ pub mod provenance; // Agent REVIEWUX
 pub mod review_queue; // Agent REVIEWUX
 pub mod review_service; // review data for views, the CLI and agents; the viewed-marks write (ADR 0001)
 pub mod scheduler; // Agent APP
+pub mod store; // every piece of Lector's own state, versioned, in one database (ADR 0004)
 
 pub use crate::commands::{
     ActivitySink, Availability, Command, CommandContext, CommandRegistry, CommandSpec, Outcome,
@@ -30,3 +31,4 @@ pub use crate::documents::{Document, Indentation, LineEnding, LineHighlights};
 pub use crate::git_service::{GitService, GitSnapshot, RepoState};
 pub use crate::project::{Project, ProjectError};
 pub use crate::scheduler::{JobHandle, JobKey, Priority, Scheduler};
+pub use crate::store::{Store, StoreMode};

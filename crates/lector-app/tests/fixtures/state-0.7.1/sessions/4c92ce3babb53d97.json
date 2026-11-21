@@ -1,0 +1,70 @@
+{
+  "panes": [
+    {
+      "tabs": [
+        {
+          "kind": {
+            "kind": "file",
+            "path": "/fixture/project/src/main.rs"
+          },
+          "scroll_row": 120,
+          "active": false,
+          "read_only_locked": false
+        },
+        {
+          "kind": {
+            "kind": "diff",
+            "changeset_key": "worktree",
+            "path": "src/lib.rs"
+          },
+          "scroll_row": 7,
+          "active": true,
+          "read_only_locked": false
+        }
+      ]
+    },
+    {
+      "tabs": [
+        {
+          "kind": {
+            "kind": "commit",
+            "oid": "0123456789abcdef0123456789abcdef01234567"
+          },
+          "scroll_row": 0,
+          "active": false,
+          "read_only_locked": false
+        },
+        {
+          "kind": {
+            "kind": "file",
+            "path": "/elsewhere/notes.md"
+          },
+          "scroll_row": 3,
+          "active": true,
+          "read_only_locked": true
+        },
+        {
+          "kind": {
+            "kind": "other",
+            "label": "review:worktree"
+          },
+          "scroll_row": 0,
+          "active": false,
+          "read_only_locked": false
+        }
+      ]
+    }
+  ],
+  "axis": "vertical",
+  "active_pane": 1,
+  "sidebar_visible": false,
+  "sidebar_width": 312.5,
+  "sidebar_tab": "changes",
+  "window": {
+    "x": 40.0,
+    "y": 60.0,
+    "width": 1280.0,
+    "height": 800.0,
+    "maximized": false
+  }
+}

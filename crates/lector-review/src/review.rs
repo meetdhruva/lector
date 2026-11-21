@@ -12,8 +12,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::content::content_hash;
 use lector_base::CancelToken;
-use lector_config::{content_hash, DiffSettings};
 use lector_diff::{
     diff_lines, fold_context, refine_inline, split_rows, unified_rows, Algorithm, DiffOptions,
     DiffStats, InlineChanges, LineDiff, RowKind, Segment, SplitRow, UnifiedRow, Whitespace,
@@ -179,11 +179,11 @@ pub fn changeset_title(repo: Option<&Repo>, cs: &Changeset) -> String {
     }
 }
 
-/// [`DiffOptions`] from the diff settings.
-pub fn diff_options(settings: &DiffSettings) -> DiffOptions {
+/// [`DiffOptions`] for the `[diff] ignore_whitespace` setting (histogram algorithm).
+pub fn diff_options(ignore_whitespace: bool) -> DiffOptions {
     DiffOptions {
         algorithm: Algorithm::Histogram,
-        whitespace: if settings.ignore_whitespace {
+        whitespace: if ignore_whitespace {
             Whitespace::IgnoreAll
         } else {
             Whitespace::Exact
@@ -1448,16 +1448,12 @@ mod tests {
             &NoCache,
         );
         assert_eq!(exact.diff.hunks.len(), 1);
-        let settings = DiffSettings {
-            ignore_whitespace: true,
-            ..Default::default()
-        };
         let ws = diff_bytes(
             change,
             Some(old),
             Some(new),
             &langs,
-            &diff_options(&settings),
+            &diff_options(true),
             &NoCache,
         );
         assert!(ws.diff.hunks.is_empty());

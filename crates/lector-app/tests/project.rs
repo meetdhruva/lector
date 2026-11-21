@@ -684,7 +684,7 @@ fn symlinked_root_spellings_resolve_to_project_paths() {
 #[test]
 fn project_wrappers() {
     use lector_app::project::{load_changeset, load_file_diff};
-    use lector_config::ReviewStore;
+    use lector_app::store::Store;
     use lector_diff::DiffOptions;
     use lector_git::Changeset;
 
@@ -695,8 +695,7 @@ fn project_wrappers() {
     commit_all(t.path());
     write(t.path(), "lib.rs", &src(2));
     let project = Project::open(t.path(), Settings::default()).unwrap();
-    let st = tempfile::tempdir().unwrap();
-    let store = ReviewStore::open(st.path().join("review-state.json"));
+    let store = Store::in_memory().review_marks();
     let view = load_changeset(&project, &Changeset::Unstaged, &store).unwrap();
     assert!(view.index_of("lib.rs").is_some());
     let lib = view.files[view.index_of("lib.rs").unwrap()].change.clone();

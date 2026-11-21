@@ -25,7 +25,7 @@ use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
 
 use crate::health_model::{health_model, health_text, HealthModel};
-use crate::notices::{notices_file, Notices};
+use crate::notices::{Notices, NoticesStore};
 use crate::update_model::{
     dialog_model, forge_channel, is_newer_available, run_check, status_bar_label, toggle_text,
     UpdateButtonAction, UpdateDialogModel, FIRST_RUN_BODY, FIRST_RUN_TITLE,
@@ -68,6 +68,10 @@ pub enum HubEvent {
 /// The update state shared by all windows.
 pub struct UpdateHub {
     notices: Notices,
+    /// Where the notices are kept (`None` in tests: in memory only).
+    store: Option<NoticesStore>,
+    /// Where the update check keeps its state.
+    update_state: Option<crate::update_model::UpdateStateStore>,
     status: Option<UpdateStatus>,
     checking: bool,
     /// Windows that asked and wait for the answer (several can ask during one check).
@@ -78,14 +82,17 @@ pub struct UpdateHub {
 impl EventEmitter<HubEvent> for UpdateHub {}
 
 impl UpdateHub {
-    fn new() -> Self {
-        let notices = Notices::load(&notices_file());
+    fn new(core: &lector_app::AppCore) -> Self {
+        let store: NoticesStore = core.store().notices();
+        let notices = Notices::load(&store);
         let status = notices
             .pending_update
             .clone()
             .filter(|s| is_newer_available(s, CURRENT_VERSION));
         UpdateHub {
             notices,
+            store: Some(store),
+            update_state: Some(core.store().update_state()),
             status,
             checking: false,
             askers: Vec::new(),
@@ -93,10 +100,19 @@ impl UpdateHub {
         }
     }
 
-    fn save(&self) {
-        if let Err(e) = self.notices.save(&notices_file()) {
-            tracing::warn!("notices not saved: {e}");
+    /// Changes the notices: in the store in one transaction (the in-memory copy becomes the
+    /// stored value), or in memory when there is no store or it refused.
+    fn persist<R>(&mut self, f: impl Fn(&mut Notices) -> R) -> R {
+        if let Some(store) = &self.store {
+            match Notices::update(store, &f) {
+                Ok((r, n)) => {
+                    self.notices = n;
+                    return r;
+                }
+                Err(e) => tracing::warn!("notices not saved: {e}"),
+            }
         }
+        f(&mut self.notices)
     }
 
     /// The available update, if one is known.
@@ -119,13 +135,12 @@ impl UpdateHub {
         }
         self.checking = true;
         let channel = forge_channel(AppSettings::get(cx).updates.channel);
+        let Some(state) = self.update_state.clone() else {
+            self.checking = false;
+            return;
+        };
         let work = cx.background_spawn(async move {
-            run_check(
-                CURRENT_VERSION,
-                channel,
-                &UpdateOptions::default(),
-                &lector_config::update_state_file(),
-            )
+            run_check(CURRENT_VERSION, channel, &UpdateOptions::default(), &state)
         });
         cx.spawn(async move |this, cx| {
             let status = work.await;
@@ -133,17 +148,16 @@ impl UpdateHub {
                 this.checking = false;
                 match &status {
                     UpdateStatus::Available { .. } => {
-                        this.notices.pending_update = Some(status.clone());
+                        this.persist(|n| n.pending_update = Some(status.clone()));
                         this.status = Some(status.clone());
                     }
                     UpdateStatus::UpToDate => {
-                        this.notices.pending_update = None;
+                        this.persist(|n| n.pending_update = None);
                         this.status = None;
                     }
                     // Keep the last known state when the check did not produce an answer.
                     UpdateStatus::CouldNotCheck { .. } => {}
                 }
-                this.save();
                 cx.emit(HubEvent::Changed);
                 for asker in std::mem::take(&mut this.askers) {
                     cx.emit(HubEvent::ManualResult(Box::new(status.clone()), asker));
@@ -158,20 +172,17 @@ impl UpdateHub {
     fn automatic_check(&mut self, cx: &mut Context<Self>) {
         let setting = AppSettings::get(cx).updates.check;
         let effective = self.notices.effective_check(setting);
-        if crate::update_model::automatic_check_due_in(
-            effective,
-            &lector_config::update_state_file(),
-            now_secs(),
-        ) {
+        let due = self.update_state.as_ref().is_some_and(|state| {
+            crate::update_model::automatic_check_due_in(effective, state, now_secs())
+        });
+        if due {
             self.check(None, cx);
         }
     }
 
     fn toggle_auto(&mut self, cx: &mut Context<Self>) -> bool {
         let setting = AppSettings::get(cx).updates.check;
-        let on = self.notices.toggle_auto_check(setting);
-        self.save();
-        on
+        self.persist(|n| n.toggle_auto_check(setting))
     }
 }
 
@@ -313,11 +324,10 @@ impl Focusable for FirstRunPrompt {
 impl FirstRunPrompt {
     fn answer(&mut self, turn_on: Option<bool>, cx: &mut Context<Self>) {
         let _ = self.hub.update(cx, |hub, cx| {
-            match turn_on {
-                Some(on) => hub.notices.answer_update_question(on),
-                None => hub.notices.dismiss_update_question(),
-            }
-            hub.save();
+            hub.persist(|n| match turn_on {
+                Some(on) => n.answer_update_question(on),
+                None => n.dismiss_update_question(),
+            });
             if turn_on == Some(true) {
                 hub.check(None, cx);
             }
@@ -587,6 +597,53 @@ impl Render for UpdateStatusItem {
     }
 }
 
+/// "State not saved": shown for as long as this process's state is read-only (ADR 0004). The
+/// tooltip and a click say what is lost and why.
+pub struct StateStoreStatusItem {
+    indicator: lector_app::store::StateIndicator,
+}
+
+impl Render for StateStoreStatusItem {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = cx.theme().ui.clone();
+        let detail = self.indicator.detail.clone();
+        let tooltip = detail.clone();
+        h_flex()
+            .id("status-state-store")
+            .gap(px(4.))
+            .px(px(6.))
+            .h_full()
+            .items_center()
+            .cursor_pointer()
+            .rounded(metrics::radius())
+            .hover(|s| s.bg(ui.hover.hsla()))
+            .text_size(metrics::text_sm())
+            .text_color(ui.text_muted.hsla())
+            .tooltip(Tooltip::text(tooltip))
+            .child(
+                Icon::new(IconName::AlertTriangle)
+                    .size(IconSize::XSmall)
+                    .color(ui.text_muted.hsla()),
+            )
+            .child(self.indicator.label.clone())
+            .on_click(move |_, window, cx| {
+                let detail = detail.clone();
+                if let Some(ws) = window.root::<Workspace>().flatten() {
+                    ws.update(cx, |ws, cx| {
+                        ws.show_action_toast_level(
+                            detail,
+                            lector_ui::views::workspace::ToastLevel::Warning,
+                            crate::health_model::STATE_STORE_BUTTON,
+                            std::time::Duration::from_secs(20),
+                            |_, _, _| {},
+                            cx,
+                        )
+                    });
+                }
+            })
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------------------------
@@ -594,7 +651,8 @@ impl Render for UpdateStatusItem {
 /// Registers the hub and the commands with every workspace window (also windows without a folder:
 /// the Help menu works on the welcome screen).
 pub fn init(cx: &mut App) {
-    let hub = cx.new(|_| UpdateHub::new());
+    let core = lector_ui::commands_bridge::core(cx);
+    let hub = cx.new(|_| UpdateHub::new(&core));
     install(cx, hub);
 }
 
@@ -616,6 +674,12 @@ fn install(cx: &mut App, hub: Entity<UpdateHub>) {
             }
         };
         sync(ws, cx);
+        // Read-only state lasts for the whole process: a persistent item, not only a toast.
+        let mode = lector_ui::commands_bridge::core(cx).store().mode();
+        if let Some(indicator) = crate::health_model::state_status_item(&mode) {
+            let item = cx.new(|_| StateStoreStatusItem { indicator });
+            ws.set_status_view("state-store", Some(item.into()), cx);
+        }
         let sync_on_event = sync.clone();
         cx.subscribe_in(
             &hub,
@@ -714,8 +778,7 @@ fn startup_notices(
     if let Some(record) = previous {
         if hub.read(cx).notices.needs_crash_note(&record.id) {
             hub.update(cx, |h, _| {
-                h.notices.acknowledged_crash = Some(record.id.clone());
-                h.save();
+                h.persist(|n| n.acknowledged_crash = Some(record.id.clone()));
             });
             ws.show_action_toast(
                 crate::health_model::ABNORMAL_EXIT_NOTE,
@@ -725,6 +788,20 @@ fn startup_notices(
                 cx,
             );
         }
+    }
+    // The state store could not be used normally (ADR 0004): say what this process loses.
+    let core = lector_ui::commands_bridge::core(cx);
+    let store = core.store();
+    if let Some(note) = crate::health_model::state_store_note(&store.mode(), store.recovered_from())
+    {
+        ws.show_action_toast_level(
+            note,
+            lector_ui::views::workspace::ToastLevel::Warning,
+            crate::health_model::STATE_STORE_BUTTON,
+            std::time::Duration::from_secs(20),
+            |_, _, _| {},
+            cx,
+        );
     }
 }
 
@@ -761,6 +838,8 @@ mod tests {
         });
         let hub = cx.new(|_| UpdateHub {
             notices: Notices::default(),
+            store: None,
+            update_state: None,
             status: None,
             checking: false,
             askers: Vec::new(),

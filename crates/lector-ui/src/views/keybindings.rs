@@ -556,7 +556,7 @@ impl PaneItem for KeybindingsItem {
         self.view.focus_handle(cx)
     }
 
-    fn tab_kind(&self, _: &App) -> Option<lector_config::TabKind> {
+    fn tab_kind(&self, _: &App) -> Option<lector_app::store::TabKind> {
         None
     }
 

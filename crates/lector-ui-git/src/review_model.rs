@@ -158,7 +158,7 @@ pub fn changes_fingerprint(workdir: &Path, status: &[StatusEntry]) -> String {
         }
         text.push('\n');
     }
-    lector_config::content_hash(text.as_bytes())
+    lector_review::content_hash(text.as_bytes())
 }
 
 /// What a refresh of the model needs from the store.

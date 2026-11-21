@@ -14,8 +14,8 @@ use gpui::{
     Window,
 };
 use lector_app::project::{FileList, GitStatusMap, Location, NavHistory, Project};
+use lector_app::store::{PaneState, Session, TabKind, TabState};
 use lector_base::CancelToken;
-use lector_config::{PaneState, Session, TabKind, TabState};
 use lector_lsp::ServerState;
 
 use super::Workspace;
@@ -1549,9 +1549,9 @@ impl Workspace {
             .unwrap_or(0);
         let axis = match &self.center {
             PaneNode::Split { state, .. } if state.read(cx).axis() == Axis::Vertical => {
-                lector_config::Axis::Vertical
+                lector_app::store::Axis::Vertical
             }
-            _ => lector_config::Axis::Horizontal,
+            _ => lector_app::store::Axis::Horizontal,
         };
         let panes = panes
             .iter()
@@ -1639,7 +1639,7 @@ impl Workspace {
                 .update(cx, |s, cx| s.set_active_panel(*panel, cx));
         }
         let axis = match session.axis {
-            lector_config::Axis::Vertical => Axis::Vertical,
+            lector_app::store::Axis::Vertical => Axis::Vertical,
             _ => Axis::Horizontal,
         };
         let mut restored_any = false;

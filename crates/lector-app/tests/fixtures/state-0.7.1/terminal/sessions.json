@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "projects": {
+    "/fixture/emptied": [
+      {
+        "cwds": [
+          "/fixture/emptied"
+        ],
+        "title": null,
+        "vertical": false
+      }
+    ],
+    "/fixture/only-legacy": [
+      {
+        "cwds": [
+          "/fixture/only-legacy",
+          "/fixture/only-legacy/src"
+        ],
+        "title": "dev",
+        "vertical": true
+      }
+    ],
+    "/fixture/project": [
+      {
+        "cwds": [
+          "/fixture/project/old"
+        ],
+        "title": null,
+        "vertical": false
+      }
+    ]
+  }
+}

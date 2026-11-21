@@ -6,9 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use lector_app::store::{ReviewMarks, Store};
 use lector_app::Project;
 use lector_base::CancelToken;
-use lector_config::{ReviewStore, Settings};
+use lector_config::Settings;
 use lector_git::{Changeset, LogQuery};
 use lector_review::{conflicts, review};
 
@@ -95,7 +96,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (String, Vec<u8>, Option<std::time
 }
 
 /// Exercises every read path the UI uses on `project`.
-fn exercise(project: &Project, store: &ReviewStore) {
+fn exercise(project: &Project, store: &ReviewMarks) {
     let files = project.rescan_files(&CancelToken::new());
     let _ = project.refresh_git_status();
     project.index_symbols(&CancelToken::new(), |_, _| {});
@@ -176,7 +177,7 @@ fn exercise(project: &Project, store: &ReviewStore) {
             continue;
         };
         for file in &view.files {
-            let opts = review::diff_options(&project.settings().diff);
+            let opts = review::diff_options(project.settings().diff.ignore_whitespace);
             if let Ok(diff) = lector_app::project::load_file_diff(project, &file.change, &opts) {
                 for line in 0..diff.new.line_count().min(20) {
                     let _ = diff.inline_for_new(line);
@@ -211,7 +212,7 @@ fn exercise(project: &Project, store: &ReviewStore) {
             project.languages(),
             first,
             "HEAD",
-            &review::diff_options(&project.settings().diff),
+            &review::diff_options(project.settings().diff.ignore_whitespace),
             lector_app::content_cache::ContentCache::global(),
         );
     }
@@ -249,7 +250,7 @@ fn repository_is_byte_identical_after_reading() {
 
     let before = snapshot(&root);
     let store_dir = tempfile::tempdir().unwrap();
-    let store = ReviewStore::open(store_dir.path().join("review.json"));
+    let store = Store::open(&store_dir.path().join("lector.redb")).review_marks();
     let project = Project::open(&root, settings()).unwrap();
     assert!(project.repo().is_some());
     exercise(&project, &store);
@@ -328,7 +329,7 @@ fn unusual_files_do_not_panic() {
         assert!(project_load_rejects(&root, "pipe"));
     }
     let store_dir = tempfile::tempdir().unwrap();
-    let store = ReviewStore::open(store_dir.path().join("review.json"));
+    let store = Store::open(&store_dir.path().join("lector.redb")).review_marks();
     let project = Project::open(&root, settings()).unwrap();
     exercise(&project, &store);
     // Revisions that look like options are rejected, not passed to git.
@@ -344,7 +345,7 @@ fn unusual_files_do_not_panic() {
 #[test]
 fn unusual_repositories_do_not_panic() {
     let store_dir = tempfile::tempdir().unwrap();
-    let store = ReviewStore::open(store_dir.path().join("review.json"));
+    let store = Store::open(&store_dir.path().join("lector.redb")).review_marks();
     let dir = tempfile::tempdir().unwrap();
 
     // Not a repository.
@@ -457,7 +458,7 @@ fn conflicted_merge_is_byte_identical_after_reading() {
 
     let before = snapshot(&root);
     let store_dir = tempfile::tempdir().unwrap();
-    let store = ReviewStore::open(store_dir.path().join("review.json"));
+    let store = Store::open(&store_dir.path().join("lector.redb")).review_marks();
     let project = Project::open(&root, settings()).unwrap();
     let repo = project.repo().expect("repo");
     let state = conflicts::conflict_state(repo).unwrap();

@@ -148,7 +148,7 @@ pub fn assess_files(
     if view.files.len() > MAX_RISK_FILES {
         return Err(view.files.len());
     }
-    let opts = review::diff_options(&project.settings().diff);
+    let opts = review::diff_options(project.settings().diff.ignore_whitespace);
     let mut diffs: Vec<FileDiff> = Vec::new();
     let mut origin: Vec<usize> = Vec::new();
     for (i, file) in view.files.iter().enumerate() {
@@ -233,7 +233,7 @@ pub fn run_changes(args: &ChangesArgs, io: &mut Io) -> anyhow::Result<()> {
     let project = open_repo_project(&dir)?;
     let cs = changes_changeset(args, &project)?;
     let core = open_core();
-    let view = lector_app::project::load_changeset(&project, &cs, &core.review_store())
+    let view = lector_app::project::load_changeset(&project, &cs, &core.review_marks())
         .with_context(|| "cannot load the changes")?;
 
     let mut risk_skipped = None;
@@ -591,7 +591,7 @@ pub fn run_diff(args: &DiffArgs, io: &mut Io) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("not inside a git repository"))?;
     let cs = parse_changeset(repo, &args.changeset)?;
     let core = open_core();
-    let view = lector_app::project::load_changeset(&project, &cs, &core.review_store())
+    let view = lector_app::project::load_changeset(&project, &cs, &core.review_marks())
         .with_context(|| "cannot load the changes")?;
     let only = args
         .file
@@ -610,7 +610,7 @@ pub fn run_diff(args: &DiffArgs, io: &mut Io) -> anyhow::Result<()> {
         })
     };
     // Moves need the whole changeset (a block can move to a file that is not shown).
-    let opts = review::diff_options(&project.settings().diff);
+    let opts = review::diff_options(project.settings().diff.ignore_whitespace);
     let wanted: Vec<&ReviewFile> = view
         .files
         .iter()

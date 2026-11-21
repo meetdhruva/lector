@@ -214,7 +214,7 @@ fn the_lock_follows_split_copies_and_the_restored_session(cx: &mut TestAppContex
         .iter()
         .flat_map(|p| p.tabs.iter())
         .filter_map(|t| match &t.kind {
-            lector_config::TabKind::File { path } => Some((
+            lector_app::store::TabKind::File { path } => Some((
                 path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),

@@ -726,10 +726,10 @@ impl Project {
 pub fn load_changeset(
     project: &Project,
     cs: &Changeset,
-    store: &lector_config::ReviewStore,
+    store: &crate::store::ReviewMarks,
 ) -> Result<ChangesetView> {
     let repo = project.repo().ok_or(ProjectError::NotARepository)?;
-    let opts = review::diff_options(&project.settings().diff);
+    let opts = review::diff_options(project.settings().diff.ignore_whitespace);
     Ok(ReviewService::new(store.clone()).changeset(repo, cs, &opts, &CancelToken::new())?)
 }
 

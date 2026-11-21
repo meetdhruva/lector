@@ -6,7 +6,7 @@
 //! * loading changesets and file diffs, with the app's content cache ([`ContentCache`]) as
 //!   the [`DerivedCache`] of the analysis,
 //! * the "viewed" marks: read when a changeset is loaded, written by [`ReviewService::set_viewed`]
-//!   (same store and file format as before; ADR 0004 moves the storage later),
+//!   (stored in [`crate::store`], concern `review_state`),
 //! * [`apply`]: applying a hunk patch to the index or working tree (called by the
 //!   `git.*_hunk` commands only).
 //!
@@ -20,7 +20,6 @@ pub mod apply;
 use std::path::Path;
 
 use lector_base::CancelToken;
-use lector_config::ReviewStore;
 use lector_diff::{DiffOptions, DiffStats};
 use lector_git::{Changeset, FileChange, Repo};
 use lector_review::review::{self, ChangesetView, FileDiff, ReviewFile};
@@ -28,13 +27,14 @@ use lector_review::Result;
 use lector_syntax::LanguageRegistry;
 
 use crate::content_cache::ContentCache;
+use crate::store::ReviewMarks;
 
 /// Review data for views, the CLI, MCP and agents. Cheap to clone; `Send + Sync`.
 ///
 /// Reach it from the app with [`AppCore::review`](crate::AppCore::review).
 #[derive(Clone)]
 pub struct ReviewService {
-    store: Option<ReviewStore>,
+    store: Option<ReviewMarks>,
     cache: ContentCache,
 }
 
@@ -46,12 +46,12 @@ impl std::fmt::Debug for ReviewService {
 
 impl ReviewService {
     /// A service over `store` (the viewed marks) and the process-wide [`ContentCache`].
-    pub fn new(store: ReviewStore) -> Self {
+    pub fn new(store: ReviewMarks) -> Self {
         Self::with_cache(store, ContentCache::global().clone())
     }
 
     /// A service over `store` and a specific cache (tests, isolated cores).
-    pub fn with_cache(store: ReviewStore, cache: ContentCache) -> Self {
+    pub fn with_cache(store: ReviewMarks, cache: ContentCache) -> Self {
         Self {
             store: Some(store),
             cache,
@@ -174,13 +174,15 @@ impl ReviewService {
             .store
             .as_ref()
             .ok_or_else(|| std::io::Error::other("no review store"))?;
-        store.set_viewed(
-            repo_root,
-            changeset_key,
-            file.path(),
-            &file.content_hash,
-            viewed,
-        )?;
+        store
+            .set_viewed(
+                repo_root,
+                changeset_key,
+                file.path(),
+                &file.content_hash,
+                viewed,
+            )
+            .map_err(std::io::Error::other)?;
         file.viewed = viewed;
         Ok(())
     }

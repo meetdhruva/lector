@@ -11,8 +11,9 @@ use std::sync::Arc;
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, WeakEntity, Window};
 use lector_app::git_service::{GitSnapshot, RepoState, Subscription};
+use lector_app::store::ReviewMarks;
 use lector_app::Project;
-use lector_config::{ReviewStore, Settings};
+use lector_config::Settings;
 use lector_git::{HeadInfo, Repo, StatusEntry};
 use lector_review::conflicts::ConflictState;
 use lector_ui::views::{Workspace, WorkspaceEvent};
@@ -38,7 +39,7 @@ pub struct GitStore {
     /// Merge / rebase / cherry-pick / revert in progress and conflicted paths.
     pub conflicts: Arc<ConflictState>,
     /// Viewed marks (database-backed, shared by every window).
-    pub review: ReviewStore,
+    pub review: ReviewMarks,
     /// Bumped on each observed change.
     pub generation: u64,
     /// The git views of this window (set by `init`).
@@ -118,7 +119,7 @@ impl GitStore {
             head: None,
             status: Arc::new(Vec::new()),
             conflicts: Arc::new(ConflictState::default()),
-            review: core.review_store(),
+            review: core.review_marks(),
             generation: 0,
             views: None,
             sync: None,
@@ -151,7 +152,7 @@ impl GitStore {
             repo,
             languages: project.languages().clone(),
             status: self.status.clone(),
-            diff_options: lector_review::review::diff_options(&settings.diff),
+            diff_options: lector_review::review::diff_options(settings.diff.ignore_whitespace),
             detect_moved: settings.review.detect_moved,
         };
         self.review_model.update(cx, |m, cx| m.refresh(inputs, cx));

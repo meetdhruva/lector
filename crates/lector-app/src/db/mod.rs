@@ -1,20 +1,17 @@
-//! Lector's embedded database (redb, pure Rust) at `data_dir()/lector.redb`.
+//! Lector's embedded database (redb, pure Rust): the storage under [`crate::store`].
 //!
 //! Tables: `meta` (schema version, flags), `review` (viewed marks), `comments`,
 //! `sessions`, `recent`, `kv`, `cache` (bytes by key, LRU-trimmed) and `journal`
-//! (append-only activity log, owned by the journal module).
+//! (append-only activity log, owned by the journal module). The typed, versioned
+//! concerns of [`crate::store`] add their own tables (`store_meta`,
+//! `terminal_sessions`, `notices`, `update_state`).
 //!
-//! **Multiple windows / processes.** One process opens the file once (the
-//! [`crate::AppCore`] holds it; every window shares it). Processes open it in
-//! redb's `MultiWriter` mode where the platform supports byte-range locks, so two
-//! Lector instances share one database. If the file cannot be opened (another
-//! process holds an exclusive lock, an incompatible redb, corruption), the
-//! database falls back to a per-process temporary copy and finally to memory —
-//! it never crashes the app; [`Db::mode`] says which.
-//!
-//! On first open the v0.3 JSON stores (`review.json`, `sessions/*.json`,
-//! `recent.json`) are imported once ([`Db::import_v03`]); the files are left in
-//! place.
+//! **Opening.** [`Db::open`] opens a file strictly (an error when it cannot). The policy
+//! for the user's database — sharing with another Lector process, read-only state when
+//! the file is locked, copying a corrupt file aside — is [`crate::store::Store::open`].
+//! One process opens the file once (the [`crate::AppCore`] holds it; every window shares
+//! it). Processes open it in redb's `MultiWriter` mode where the platform supports
+//! byte-range locks, so two Lector instances share one database.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -27,25 +24,24 @@ use redb::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-mod stores;
-pub use stores::{DbRecentProjects, DbReviewBackend, DbSessionStore};
-
 /// Current schema version.
 pub const SCHEMA_VERSION: u64 = 1;
 /// Cache budget in bytes before LRU trimming.
 pub const CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
-const REVIEW: TableDefinition<&str, &[u8]> = TableDefinition::new("review");
-const COMMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("comments");
-const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
-const RECENT: TableDefinition<&str, u64> = TableDefinition::new("recent");
-const KV: TableDefinition<&str, &[u8]> = TableDefinition::new("kv");
-const CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("cache");
-const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
+pub(crate) const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+pub(crate) const REVIEW: TableDefinition<&str, &[u8]> = TableDefinition::new("review");
+pub(crate) const COMMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("comments");
+pub(crate) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
+pub(crate) const RECENT: TableDefinition<&str, u64> = TableDefinition::new("recent");
+pub(crate) const KV: TableDefinition<&str, &[u8]> = TableDefinition::new("kv");
+const CACHE_NAME: &str = "cache";
+pub(crate) const CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new(CACHE_NAME);
+pub(crate) const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
 
 const KEY_VERSION: &str = "schema_version";
-const KEY_IMPORTED: &str = "imported_v03";
+/// Set by 0.4 to 0.7.1 once the v0.3 JSON stores were copied into the database.
+pub(crate) const KEY_IMPORTED_V03: &str = "imported_v03";
 const KEY_COMMENT_SEQ: &str = "comment_seq";
 
 /// Database errors.
@@ -96,29 +92,28 @@ pub type DbResult<T> = Result<T, DbError>;
 pub enum DbMode {
     /// The shared file.
     File(PathBuf),
-    /// A private copy (the shared file could not be opened); changes are not shared.
-    TempCopy {
-        /// The file that could not be opened.
-        original: PathBuf,
-        /// The copy in use.
-        copy: PathBuf,
+    /// The file could not be opened for writing (locked by another process that excludes
+    /// this one, written by a newer Lector, not writable...): the data is held in memory
+    /// for this process only, seeded from the file when it could at least be read. Nothing
+    /// is ever written back to `path` or anywhere else.
+    ReadOnly {
+        /// The file that could not be opened for writing.
+        path: PathBuf,
+        /// Why, for the log and the UI.
+        reason: String,
     },
-    /// In memory only (tests, or nothing else worked).
+    /// In memory only (tests, `--no-state`).
     Memory,
 }
+
+/// Called once, at the first state write of a process whose state is read-only.
+type ReadOnlyWriteHook = Box<dyn FnOnce() + Send>;
 
 struct Inner {
     db: Database,
     mode: DbMode,
     cache_puts: AtomicU32,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        if let DbMode::TempCopy { copy, .. } = &self.mode {
-            let _ = std::fs::remove_file(copy);
-        }
-    }
+    read_only_write: parking_lot::Mutex<Option<ReadOnlyWriteHook>>,
 }
 
 /// Handle to the database. Cheap to clone; `Send + Sync`.
@@ -174,87 +169,102 @@ pub(crate) fn now_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-fn builder(mode: ConcurrencyMode) -> Builder {
+pub(crate) fn builder(mode: ConcurrencyMode) -> Builder {
     let mut b = Builder::new();
     b.set_cache_size(16 * 1024 * 1024);
     b.set_concurrency_mode(mode);
     b
 }
 
-fn open_file(path: &Path) -> DbResult<Database> {
-    if let Some(dir) = path.parent() {
+/// Opens (or creates) `path` in `MultiWriter` mode, or `ExclusiveWriter` where the platform
+/// has no byte-range locks. The raw redb error is returned so that the caller can tell a
+/// lock from corruption ([`crate::store::Store::open`]).
+pub(crate) fn open_file(path: &Path) -> Result<Database, redb::DatabaseError> {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let multi = if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
-        builder(ConcurrencyMode::MultiWriter).create(path)
-    } else {
-        builder(ConcurrencyMode::ExclusiveWriter).create(path)
-    };
-    match multi {
-        Ok(db) => Ok(db),
-        Err(err) => {
-            tracing::debug!("multi-writer open failed ({err}); trying exclusive");
-            Ok(builder(ConcurrencyMode::ExclusiveWriter).create(path)?)
+    create_private(path)?;
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
+        return builder(ConcurrencyMode::ExclusiveWriter).create(path);
+    }
+    match builder(ConcurrencyMode::MultiWriter).create(path) {
+        Err(redb::DatabaseError::Storage(redb::StorageError::Unsupported)) => {
+            tracing::debug!(
+                "no byte-range locks for {}; opening exclusively",
+                path.display()
+            );
+            builder(ConcurrencyMode::ExclusiveWriter).create(path)
         }
+        other => other,
+    }
+}
+
+/// Creates `path` empty and readable by its owner only (0600 on Unix, whatever the umask: the
+/// database holds comments, the journal and project paths) unless it exists; an existing file
+/// keeps the mode its owner gave it. redb initializes an empty file as a new database.
+pub(crate) fn create_private(path: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
 impl Db {
-    /// Opens (or creates) the database file and migrates it.
+    /// Opens (or creates) the database file and migrates it. Strict: any failure is an
+    /// error (the user's database is opened with [`crate::store::Store::open`]).
     pub fn open(path: &Path) -> DbResult<Db> {
         let db = open_file(path)?;
         Db::init(db, DbMode::File(path.to_path_buf()))
     }
 
-    /// Opens `path`; if that fails, a private temporary copy of it; if that
-    /// fails too, an in-memory database. Never fails.
-    pub fn open_or_fallback(path: &Path) -> Db {
-        match Db::open(path) {
-            Ok(db) => return db,
-            Err(err) => tracing::warn!(
-                "cannot open {} ({err}); using a private copy",
-                path.display()
-            ),
+    /// A handle over an already opened database, migrated.
+    pub(crate) fn from_database(db: Database, mode: DbMode) -> DbResult<Db> {
+        Db::init(db, mode)
+    }
+
+    /// A handle over an in-memory snapshot, without the schema check (the snapshot may come
+    /// from a newer file; it is read-only state for this process).
+    pub(crate) fn from_snapshot(db: Database, mode: DbMode) -> Db {
+        Db {
+            inner: Arc::new(Inner {
+                db,
+                mode,
+                cache_puts: AtomicU32::new(0),
+                read_only_write: parking_lot::Mutex::new(None),
+            }),
         }
-        // The copy holds review state, comments and the activity journal: keep it
-        // next to the original (same owner, same protection), readable only by the user.
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir);
-        let copy = dir.join(format!(
-            ".lector-{}-{}.redb",
-            std::process::id(),
-            now_nanos()
-        ));
-        let copied = if path.exists() {
-            std::fs::copy(path, &copy).and_then(|_| restrict_to_owner(&copy))
-        } else {
-            Ok(())
-        };
-        if copied.is_ok() {
-            let attempt = builder(ConcurrencyMode::ExclusiveWriter)
-                .create(&copy)
-                .map_err(DbError::from)
-                .and_then(|db| {
-                    Db::init(
-                        db,
-                        DbMode::TempCopy {
-                            original: path.to_path_buf(),
-                            copy: copy.clone(),
-                        },
-                    )
-                });
-            match attempt {
-                Ok(db) => return db,
-                Err(err) => {
-                    tracing::warn!("cannot open a private copy ({err}); using memory");
-                    let _ = std::fs::remove_file(&copy);
-                }
+    }
+
+    /// The redb handle (for [`crate::store`]).
+    pub(crate) fn raw(&self) -> &Database {
+        &self.inner.db
+    }
+
+    /// A write transaction for a change of Lector's state. In read-only state (the change is
+    /// kept in memory only) the first one runs the hook set with
+    /// [`Db::on_read_only_write`]. Cache writes and internal setup use [`Db::raw`].
+    pub(crate) fn begin_write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        if matches!(self.inner.mode, DbMode::ReadOnly { .. }) {
+            let hook = self.inner.read_only_write.lock().take();
+            if let Some(hook) = hook {
+                hook();
             }
         }
-        Db::in_memory()
+        self.inner.db.begin_write()
+    }
+
+    /// Sets what runs at the first state write while the state is read-only (the CLI prints a
+    /// warning on stderr). Replaces an earlier hook; never runs in read-write state.
+    pub fn on_read_only_write(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.inner.read_only_write.lock() = Some(Box::new(hook));
     }
 
     /// An in-memory database (tests; last-resort fallback).
@@ -276,6 +286,7 @@ impl Db {
                 db,
                 mode,
                 cache_puts: AtomicU32::new(0),
+                read_only_write: parking_lot::Mutex::new(None),
             }),
         };
         this.migrate()?;
@@ -295,7 +306,7 @@ impl Db {
     }
 
     fn migrate(&self) -> DbResult<()> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.inner.db.begin_write()?; // setup, not a state change
         {
             let mut meta = tx.open_table(META)?;
             let version = meta.get(KEY_VERSION)?.map(|g| g.value()).unwrap_or(0);
@@ -326,19 +337,27 @@ impl Db {
 
     // ----- generic helpers -------------------------------------------------
 
-    fn get_bytes(&self, def: TableDefinition<&str, &[u8]>, key: &str) -> DbResult<Option<Vec<u8>>> {
+    pub(crate) fn get_bytes(
+        &self,
+        def: TableDefinition<&str, &[u8]>,
+        key: &str,
+    ) -> DbResult<Option<Vec<u8>>> {
         let tx = self.inner.db.begin_read()?;
         let t = tx.open_table(def)?;
         Ok(t.get(key)?.map(|g| g.value().to_vec()))
     }
 
-    fn put_bytes(
+    pub(crate) fn put_bytes(
         &self,
         def: TableDefinition<&str, &[u8]>,
         key: &str,
         value: Option<&[u8]>,
     ) -> DbResult<()> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = if redb::TableHandle::name(&def) == CACHE_NAME {
+            self.inner.db.begin_write()?
+        } else {
+            self.begin_write()?
+        };
         {
             let mut t = tx.open_table(def)?;
             match value {
@@ -354,7 +373,7 @@ impl Db {
         Ok(())
     }
 
-    fn scan_prefix(
+    pub(crate) fn scan_prefix(
         &self,
         def: TableDefinition<&str, &[u8]>,
         prefix: &str,
@@ -371,12 +390,6 @@ impl Db {
             out.push((k.to_string(), v.value().to_vec()));
         }
         Ok(out)
-    }
-
-    fn table_len(&self, def: TableDefinition<&str, &[u8]>) -> DbResult<u64> {
-        let tx = self.inner.db.begin_read()?;
-        let t = tx.open_table(def)?;
-        Ok(t.len()?)
     }
 
     // ----- kv ----------------------------------------------------------------
@@ -434,7 +447,7 @@ impl Db {
     /// Removes the least recently written entries until the cache holds at most
     /// `max_bytes`. Returns how many were removed.
     pub fn trim_cache(&self, max_bytes: u64) -> DbResult<usize> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.inner.db.begin_write()?; // the cache is not state
         let removed;
         {
             let mut t = tx.open_table(CACHE)?;
@@ -471,7 +484,7 @@ impl Db {
 
     /// Appends an entry to the journal; returns its id (1, 2, ...).
     pub fn append_journal(&self, bytes: &[u8]) -> DbResult<u64> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         let id;
         {
             let mut t = tx.open_table(JOURNAL)?;
@@ -492,7 +505,7 @@ impl Db {
 
     /// Replaces a journal entry (e.g. to mark it undone).
     pub fn journal_put(&self, id: u64, bytes: &[u8]) -> DbResult<()> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         {
             let mut t = tx.open_table(JOURNAL)?;
             t.insert(id, bytes)?;
@@ -519,7 +532,7 @@ impl Db {
 
     /// Deletes the oldest journal entries beyond `keep`; returns how many went.
     pub fn journal_trim(&self, keep: usize) -> DbResult<usize> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         let mut removed = 0;
         {
             let mut t = tx.open_table(JOURNAL)?;
@@ -542,7 +555,7 @@ impl Db {
 
     /// Adds a comment, assigning its id.
     pub fn add_comment(&self, mut comment: Comment) -> DbResult<Comment> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         {
             let mut meta = tx.open_table(META)?;
             let id = meta.get(KEY_COMMENT_SEQ)?.map(|g| g.value()).unwrap_or(0) + 1;
@@ -600,7 +613,7 @@ impl Db {
 
     /// Next id for a comment thread or comment (shared sequence with legacy comments).
     pub fn next_comment_id(&self) -> DbResult<u64> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         let id;
         {
             let mut meta = tx.open_table(META)?;
@@ -629,149 +642,7 @@ impl Db {
             .map(|(_, v)| v)
             .collect())
     }
-
-    // ----- stores ----------------------------------------------------------------
-
-    /// Viewed marks backed by this database.
-    pub fn review_store(&self) -> lector_config::ReviewStore {
-        lector_config::ReviewStore::with_backend(Arc::new(DbReviewBackend::new(self.clone())))
-    }
-
-    /// Sessions backed by this database.
-    pub fn session_store(&self) -> DbSessionStore {
-        DbSessionStore::new(self.clone())
-    }
-
-    /// Recent projects backed by this database.
-    pub fn recent_projects(&self) -> DbRecentProjects {
-        DbRecentProjects::new(self.clone())
-    }
-
-    // ----- v0.3 import -------------------------------------------------------------
-
-    /// Imports `review.json`, `sessions/*.json` and `recent.json` from a v0.3
-    /// data directory, once (a flag in `meta` records it). Returns the number
-    /// of imported records (0 when already imported).
-    pub fn import_v03(&self, data_dir: &Path) -> DbResult<usize> {
-        {
-            let tx = self.inner.db.begin_read()?;
-            let meta = tx.open_table(META)?;
-            if meta.get(KEY_IMPORTED)?.is_some() {
-                return Ok(0);
-            }
-        }
-        #[derive(Deserialize)]
-        struct ReviewEntry {
-            repo: String,
-            changeset: String,
-            path: String,
-            hash: String,
-            #[serde(default)]
-            at: u64,
-        }
-        #[derive(Deserialize, Default)]
-        struct ReviewFile {
-            #[serde(default)]
-            entries: Vec<ReviewEntry>,
-        }
-        #[derive(Deserialize, Default)]
-        struct RecentFile {
-            #[serde(default)]
-            projects: Vec<PathBuf>,
-        }
-        let review: ReviewFile = std::fs::read(data_dir.join("review.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let recent: RecentFile = std::fs::read(data_dir.join("recent.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let mut sessions = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(data_dir.join("sessions")) {
-            for entry in rd.flatten() {
-                let path = entry.path();
-                if path.extension().is_none_or(|e| e != "json") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let Ok(bytes) = std::fs::read(&path) else {
-                    continue;
-                };
-                if serde_json::from_slice::<lector_config::Session>(&bytes).is_ok() {
-                    sessions.push((stem.to_string(), bytes));
-                }
-            }
-        }
-        let mut n = 0;
-        let tx = self.inner.db.begin_write()?;
-        {
-            let mut t = tx.open_table(REVIEW)?;
-            for e in review.entries {
-                let key = stores::review_key(&e.repo, &e.changeset, &e.path);
-                if t.get(key.as_str())?.is_none() {
-                    let v = serde_json::to_vec(&stores::ReviewMark {
-                        hash: e.hash,
-                        at: e.at,
-                    })?;
-                    t.insert(key.as_str(), v.as_slice())?;
-                    n += 1;
-                }
-            }
-            let mut t = tx.open_table(SESSIONS)?;
-            for (key, bytes) in sessions {
-                if t.get(key.as_str())?.is_none() {
-                    t.insert(key.as_str(), bytes.as_slice())?;
-                    n += 1;
-                }
-            }
-            let mut t = tx.open_table(RECENT)?;
-            let base = now_nanos().saturating_sub(1_000_000_000);
-            for (i, p) in recent.projects.iter().enumerate() {
-                let key = p.to_string_lossy();
-                if t.get(key.as_ref())?.is_none() {
-                    t.insert(key.as_ref(), base - i as u64)?;
-                    n += 1;
-                }
-            }
-            tx.open_table(META)?.insert(KEY_IMPORTED, 1)?;
-        }
-        tx.commit()?;
-        Ok(n)
-    }
 }
 
 #[cfg(test)]
 mod tests;
-
-/// Makes `path` readable and writable by its owner only (no-op where not applicable).
-fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
-mod fallback_permission_tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn fallback_copy_is_private_and_next_to_the_original() {
-        let dir = tempfile::tempdir().unwrap();
-        let original = dir.path().join("lector.redb");
-        std::fs::write(&original, b"not a redb file").unwrap();
-        let copy = dir.path().join(".copy.redb");
-        std::fs::copy(&original, &copy).unwrap();
-        restrict_to_owner(&copy).unwrap();
-        let mode = std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-    }
-}

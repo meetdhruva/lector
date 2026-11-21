@@ -14,6 +14,14 @@ use lector_app::{AppCore, CommandContext, CoreOptions};
 /// read, document and git-write commands come with [`AppCore::open`]).
 pub fn open_core() -> AppCore {
     let core = AppCore::open(CoreOptions::default());
+    // Read-only state (another process excludes this one, a newer Lector's database...): one
+    // line on stderr (never stdout: `lector mcp` speaks its protocol there) at the first change
+    // of state this command makes.
+    if let Some(warning) = core.store().mode().headless_warning() {
+        tracing::warn!("{warning}");
+        core.store()
+            .on_read_only_write(move || eprintln!("{warning}"));
+    }
     // Agent sessions (`agent.*`) are part of the headless API too: scripts and MCP
     // clients can start a session, prompt, list turns and undo a turn.
     lector_agent::commands::register(&core);

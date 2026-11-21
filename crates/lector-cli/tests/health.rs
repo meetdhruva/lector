@@ -107,6 +107,32 @@ fn json_schema_on_an_empty_data_directory() {
     // Reading the health log neither counts as a session nor creates anything.
     assert!(!fx.data.join("health").exists());
     assert!(!fx.data.join("crashes").exists());
+    // No state database: nothing to say about it, and none is created.
+    assert_eq!(v["state"], Value::Null);
+    assert!(!fx.data.join("lector.redb").exists());
+}
+
+/// A damaged state database is reported (the same kind of line a window shows), and left
+/// untouched: `lector health` only reads.
+#[test]
+fn a_damaged_state_database_is_reported_and_untouched() {
+    let fx = Fx::new();
+    std::fs::create_dir_all(&fx.data).expect("data dir");
+    let db = fx.data.join("lector.redb");
+    std::fs::write(&db, b"not a database at all").expect("write");
+    let v = fx.json(&["health", "--json"]);
+    let state = v["state"].as_str().expect("a state line");
+    assert!(state.contains("damaged"), "{state}");
+    let (code, stdout, _) = fx.run(&["health"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("state: "), "{stdout}");
+    assert_eq!(std::fs::read(&db).expect("read"), b"not a database at all");
+    let names: Vec<_> = std::fs::read_dir(&fx.data)
+        .expect("list")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["lector.redb".to_string()]);
 }
 
 #[test]

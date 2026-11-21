@@ -30,6 +30,7 @@ crossbeam-channel.workspace = true
 tracing.workspace = true
 futures = "0.3"
 redb = "4.5"
+sha2 = "0.10"
 num_cpus = "1"
 dunce.workspace = true
 

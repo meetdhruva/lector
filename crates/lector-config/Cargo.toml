@@ -14,15 +14,11 @@ test-support = []
 [dependencies]
 dunce.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 toml.workspace = true
 serde_ignored = "0.1"
-sha2 = "0.10"
 dirs.workspace = true
-parking_lot.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 

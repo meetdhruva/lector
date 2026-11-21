@@ -218,7 +218,7 @@ fn writes_are_checkpointed_reviewable_and_undoable() {
     let title = lector_review::review::changeset_title(Some(repo), &cs);
     assert!(title.contains("turn 1"), "{title}");
     let view =
-        lector_app::project::load_changeset(&fx.project, &cs, &fx.core.review_store()).unwrap();
+        lector_app::project::load_changeset(&fx.project, &cs, &fx.core.review_marks()).unwrap();
     assert_eq!(view.files.len(), 2);
 
     // Journal: one entry per write and one for the turn (with the undo).

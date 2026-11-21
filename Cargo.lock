@@ -4551,6 +4551,7 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -4611,15 +4612,11 @@ version = "0.7.1"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
- "parking_lot",
  "serde",
  "serde_ignored",
- "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",
- "tracing",
 ]
 
 [[package]]
@@ -4747,7 +4744,6 @@ dependencies = [
  "criterion",
  "lector-base",
  "lector-buffer",
- "lector-config",
  "lector-diff",
  "lector-fs",
  "lector-git",
@@ -4757,6 +4753,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "regex",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
 ]
