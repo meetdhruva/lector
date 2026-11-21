@@ -428,3 +428,176 @@ mod windows {
         assert!(c.write("C:\\Windows\\x").is_err());
     }
 }
+
+/// Codex finding (step 8 review): the root's actual git directory may not be named `.git`.
+mod git_dirs {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    fn plain_root() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap().join("proj");
+        fs::create_dir_all(root.join("src")).unwrap();
+        (dir, root)
+    }
+
+    fn assert_git_dir(c: &Confinement, p: &str) {
+        for access in [Access::Read, Access::Write] {
+            assert!(
+                matches!(c.check(p, access), Err(ConfineError::GitDir { .. })),
+                "{p} ({access:?}): {:?}",
+                c.check(p, access)
+            );
+        }
+    }
+
+    /// `.git` is a link to `metadata` (git follows it): both spellings are refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_git_link_to_a_directory_inside_the_root() {
+        let (_dir, root) = plain_root();
+        fs::create_dir_all(root.join("metadata/hooks")).unwrap();
+        fs::write(root.join("metadata/config"), "[core]\n").unwrap();
+        std::os::unix::fs::symlink("metadata", root.join(".git")).unwrap();
+        let c = Confinement::new(&root).unwrap();
+        assert_eq!(c.git_dirs(), [root.join("metadata")]);
+        for p in [
+            ".git/hooks/pre-commit",
+            ".git/config",
+            ".git/new/x",
+            "metadata/hooks/pre-commit",
+            "metadata/config",
+            "metadata",
+            "src/../metadata/config",
+        ] {
+            assert_git_dir(&c, p);
+        }
+        assert!(c.write("src/a.rs").is_ok());
+        assert!(c.write("metadata2/x").is_ok());
+        // The path as written is checked lexically too, in absolute form.
+        assert_git_dir(&c, root.join(".git/hooks/x").to_str().unwrap());
+        assert!(!root.join("metadata/hooks/pre-commit").exists());
+    }
+
+    /// `.git` is a `gitdir:` file pointing inside the root, whose `commondir` points further.
+    #[test]
+    fn a_dot_git_file_and_its_commondir_inside_the_root() {
+        let (_dir, root) = plain_root();
+        fs::create_dir_all(root.join("store/main/worktrees/wt")).unwrap();
+        fs::create_dir_all(root.join("store/main/hooks")).unwrap();
+        fs::write(root.join(".git"), "gitdir: store/main/worktrees/wt\n").unwrap();
+        fs::write(root.join("store/main/worktrees/wt/commondir"), "../..\n").unwrap();
+        let c = Confinement::new(&root).unwrap();
+        assert!(
+            c.git_dirs().contains(&root.join("store/main")),
+            "{:?}",
+            c.git_dirs()
+        );
+        assert!(c.git_dirs().contains(&root.join("store/main/worktrees/wt")));
+        for p in [
+            ".git",
+            "store/main/hooks/pre-commit",
+            "store/main/worktrees/wt/HEAD",
+        ] {
+            assert_git_dir(&c, p);
+        }
+        assert!(c.write("store/other.txt").is_ok());
+    }
+
+    /// A real linked worktree: opened at the worktree, its git directory and the main
+    /// repository's common directory are found; opened at the main repository (which contains
+    /// the worktree), the worktree's `.git` file is refused by name.
+    #[test]
+    fn a_linked_worktree() {
+        let (_dir, root) = plain_root();
+        if !git(&root, &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        fs::write(root.join("a.txt"), "a\n").unwrap();
+        assert!(git(&root, &["add", "a.txt"]));
+        assert!(git(&root, &["commit", "-q", "-m", "init"]));
+        assert!(git(&root, &["worktree", "add", "-q", "wt", "-b", "side"]));
+        let wt = Confinement::new(&root.join("wt")).unwrap();
+        // Both lie outside the worktree's root: nothing to forbid, and the name rule still holds.
+        assert!(wt.git_dirs().is_empty(), "{:?}", wt.git_dirs());
+        assert_git_dir(&wt, ".git");
+        let main = Confinement::new(&root).unwrap();
+        assert_eq!(main.git_dirs(), [root.join(".git")]);
+        assert_git_dir(&main, "wt/.git");
+        assert_git_dir(&main, ".git/worktrees/wt/HEAD");
+        assert!(main.write("wt/a.txt").is_ok());
+    }
+
+    /// A submodule: its `.git` file and the superproject's `modules/<name>` are refused, and a
+    /// confinement opened at the submodule finds its git directory in the superproject.
+    #[test]
+    fn a_submodule() {
+        let (dir, root) = plain_root();
+        let upstream = dunce::canonicalize(dir.path()).unwrap().join("up");
+        fs::create_dir_all(&upstream).unwrap();
+        if !git(&upstream, &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        fs::write(upstream.join("u.txt"), "u\n").unwrap();
+        assert!(git(&upstream, &["add", "u.txt"]));
+        assert!(git(&upstream, &["commit", "-q", "-m", "u"]));
+        assert!(git(&root, &["init", "-q", "-b", "main"]));
+        let url = upstream.to_string_lossy().into_owned();
+        assert!(git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &url,
+                "sub"
+            ]
+        ));
+        let c = Confinement::new(&root).unwrap();
+        for p in [
+            "sub/.git",
+            ".git/modules/sub/config",
+            ".git/modules/sub/hooks/x",
+        ] {
+            assert_git_dir(&c, p);
+        }
+        assert!(c.write("sub/u.txt").is_ok());
+        let inner = Confinement::new(&root.join("sub")).unwrap();
+        assert_git_dir(&inner, ".git");
+        assert!(inner.git_dirs().is_empty(), "outside the submodule's root");
+    }
+
+    /// The superproject's `.git` is a link and the submodule lives under it: the module
+    /// directory is inside the forbidden git directory.
+    #[cfg(unix)]
+    #[test]
+    fn modules_under_a_linked_git_directory() {
+        let (_dir, root) = plain_root();
+        fs::create_dir_all(root.join("meta/modules/sub/hooks")).unwrap();
+        std::os::unix::fs::symlink("meta", root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/.git"), "gitdir: ../meta/modules/sub\n").unwrap();
+        let c = Confinement::new(&root).unwrap();
+        assert_git_dir(&c, "meta/modules/sub/hooks/pre-commit");
+        assert_git_dir(&c, "sub/.git");
+    }
+}

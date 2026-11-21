@@ -26,7 +26,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::http::{is_loopback, origin};
+use crate::http::{is_loopback_url, origin};
 use crate::time::{now_secs, parse_rfc3339};
 
 /// GitHub repository whose releases are checked.
@@ -715,7 +715,7 @@ fn agent(api_base: &str) -> ureq::Agent {
                 .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         );
-    if is_loopback(api_base) {
+    if is_loopback_url(api_base) {
         cfg = cfg.proxy(None);
     }
     cfg.build().into()

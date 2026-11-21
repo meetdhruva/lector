@@ -18,10 +18,66 @@ pub(crate) struct Client {
     token: Token,
 }
 
-pub(crate) fn is_loopback(url: &str) -> bool {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+/// Whether a request to `url` may carry a token: HTTPS, or plain HTTP only to the local
+/// machine ([`is_loopback_url`]: tests, local mirrors and proxies). The one rule for the API
+/// client's transport guard and the pull-request fetch header.
+pub fn may_carry_token(url: &str) -> bool {
+    let url = url.trim();
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("https") => true,
+        Some("http") => is_loopback_url(url),
+        _ => false,
+    }
+}
+
+/// Whether `url`'s host is the local machine: `localhost`, an address in `127.0.0.0/8` or
+/// `::1` (bracketed), after removing any `user[:password]@` and `:port`. The one rule for the
+/// proxy bypass, the "token only over HTTPS or to loopback" guard and the pull-request fetch
+/// header. Anything that does not parse is not
+/// loopback: `127.0.0.1.evil.example`, `localhost.evil.example`, `127.0.0.1@evil.example`, a
+/// non-numeric port, a URL without a scheme.
+pub fn is_loopback_url(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Userinfo ends at the last `@`: what follows is the host.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let Some((host, after)) = bracketed.split_once(']') else {
+            return false;
+        };
+        let port = match after {
+            "" => None,
+            p => match p.strip_prefix(':') {
+                Some(p) => Some(p),
+                None => return false,
+            },
+        };
+        let Ok(ip) = host.parse::<std::net::Ipv6Addr>() else {
+            return false;
+        };
+        if !ip.is_loopback() {
+            return false;
+        }
+        ("", port)
+    } else {
+        match host_port.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (host_port, None),
+        }
+    };
+    if port.is_some_and(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    if host_port.starts_with('[') {
+        return true;
+    }
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 pub(crate) struct Response {
@@ -43,7 +99,7 @@ impl Client {
                     .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                     .build(),
             );
-        if is_loopback(&base) {
+        if is_loopback_url(&base) {
             cfg = cfg.proxy(None);
         }
         Client {
@@ -152,7 +208,7 @@ impl Client {
 
     /// The token travels only over HTTPS, or to a loopback address (tests, local proxies).
     fn check_transport(&self, url: &str) -> Result<()> {
-        if url.starts_with("https://") || is_loopback(url) {
+        if may_carry_token(url) {
             return Ok(());
         }
         Err(ForgeError::Unsupported(format!(
@@ -404,6 +460,75 @@ mod tests {
             c.send("POST", "/x", None),
             Err(ForgeError::Unsupported(_))
         ));
+        // A bracketed IPv6 loopback API (`[forge.api_urls]`) is allowed; a look-alike is not.
+        assert!(c.check_transport("http://[::1]:9000/api/v4/user").is_ok());
+        assert!(c
+            .check_transport("http://127.0.0.1@evil.example/user")
+            .is_err());
+    }
+
+    #[test]
+    fn tokens_go_over_https_or_to_this_machine() {
+        for url in [
+            "https://github.com/a/b.git",
+            "HTTPS://code.corp/x",
+            "http://127.0.0.1:9/a/b.git",
+            "http://[::1]:9000/a",
+            "http://localhost/a",
+        ] {
+            assert!(may_carry_token(url), "{url}");
+        }
+        for url in [
+            "http://code.corp/a/b.git",
+            "http://127.0.0.1@evil.example/a",
+            "http://localhost.evil.example/a",
+            "git@github.com:a/b.git",
+            "ssh://git@github.com/a/b",
+            "ftp://127.0.0.1/a",
+            "",
+        ] {
+            assert!(!may_carry_token(url), "{url}");
+        }
+    }
+
+    /// Step 8 review: authorities are parsed (userinfo, bracketed IPv6, port); look-alikes are
+    /// not loopback.
+    #[test]
+    fn loopback_authorities() {
+        for url in [
+            "http://127.0.0.1:8080/api",
+            "http://127.0.0.1",
+            "http://127.1.2.3:9/x",
+            "http://localhost:9000/api/v4",
+            "http://LOCALHOST/",
+            "http://[::1]:9000/api",
+            "http://[::1]/",
+            "http://user:pw@127.0.0.1:9/",
+            "http://127.0.0.1?x",
+            "http://localhost#f",
+        ] {
+            assert!(is_loopback_url(url), "{url}");
+        }
+        for url in [
+            "https://api.github.com",
+            "http://127.0.0.1.evil.example/",
+            "http://localhost.evil.example:80/",
+            "http://127.0.0.1@evil.example/",
+            "http://localhost@evil.example/",
+            "http://[::1]@evil.example/",
+            "http://evil.example/127.0.0.1",
+            "http://evil.example:127/",
+            "http://[::2]:9000/",
+            "http://[::1/",
+            "http://[::1]x/",
+            "http://127.0.0.1:port/",
+            "http://128.0.0.1/",
+            "http:///127.0.0.1",
+            "127.0.0.1",
+            "",
+        ] {
+            assert!(!is_loopback_url(url), "{url}");
+        }
     }
 
     #[test]
@@ -418,7 +543,7 @@ mod tests {
         assert_eq!(base64(b"abc"), "YWJj");
         assert_eq!(base64(b"a"), "YQ==");
         assert_eq!(encode_segment("group/sub proj"), "group%2Fsub%20proj");
-        assert!(is_loopback("http://127.0.0.1:8080/api"));
-        assert!(!is_loopback("https://api.github.com"));
+        assert!(is_loopback_url("http://127.0.0.1:8080/api"));
+        assert!(!is_loopback_url("https://api.github.com"));
     }
 }

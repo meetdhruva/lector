@@ -2296,8 +2296,10 @@ pub struct Turn { pub id: TurnId, pub prompt: String, pub before: Option<ShadowS
   the one confinement check, `lector_fs::confine` (0.7.2; via `lector_app::commands::confinement`, which MCP resources
   and command path arguments use too): the path is resolved with its symlinks and must stay inside the project root,
   outside every git directory (`.git` in any case, trailing dots/spaces, NTFS stream suffixes, HFS+-ignored code
-  points, Windows short names `git~N`) and outside Lector's data and settings directories; a write never goes through
-  a final-component symlink, and reads and writes re-open the resolved path without following a link swapped in
+  points, Windows short names `git~N`, refused in the path as written and in the resolved path; the project's actual
+  git and common directories wherever they are: `.git` followed when it is a link or read when it is a `gitdir:`
+  file, `commondir`, `GIT_DIR`) and outside Lector's data and settings directories; a write never goes through
+  a final-component symlink (on Windows its rename is retried like a save's, re-checking before each attempt), and reads and writes re-open the resolved path without following a link swapped in
   after the check (`openat(O_NOFOLLOW)` on Unix). Refusals are errors to the agent. Each write is journaled as `agent.write_file` (`Source::Agent`, args `{session, turn, path}`); when the turn
   has no checkpoint, or the file is git-ignored (checkpoints leave those out), the file is backed up first
   (`snapshot_paths`) and the entry is undoable on its own.

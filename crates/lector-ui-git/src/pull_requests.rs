@@ -107,20 +107,9 @@ impl PrSession {
             let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
             let opts = lector_git::shadow::FetchOptions {
                 http_header: token
-                    // Never over plain HTTP, except to this machine (tests, local mirrors).
-                    .filter(|_| {
-                        let url = remote.remote_url.as_str();
-                        url.starts_with("https://")
-                            || ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-                                .iter()
-                                .any(|local| {
-                                    url.strip_prefix(local).is_some_and(|rest| {
-                                        rest.is_empty()
-                                            || rest.starts_with(':')
-                                            || rest.starts_with('/')
-                                    })
-                                })
-                    })
+                    // Never over plain HTTP, except to this machine (tests, local mirrors):
+                    // the one rule of `lector_forge::may_carry_token`.
+                    .filter(|_| lector_forge::may_carry_token(&remote.remote_url))
                     .map(|t| lector_forge::git_auth_header(remote.kind, t)),
             };
             shadow

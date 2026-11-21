@@ -120,30 +120,56 @@ fn write_and_replace(
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn replace(tmp: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(tmp, target)
+    replace_checked(tmp, target, || Ok(()), |e| e)
 }
 
-/// Windows: `rename` replaces an existing file, but fails transiently with
-/// `PermissionDenied` while an indexer, antivirus or another reader holds the
-/// target open without share-delete; retry briefly.
-#[cfg(windows)]
-fn replace(tmp: &Path, target: &Path) -> io::Result<()> {
-    let mut delay = std::time::Duration::from_millis(10);
-    let mut last = None;
-    for _ in 0..8 {
-        match fs::rename(tmp, target) {
+/// Rename attempts [`replace_checked`] makes: Windows retries a transient `PermissionDenied`
+/// (an indexer, antivirus or another reader holding the target open without share-delete);
+/// other platforms rename once.
+const RENAME_ATTEMPTS: u32 = if cfg!(windows) { 8 } else { 1 };
+
+/// Renames `tmp` over `target`, the one rename of both [`write_atomic`] and
+/// [`crate::Confined::write`]. `before` runs before **every** attempt (a confined write
+/// re-checks there that the parent and the target are still what it confined) and its error
+/// stops the rename; `io_err` converts the rename's own error. On Windows a `PermissionDenied`
+/// is retried up to 8 times with a backoff from 10 ms.
+pub(crate) fn replace_checked<E>(
+    tmp: &Path,
+    target: &Path,
+    before: impl FnMut() -> Result<(), E>,
+    io_err: impl Fn(io::Error) -> E,
+) -> Result<(), E> {
+    retry_rename(
+        RENAME_ATTEMPTS,
+        std::time::Duration::from_millis(10),
+        before,
+        || fs::rename(tmp, target),
+        io_err,
+    )
+}
+
+fn retry_rename<E>(
+    attempts: u32,
+    first_delay: std::time::Duration,
+    mut before: impl FnMut() -> Result<(), E>,
+    mut rename: impl FnMut() -> io::Result<()>,
+    io_err: impl Fn(io::Error) -> E,
+) -> Result<(), E> {
+    let mut delay = first_delay;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        before()?;
+        match rename() {
             Ok(()) => return Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                last = Some(e);
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempt < attempts => {
                 std::thread::sleep(delay);
                 delay *= 2;
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(io_err(e)),
         }
     }
-    Err(last.unwrap_or_else(|| io::Error::other("replace failed")))
 }
 
 /// Best effort: make the rename itself durable.
@@ -295,6 +321,83 @@ mod tests {
         symlink(&b, &a).unwrap();
         symlink(&a, &b).unwrap();
         assert!(write_atomic(&a, b"x").is_err());
+    }
+
+    /// Step 8 review: the retry runs the caller's check before every attempt and gives up after
+    /// the last one (the Windows policy, exercised here on every platform).
+    #[test]
+    fn rename_retries_run_the_check_each_time() {
+        let zero = std::time::Duration::ZERO;
+        let (mut checks, mut renames) = (0, 0);
+        let ok = retry_rename(
+            8,
+            zero,
+            || -> io::Result<()> {
+                checks += 1;
+                Ok(())
+            },
+            || {
+                renames += 1;
+                if renames < 3 {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else {
+                    Ok(())
+                }
+            },
+            |e| e,
+        );
+        assert!(ok.is_ok());
+        assert_eq!((checks, renames), (3, 3));
+        // The check failing on a retry stops before renaming.
+        let (mut checks, mut renames) = (0, 0);
+        let err = retry_rename(
+            8,
+            zero,
+            || {
+                checks += 1;
+                if checks == 2 {
+                    Err("changed")
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                renames += 1;
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            |_| "io",
+        );
+        assert_eq!(err, Err("changed"));
+        assert_eq!((checks, renames), (2, 1));
+        // Out of attempts: the last error; other errors are not retried.
+        let mut renames = 0;
+        let err = retry_rename(
+            3,
+            zero,
+            || Ok::<(), io::Error>(()),
+            || {
+                renames += 1;
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            |e| e,
+        );
+        assert_eq!(
+            err.map_err(|e| e.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(renames, 3);
+        let mut renames = 0;
+        let _ = retry_rename(
+            8,
+            zero,
+            || Ok::<(), io::Error>(()),
+            || {
+                renames += 1;
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            },
+            |e| e,
+        );
+        assert_eq!(renames, 1);
     }
 
     #[test]
