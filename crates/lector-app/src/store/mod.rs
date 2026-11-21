@@ -188,6 +188,43 @@ pub enum StoreMode {
     },
 }
 
+/// What a process with read-only state loses when it quits.
+pub const READ_ONLY_LOSES: &str = "open tabs, recent projects, terminal tabs, review marks, comments and undo history changed here are lost when Lector quits";
+
+/// The persistent "state not saved" indicator of a window whose state is read-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateIndicator {
+    /// Short label (status bar).
+    pub label: String,
+    /// One line: what is lost, and why (tooltip, click, `lector health`).
+    pub detail: String,
+}
+
+impl StoreMode {
+    /// The indicator to show for as long as this mode lasts (`None` in read-write state).
+    pub fn indicator(&self) -> Option<StateIndicator> {
+        let StoreMode::ReadOnly { reason } = self else {
+            return None;
+        };
+        Some(StateIndicator {
+            label: "State not saved".into(),
+            detail: format!(
+                "Lector can't save its state in this process: {READ_ONLY_LOSES}. Why: {reason}"
+            ),
+        })
+    }
+
+    /// The one stderr line of a headless command that writes state while it is read-only.
+    pub fn headless_warning(&self) -> Option<String> {
+        let StoreMode::ReadOnly { reason } = self else {
+            return None;
+        };
+        Some(format!(
+            "lector: warning: Lector's state is read-only in this process ({reason}); state changes made by this command are not kept"
+        ))
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct StoreInfo {
     pub(crate) recovered_from: Option<PathBuf>,
@@ -213,6 +250,12 @@ impl Store {
     /// `lector_config::paths::data_dir()/lector.redb`.
     pub fn default_path() -> PathBuf {
         lector_config::paths::data_dir().join("lector.redb")
+    }
+
+    /// What opening the database at `path` would give, without creating, writing or
+    /// recovering anything (a read-only handle; for `lector health`).
+    pub fn probe(path: &Path) -> open::Probe {
+        open::probe(path)
     }
 
     /// Opens the database at `path` by the policy in [`open`]. Never fails: see
@@ -273,6 +316,13 @@ impl Store {
     /// The copy of a damaged database that was set aside when this store started fresh.
     pub fn recovered_from(&self) -> Option<&Path> {
         self.info.recovered_from.as_deref()
+    }
+
+    /// Runs `hook` once, at the first change of state this process makes while its state is
+    /// read-only (cache writes do not count). The CLI and the MCP server print
+    /// [`StoreMode::headless_warning`] on stderr with it.
+    pub fn on_read_only_write(&self, hook: impl FnOnce() + Send + 'static) {
+        self.db.on_read_only_write(hook);
     }
 
     /// The database (comments, journal, `kv`, cache).

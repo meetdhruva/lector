@@ -597,6 +597,53 @@ impl Render for UpdateStatusItem {
     }
 }
 
+/// "State not saved": shown for as long as this process's state is read-only (ADR 0004). The
+/// tooltip and a click say what is lost and why.
+pub struct StateStoreStatusItem {
+    indicator: lector_app::store::StateIndicator,
+}
+
+impl Render for StateStoreStatusItem {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = cx.theme().ui.clone();
+        let detail = self.indicator.detail.clone();
+        let tooltip = detail.clone();
+        h_flex()
+            .id("status-state-store")
+            .gap(px(4.))
+            .px(px(6.))
+            .h_full()
+            .items_center()
+            .cursor_pointer()
+            .rounded(metrics::radius())
+            .hover(|s| s.bg(ui.hover.hsla()))
+            .text_size(metrics::text_sm())
+            .text_color(ui.text_muted.hsla())
+            .tooltip(Tooltip::text(tooltip))
+            .child(
+                Icon::new(IconName::AlertTriangle)
+                    .size(IconSize::XSmall)
+                    .color(ui.text_muted.hsla()),
+            )
+            .child(self.indicator.label.clone())
+            .on_click(move |_, window, cx| {
+                let detail = detail.clone();
+                if let Some(ws) = window.root::<Workspace>().flatten() {
+                    ws.update(cx, |ws, cx| {
+                        ws.show_action_toast_level(
+                            detail,
+                            lector_ui::views::workspace::ToastLevel::Warning,
+                            crate::health_model::STATE_STORE_BUTTON,
+                            std::time::Duration::from_secs(20),
+                            |_, _, _| {},
+                            cx,
+                        )
+                    });
+                }
+            })
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------------------------
@@ -627,6 +674,12 @@ fn install(cx: &mut App, hub: Entity<UpdateHub>) {
             }
         };
         sync(ws, cx);
+        // Read-only state lasts for the whole process: a persistent item, not only a toast.
+        let mode = lector_ui::commands_bridge::core(cx).store().mode();
+        if let Some(indicator) = crate::health_model::state_status_item(&mode) {
+            let item = cx.new(|_| StateStoreStatusItem { indicator });
+            ws.set_status_view("state-store", Some(item.into()), cx);
+        }
         let sync_on_event = sync.clone();
         cx.subscribe_in(
             &hub,

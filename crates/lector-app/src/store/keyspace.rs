@@ -211,7 +211,7 @@ pub(crate) fn write<R>(
     concern: &'static Concern,
     f: impl FnOnce(&WriteTransaction) -> StoreResult<R>,
 ) -> StoreResult<R> {
-    let tx = db.raw().begin_write().map_err(crate::db::DbError::from)?;
+    let tx = db.begin_write().map_err(crate::db::DbError::from)?;
     prepare(&tx, concern)?;
     let out = f(&tx)?;
     tx.commit().map_err(crate::db::DbError::from)?;

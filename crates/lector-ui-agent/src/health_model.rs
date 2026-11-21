@@ -164,14 +164,12 @@ pub fn state_store_note(
     mode: &lector_app::store::StoreMode,
     recovered_from: Option<&std::path::Path>,
 ) -> Option<String> {
-    if let lector_app::store::StoreMode::ReadOnly { reason } = mode {
-        let mut reason = reason.clone();
-        if reason.chars().count() > 160 {
-            reason = reason.chars().take(157).collect::<String>() + "...";
+    if let Some(indicator) = mode.indicator() {
+        let mut detail = indicator.detail;
+        if detail.chars().count() > 320 {
+            detail = detail.chars().take(317).collect::<String>() + "...";
         }
-        return Some(format!(
-            "Lector can't save its state in this window: tabs, recent projects, review marks and comments changed here are lost when it quits ({reason})"
-        ));
+        return Some(detail);
     }
     recovered_from.map(|copy| {
         format!(
@@ -179,6 +177,14 @@ pub fn state_store_note(
             copy.display()
         )
     })
+}
+
+/// The persistent status bar item of a window whose state is read-only: its label, and the
+/// line shown on hover and on click (`None` in read-write state).
+pub fn state_status_item(
+    mode: &lector_app::store::StoreMode,
+) -> Option<lector_app::store::StateIndicator> {
+    mode.indicator()
 }
 
 /// The button of [`state_store_note`].
@@ -197,12 +203,17 @@ mod tests {
             reason: "the database is in use by another process".into(),
         };
         let note = state_store_note(&ro, None).expect("note");
-        assert!(note.contains("lost when it quits"), "{note}");
+        assert!(note.contains("lost when Lector quits"), "{note}");
         assert!(note.contains("another process"), "{note}");
         let long = StoreMode::ReadOnly {
             reason: "x".repeat(500),
         };
         assert!(state_store_note(&long, None).expect("note").len() < 400);
+        // The status bar keeps saying it for as long as the state is read-only.
+        let item = state_status_item(&ro).expect("item");
+        assert_eq!(item.label, "State not saved");
+        assert!(item.detail.contains("lost when Lector quits"));
+        assert_eq!(state_status_item(&StoreMode::ReadWrite), None);
         let copy = std::path::Path::new("/data/lector.redb.corrupt-1");
         let note = state_store_note(&StoreMode::ReadWrite, Some(copy)).expect("note");
         assert!(note.contains("lector.redb.corrupt-1"), "{note}");

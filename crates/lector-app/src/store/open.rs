@@ -18,10 +18,20 @@
 //!   permissions, a redb file format that needs an upgrade): read-only state too, seeded
 //!   from the file when it can be read. The file is never modified.
 //! * **Corrupt.** A file that redb reports as corrupt (bad magic number, damaged header or
-//!   pages, truncated) is copied aside to `<name>.corrupt-<unix seconds>` (owner-only, 0600
-//!   on Unix), removed, and a fresh database is created; [`super::Store::recovered_from`]
-//!   names the copy for the UI. If the copy fails, the file is left alone and the process
-//!   runs with read-only state.
+//!   pages, truncated) is believed only when it stays so for about half a second (a file
+//!   another process is still initialising looks the same for a moment). Recovery then runs
+//!   under a cross-process lock (`<name>.recovery-lock`, held with an OS file lock through redb's
+//!   exclusive mode, so a process that dies releases it): the first thing done under the lock
+//!   is to open the file again; if it opens now (another process recovered it), it is used and
+//!   nothing is recovered. Otherwise the file is moved aside with a rename in the same
+//!   directory onto a name reserved with `create_new` (`<name>.corrupt-<unix seconds>[-n]`,
+//!   created 0600; the damaged file is made 0600 before the rename, so it is never readable by
+//!   others), falling back to copying into the reserved file and removing the original. A
+//!   fresh database is created before the lock is released, so the other processes find it.
+//!   [`super::Store::recovered_from`] names the copy for the UI. If anything fails, the file is
+//!   left alone and the process runs with read-only state.
+//! * **New files** are created owner-only (0600 on Unix) whatever the umask; an existing file
+//!   keeps its mode.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -88,6 +98,22 @@ fn open_with_retry(path: &Path) -> Result<Database, OpenFailure> {
     attempt
 }
 
+/// Delays between the re-opens that confirm a file is damaged (about half a second in all).
+const CORRUPT_CONFIRM: &[u64] = &[100, 150, 250];
+
+/// [`open_with_retry`], believing "corrupt" only when it stays so for [`CORRUPT_CONFIRM`].
+fn open_confirmed(path: &Path) -> Result<Database, OpenFailure> {
+    let mut attempt = open_with_retry(path);
+    for delay in CORRUPT_CONFIRM {
+        if !matches!(attempt, Err(OpenFailure::Corrupt(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(*delay));
+        attempt = open_with_retry(path);
+    }
+    attempt
+}
+
 /// The schema version of an existing file, read through a read-only handle (opened in the
 /// writers' mode, so it coexists with them). `None` when it cannot be read that way.
 fn peek_schema(path: &Path) -> Option<u64> {
@@ -103,6 +129,61 @@ fn peek_schema(path: &Path) -> Option<u64> {
     version
 }
 
+/// What [`super::Store::probe`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// No database yet (the next start creates one).
+    Missing,
+    /// It opens: the next start shares it read-write.
+    Healthy,
+    /// The next start would run with read-only state, for this reason.
+    ReadOnly(String),
+    /// It is damaged: the next start sets it aside and starts a fresh one.
+    Damaged(String),
+}
+
+impl Probe {
+    /// The line `lector health` prints (`None` when healthy or missing).
+    pub fn line(&self) -> Option<String> {
+        match self {
+            Probe::Missing | Probe::Healthy => None,
+            Probe::ReadOnly(reason) => super::StoreMode::ReadOnly {
+                reason: reason.clone(),
+            }
+            .indicator()
+            .map(|i| i.detail),
+            Probe::Damaged(reason) => Some(format!(
+                "Lector's state database is damaged ({reason}); the next start keeps it aside and starts a new one"
+            )),
+        }
+    }
+}
+
+/// Looks at the file through a read-only handle (opened in the writers' mode, so it coexists
+/// with running Lector processes); creates, writes and recovers nothing.
+pub(crate) fn probe(path: &Path) -> Probe {
+    if !path.exists() {
+        return Probe::Missing;
+    }
+    if let Some(found) = peek_schema(path).filter(|v| *v > crate::db::SCHEMA_VERSION) {
+        return Probe::ReadOnly(format!(
+            "the database was written by a newer Lector (schema {found}, this one knows {})",
+            crate::db::SCHEMA_VERSION
+        ));
+    }
+    match builder(ConcurrencyMode::MultiWriter).open_read_only(path) {
+        Ok(_) => Probe::Healthy,
+        Err(e) => match classify(&e) {
+            OpenFailure::Locked(r) => Probe::ReadOnly(format!(
+                "the database is in use by another process that excludes this one ({r})"
+            )),
+            OpenFailure::Corrupt(r) => Probe::Damaged(r),
+            // E.g. a database that needs the repair a writable open does: nothing to report.
+            OpenFailure::Unavailable(_) => Probe::Healthy,
+        },
+    }
+}
+
 /// The store over the file at `path`, by the policy in the module doc. Never fails.
 pub(crate) fn open(path: &Path) -> Store {
     // A file of a newer Lector is never opened for writing at all (opening for writing lets
@@ -116,7 +197,7 @@ pub(crate) fn open(path: &Path) -> Store {
             ),
         );
     }
-    match open_with_retry(path) {
+    match open_confirmed(path) {
         Ok(database) => writable(database, path, None),
         Err(OpenFailure::Corrupt(reason)) => recover(path, &reason),
         Err(OpenFailure::Locked(reason)) => read_only(
@@ -146,54 +227,136 @@ fn writable(database: Database, path: &Path, recovered: Option<PathBuf>) -> Stor
     }
 }
 
-/// Copies a corrupt file aside and starts a fresh database.
+/// The cross-process lock under which a damaged database is recovered: a small redb file
+/// next to it, opened in `ExclusiveWriter` mode (an OS file lock that the OS releases when the
+/// process ends, however it ends). Released on drop.
+struct RecoveryLock {
+    _db: Database,
+}
+
+impl RecoveryLock {
+    /// Waits (up to about ten seconds) for the lock of `path`.
+    fn acquire(path: &Path) -> Result<RecoveryLock, String> {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".recovery-lock");
+        let lock = PathBuf::from(name);
+        let mut last = String::new();
+        for _ in 0..500 {
+            crate::db::create_private(&lock).map_err(|e| e.to_string())?;
+            match builder(ConcurrencyMode::ExclusiveWriter).create(&lock) {
+                Ok(db) => return Ok(RecoveryLock { _db: db }),
+                Err(e) => match classify(&e) {
+                    OpenFailure::Locked(r) => last = r,
+                    // A lock file left half-written by a process that died while creating it
+                    // (it held no lock then, or this would say "locked"): start it again.
+                    OpenFailure::Corrupt(r) => {
+                        last = r;
+                        let _ = std::fs::remove_file(&lock);
+                    }
+                    OpenFailure::Unavailable(r) => return Err(r),
+                },
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!("timed out waiting for the recovery lock ({last})"))
+    }
+}
+
+/// Recovers a damaged database (see the module doc).
 fn recover(path: &Path, reason: &str) -> Store {
-    let aside = aside_name(path);
-    let copied = std::fs::copy(path, &aside).and_then(|_| restrict_to_owner(&aside));
-    if let Err(e) = copied {
-        let _ = std::fs::remove_file(&aside);
-        return read_only(
-            path,
-            format!("the database is damaged ({reason}) and could not be copied aside ({e})"),
-        );
-    }
-    if let Err(e) = std::fs::remove_file(path) {
-        return read_only(
-            path,
-            format!(
-                "the database is damaged ({reason}); kept a copy at {} but could not replace it ({e})",
-                aside.display()
+    let _lock =
+        match RecoveryLock::acquire(path) {
+            Ok(lock) => lock,
+            Err(e) => return read_only(
+                path,
+                format!(
+                    "the database is damaged ({reason}) and the recovery lock is unavailable ({e})"
+                ),
             ),
-        );
-    }
+        };
+    // Another process may have recovered it while this one waited.
+    let reason = match open_confirmed(path) {
+        Ok(database) => return writable(database, path, None),
+        Err(OpenFailure::Corrupt(reason)) => reason,
+        Err(OpenFailure::Locked(r)) => {
+            return read_only(
+                path,
+                format!("the database is in use by another process that excludes this one ({r})"),
+            )
+        }
+        Err(OpenFailure::Unavailable(r)) => return read_only(path, r),
+    };
+    let aside = match move_aside(path) {
+        Ok(aside) => aside,
+        Err(e) => {
+            return read_only(
+                path,
+                format!("the database is damaged ({reason}) and could not be moved aside ({e})"),
+            )
+        }
+    };
     tracing::warn!(
-        "the database {} was damaged ({reason}); a copy is kept at {} and a new database was started",
+        "the database {} was damaged ({reason}); it was moved to {} and a new database was started",
         path.display(),
         aside.display()
     );
+    // Created while the lock is held: the processes waiting for it find this database.
     match open_file(path) {
         Ok(database) => writable(database, path, Some(aside)),
         Err(e) => read_only(path, format!("cannot create a new database: {e}")),
     }
 }
 
-/// `<path>.corrupt-<unix seconds>` (with a counter if that exists).
-fn aside_name(path: &Path) -> PathBuf {
+/// Reserves `<path>.corrupt-<unix seconds>[-n]` with `create_new` (owner-only from the start).
+fn reserve_aside(path: &Path) -> std::io::Result<PathBuf> {
     let secs = crate::db::now_nanos() / 1_000_000_000;
-    let mut name = path.as_os_str().to_os_string();
-    name.push(format!(".corrupt-{secs}"));
-    let first = PathBuf::from(&name);
-    if !first.exists() {
-        return first;
+    let mut base = path.as_os_str().to_os_string();
+    base.push(format!(".corrupt-{secs}"));
+    let mut last = None;
+    for n in 1..1000 {
+        let mut name = base.clone();
+        if n > 1 {
+            name.push(format!("-{n}"));
+        }
+        let candidate = PathBuf::from(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
     }
-    (2..1000)
-        .map(|n| {
-            let mut n2 = name.clone();
-            n2.push(format!("-{n}"));
-            PathBuf::from(n2)
-        })
-        .find(|p| !p.exists())
-        .unwrap_or(first)
+    Err(last.unwrap_or_else(|| std::io::Error::other("no free name")))
+}
+
+/// Moves the damaged file onto a reserved owner-only name: a rename (atomic, same directory)
+/// after making the file owner-only, else a copy into the reserved file and a removal.
+fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let target = reserve_aside(path)?;
+    if restrict_to_owner(path).is_ok() && std::fs::rename(path, &target).is_ok() {
+        return Ok(target);
+    }
+    let copied = std::fs::File::open(path).and_then(|mut source| {
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&target)?;
+        std::io::copy(&mut source, &mut out)?;
+        out.sync_all()
+    });
+    match copied.and_then(|_| std::fs::remove_file(path)) {
+        Ok(()) => Ok(target),
+        Err(e) => {
+            let _ = std::fs::remove_file(&target);
+            Err(e)
+        }
+    }
 }
 
 /// Read-only state: an in-memory database seeded from the file when it can be opened

@@ -490,11 +490,7 @@ fn commit(
     parsed: &Parsed,
     fail: &dyn Fn(Step, &str) -> bool,
 ) -> StoreResult<Committed> {
-    let tx = store
-        .db()
-        .raw()
-        .begin_write()
-        .map_err(crate::db::DbError::from)?;
+    let tx = store.db().begin_write().map_err(crate::db::DbError::from)?;
     let marker = marker_key(rel);
     if tx.open_table(STORE_META)?.get(marker.as_str())?.is_some() {
         return Ok(Committed::AlreadyThere);

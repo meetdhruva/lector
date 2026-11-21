@@ -10,9 +10,11 @@ use crate::out::{print_json, truncate, Io};
 ///
 /// Fields: `sessions`, `running`, `clean`, `abnormal`, `panics`, `crash_free_rate` (0..1 or
 /// `null` until a session has finished), `by_version[]`, `crash_reports`, `crash_dir`,
-/// `last_crashes[]` (`file`, `path`, `time`, `version`, `os`, `thread`, `location`, `message`).
-pub fn summary_json(s: &HealthSummary, limit: usize) -> Value {
+/// `last_crashes[]` (`file`, `path`, `time`, `version`, `os`, `thread`, `location`, `message`),
+/// `state` (0.8: `null` when the state database is fine, else the line a window shows).
+pub fn summary_json(s: &HealthSummary, limit: usize, state: Option<&str>) -> Value {
     json!({
+        "state": state,
         "sessions": s.sessions,
         "running": s.running,
         "clean": s.clean,
@@ -44,10 +46,18 @@ pub fn summary_json(s: &HealthSummary, limit: usize) -> Value {
 /// Runs `lector health`.
 pub fn run(args: &HealthArgs, io: &mut Io) -> anyhow::Result<()> {
     let summary = health_summary();
+    // Looked at through a read-only handle: nothing is created, written or recovered.
+    let state = lector_app::Store::probe(&lector_app::Store::default_path()).line();
     if args.json {
-        return Ok(print_json(io.out, summary_json(&summary, args.limit))?);
+        return Ok(print_json(
+            io.out,
+            summary_json(&summary, args.limit, state.as_deref()),
+        )?);
     }
     let s = io.style;
+    if let Some(state) = &state {
+        writeln!(io.out, "{}", s.bold(&format!("state: {state}")))?;
+    }
     let mut line = format!(
         "{} sessions: {} clean, {} abnormal",
         summary.sessions, summary.clean, summary.abnormal

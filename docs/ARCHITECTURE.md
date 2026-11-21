@@ -1561,10 +1561,22 @@ pub enum StoreError { Db(DbError), NewerSchema { concern, found, known }, Migrat
   the file when it can be opened read-only (not while an exclusive writer holds it), never written back, no private copy.
   What that process loses: every state change it makes (recent projects, window and terminal sessions, viewed and hunk
   marks, comments, journal entries — so undo of its own writes is available only until it exits — notices, update-check
-  state) is gone when it exits; the UI shows a notice. The same applies to a file written by a newer Lector (detected
+  state) is gone when it exits. It is said for as long as it lasts: `StoreMode::indicator() -> StateIndicator { label:
+  "State not saved", detail }` is a status bar item in every window (detail on hover and click; also a 20 s toast at
+  startup), `lector health` prints the same line (`Store::probe(path) -> Probe::{Missing, Healthy, ReadOnly, Damaged}`,
+  a read-only look that creates, writes and recovers nothing; JSON field `state`), and headless commands (`lector
+  <subcommand>`, `lector mcp`) print `StoreMode::headless_warning()` once on stderr at their first state change
+  (`Store::on_read_only_write`; cache writes do not count). The same applies to a file written by a newer Lector (detected
   through a read-only handle before any writable open) or one that cannot be written (permissions, old redb format).
-* **Corruption.** A file redb reports as corrupt (`Corrupted`, `UnexpectedEof`, `InvalidData`) is copied aside to
-  `lector.redb.corrupt-<unix secs>` (0600), removed, and a fresh database started (`recovered_from()`; the UI says so).
+* **Corruption.** A file redb reports as corrupt (`Corrupted`, `UnexpectedEof`, `InvalidData`) is believed only when it
+  stays so for ~500 ms (a file another process is initialising looks the same for a moment). Recovery runs under a
+  cross-process lock (`lector.redb.recovery-lock`, a redb file held in `ExclusiveWriter` mode: an OS lock the OS
+  releases when the holder dies); under it the file is opened again first (another process may have recovered it: then
+  it is used as is). Otherwise it is renamed onto a name reserved with `create_new` + 0600
+  (`lector.redb.corrupt-<unix secs>[-n]`; the damaged file is made 0600 before the rename; copy + remove only if the
+  rename fails) and a fresh database is created before the lock is released (`recovered_from()`; the UI says so).
+* **File mode.** A new `lector.redb` is created 0600 on Unix whatever the umask (it holds comments, the journal and
+  project paths); an existing file keeps its mode.
 * **Import** (`store::legacy`): per file, marker `import:<rel path>` in `store_meta` written in the same transaction as
   the values; values never overwrite what the store holds; v0.3 files already copied by 0.4–0.7.1 (`meta.imported_v03`)
   are only marked; then renamed to `<name>.imported` (never deleted; a failed rename is retried next start). Regular files
@@ -2769,7 +2781,7 @@ Two UI-free crates, layered `lector (bin) → lector-cli → lector-mcp → lect
   undo      {undone: <id>, entry: <the entry the undo recorded>}
   health    {sessions, running, clean, abnormal, panics, crash_free_rate: 0..1|null, by_version: [{version, sessions, clean,
              abnormal, panics}], crash_reports, crash_dir, last_crashes: [{file, path, time, version, os, thread, location,
-             message}]}                                                       // newest first, at most `-n` (default 5)
+             message}], state: null|"<line>"}                                // newest first, at most `-n` (default 5); state: 0.8, the state store's problem if any
   ```
   `risk.reasons[].kind` is the snake_case `lector_review::risk::RiskKind` (`public_api_changed`, `panic_added`, ...).
   Moved blocks come from `lector_diff::moves` (within a file: `detect_moved`; between files of the changeset:

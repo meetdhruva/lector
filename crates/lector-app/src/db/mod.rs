@@ -35,7 +35,8 @@ pub(crate) const COMMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("
 pub(crate) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
 pub(crate) const RECENT: TableDefinition<&str, u64> = TableDefinition::new("recent");
 pub(crate) const KV: TableDefinition<&str, &[u8]> = TableDefinition::new("kv");
-pub(crate) const CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("cache");
+const CACHE_NAME: &str = "cache";
+pub(crate) const CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new(CACHE_NAME);
 pub(crate) const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
 
 const KEY_VERSION: &str = "schema_version";
@@ -105,10 +106,14 @@ pub enum DbMode {
     Memory,
 }
 
+/// Called once, at the first state write of a process whose state is read-only.
+type ReadOnlyWriteHook = Box<dyn FnOnce() + Send>;
+
 struct Inner {
     db: Database,
     mode: DbMode,
     cache_puts: AtomicU32,
+    read_only_write: parking_lot::Mutex<Option<ReadOnlyWriteHook>>,
 }
 
 /// Handle to the database. Cheap to clone; `Send + Sync`.
@@ -178,6 +183,7 @@ pub(crate) fn open_file(path: &Path) -> Result<Database, redb::DatabaseError> {
     if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
+    create_private(path)?;
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return builder(ConcurrencyMode::ExclusiveWriter).create(path);
     }
@@ -190,6 +196,24 @@ pub(crate) fn open_file(path: &Path) -> Result<Database, redb::DatabaseError> {
             builder(ConcurrencyMode::ExclusiveWriter).create(path)
         }
         other => other,
+    }
+}
+
+/// Creates `path` empty and readable by its owner only (0600 on Unix, whatever the umask: the
+/// database holds comments, the journal and project paths) unless it exists; an existing file
+/// keeps the mode its owner gave it. redb initializes an empty file as a new database.
+pub(crate) fn create_private(path: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -214,6 +238,7 @@ impl Db {
                 db,
                 mode,
                 cache_puts: AtomicU32::new(0),
+                read_only_write: parking_lot::Mutex::new(None),
             }),
         }
     }
@@ -221,6 +246,25 @@ impl Db {
     /// The redb handle (for [`crate::store`]).
     pub(crate) fn raw(&self) -> &Database {
         &self.inner.db
+    }
+
+    /// A write transaction for a change of Lector's state. In read-only state (the change is
+    /// kept in memory only) the first one runs the hook set with
+    /// [`Db::on_read_only_write`]. Cache writes and internal setup use [`Db::raw`].
+    pub(crate) fn begin_write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        if matches!(self.inner.mode, DbMode::ReadOnly { .. }) {
+            let hook = self.inner.read_only_write.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.inner.db.begin_write()
+    }
+
+    /// Sets what runs at the first state write while the state is read-only (the CLI prints a
+    /// warning on stderr). Replaces an earlier hook; never runs in read-write state.
+    pub fn on_read_only_write(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.inner.read_only_write.lock() = Some(Box::new(hook));
     }
 
     /// An in-memory database (tests; last-resort fallback).
@@ -242,6 +286,7 @@ impl Db {
                 db,
                 mode,
                 cache_puts: AtomicU32::new(0),
+                read_only_write: parking_lot::Mutex::new(None),
             }),
         };
         this.migrate()?;
@@ -261,7 +306,7 @@ impl Db {
     }
 
     fn migrate(&self) -> DbResult<()> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.inner.db.begin_write()?; // setup, not a state change
         {
             let mut meta = tx.open_table(META)?;
             let version = meta.get(KEY_VERSION)?.map(|g| g.value()).unwrap_or(0);
@@ -308,7 +353,11 @@ impl Db {
         key: &str,
         value: Option<&[u8]>,
     ) -> DbResult<()> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = if redb::TableHandle::name(&def) == CACHE_NAME {
+            self.inner.db.begin_write()?
+        } else {
+            self.begin_write()?
+        };
         {
             let mut t = tx.open_table(def)?;
             match value {
@@ -398,7 +447,7 @@ impl Db {
     /// Removes the least recently written entries until the cache holds at most
     /// `max_bytes`. Returns how many were removed.
     pub fn trim_cache(&self, max_bytes: u64) -> DbResult<usize> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.inner.db.begin_write()?; // the cache is not state
         let removed;
         {
             let mut t = tx.open_table(CACHE)?;
@@ -435,7 +484,7 @@ impl Db {
 
     /// Appends an entry to the journal; returns its id (1, 2, ...).
     pub fn append_journal(&self, bytes: &[u8]) -> DbResult<u64> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         let id;
         {
             let mut t = tx.open_table(JOURNAL)?;
@@ -456,7 +505,7 @@ impl Db {
 
     /// Replaces a journal entry (e.g. to mark it undone).
     pub fn journal_put(&self, id: u64, bytes: &[u8]) -> DbResult<()> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         {
             let mut t = tx.open_table(JOURNAL)?;
             t.insert(id, bytes)?;
@@ -483,7 +532,7 @@ impl Db {
 
     /// Deletes the oldest journal entries beyond `keep`; returns how many went.
     pub fn journal_trim(&self, keep: usize) -> DbResult<usize> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         let mut removed = 0;
         {
             let mut t = tx.open_table(JOURNAL)?;
@@ -506,7 +555,7 @@ impl Db {
 
     /// Adds a comment, assigning its id.
     pub fn add_comment(&self, mut comment: Comment) -> DbResult<Comment> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         {
             let mut meta = tx.open_table(META)?;
             let id = meta.get(KEY_COMMENT_SEQ)?.map(|g| g.value()).unwrap_or(0) + 1;
@@ -564,7 +613,7 @@ impl Db {
 
     /// Next id for a comment thread or comment (shared sequence with legacy comments).
     pub fn next_comment_id(&self) -> DbResult<u64> {
-        let tx = self.inner.db.begin_write()?;
+        let tx = self.begin_write()?;
         let id;
         {
             let mut meta = tx.open_table(META)?;

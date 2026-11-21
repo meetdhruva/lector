@@ -721,6 +721,30 @@ fn child_process_entry() {
                 .expect("update");
             }
         }
+        // Starts on a (possibly corrupt) file at the same time as others, writes its own key,
+        // and checks the key is still in the database it uses when released.
+        "recover-write" => {
+            // Start together: wait for the parent's go file.
+            let mut go = path.clone().into_os_string();
+            go.push(".go");
+            let go = PathBuf::from(go);
+            while !go.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let store = Store::open(&path);
+            if store.mode() != StoreMode::ReadWrite {
+                std::process::exit(4);
+            }
+            let root = PathBuf::from(format!("/child/{}", std::process::id()));
+            store
+                .terminal_sessions()
+                .save(&root, &[tab("/w")])
+                .expect("save");
+            wait_for_release();
+            if store.terminal_sessions().tabs(&root).is_empty() {
+                std::process::exit(5);
+            }
+        }
         other => panic!("unknown child mode {other}"),
     }
 }
@@ -881,4 +905,225 @@ fn a_second_open_in_the_same_process_never_crashes_or_copies() {
     drop((a, b));
     let names: Vec<String> = listing(dir.path()).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, vec!["lector.redb".to_string()]);
+}
+
+// ---- recovery between processes, file modes ------------------------------------------------
+
+fn aside_copies(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .expect("read_dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("lector.redb.corrupt-"))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Four processes start at once on one damaged file: exactly one moves it aside, all of them
+/// end up in one shared fresh database, and every process's write is in it.
+#[test]
+fn processes_recovering_one_corrupt_file_together_share_one_fresh_database() {
+    for _ in 0..3 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lector.redb");
+        let garbage = b"definitely not a redb file, just garbage bytes".repeat(20);
+        std::fs::write(&path, &garbage).expect("write");
+        let mut children: Vec<_> = (0..4)
+            .map(|_| spawn_child("recover-write", &path))
+            .collect();
+        // Let every child start, then release them at once.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::fs::write(dir.path().join("lector.redb.go"), b"").expect("go");
+        for child in &mut children {
+            wait_ready(child);
+        }
+        let pids: Vec<u32> = children.iter().map(|c| c.id()).collect();
+        for child in children {
+            let status = release(child);
+            assert!(status.success(), "child failed: {status:?}");
+        }
+        std::fs::remove_file(dir.path().join("lector.redb.go")).expect("go");
+        let asides = aside_copies(dir.path());
+        assert_eq!(asides.len(), 1, "{asides:?}");
+        assert_eq!(std::fs::read(&asides[0]).expect("aside"), garbage);
+        let store = Store::open(&path);
+        assert_eq!(store.mode(), StoreMode::ReadWrite);
+        assert_eq!(store.recovered_from(), None);
+        for pid in pids {
+            assert_eq!(
+                store
+                    .terminal_sessions()
+                    .tabs(Path::new(&format!("/child/{pid}")))
+                    .len(),
+                1,
+                "the write of process {pid} survived"
+            );
+        }
+    }
+}
+
+/// A file another process is still writing (its header not complete yet) looks damaged for a
+/// moment: it must not be moved aside.
+#[test]
+fn a_file_being_initialised_is_not_moved_aside() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("lector.redb");
+    // A valid database, prepared elsewhere.
+    let ready = dir.path().join("ready.redb");
+    {
+        let store = Store::open(&ready);
+        store
+            .recent_projects()
+            .record(Path::new("/kept"))
+            .expect("record");
+    }
+    // What a half-initialised file looks like: a truncated header.
+    std::fs::write(&path, [0x72u8, 0x65, 0x64]).expect("partial");
+    let finisher = {
+        let (ready, path) = (ready.clone(), path.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            std::fs::rename(&ready, &path).expect("finish");
+        })
+    };
+    let store = Store::open(&path);
+    finisher.join().expect("join");
+    assert_eq!(store.mode(), StoreMode::ReadWrite);
+    assert_eq!(store.recovered_from(), None);
+    assert!(aside_copies(dir.path()).is_empty());
+    assert_eq!(store.recent_projects().list(), vec![PathBuf::from("/kept")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_database_and_its_aside_copy_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A new database is created owner-only, whatever the umask.
+    let path = dir.path().join("lector.redb");
+    drop(Store::open(&path));
+    assert_eq!(mode(&path), 0o600);
+    // An existing database keeps the mode its owner gave it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+    drop(Store::open(&path));
+    assert_eq!(mode(&path), 0o640);
+    // A damaged world-readable file is set aside owner-only, and replaced by a private one.
+    std::fs::write(&path, b"garbage garbage garbage").expect("write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let store = Store::open(&path);
+    let aside = store.recovered_from().expect("set aside").to_path_buf();
+    assert_eq!(mode(&aside), 0o600);
+    assert_eq!(mode(&path), 0o600);
+}
+
+// ---- read-only state: indicator, headless warning, health probe ------------------------------
+
+#[test]
+fn the_indicator_and_the_headless_warning_say_what_is_lost_and_why() {
+    assert_eq!(StoreMode::ReadWrite.indicator(), None);
+    assert_eq!(StoreMode::ReadWrite.headless_warning(), None);
+    let ro = StoreMode::ReadOnly {
+        reason: "the database is in use by another process that excludes this one".into(),
+    };
+    let i = ro.indicator().expect("indicator");
+    assert_eq!(i.label, "State not saved");
+    assert!(
+        i.detail.contains("review marks, comments and undo history"),
+        "{}",
+        i.detail
+    );
+    assert!(i.detail.contains("lost when Lector quits"), "{}", i.detail);
+    assert!(i.detail.contains("another process"), "{}", i.detail);
+    let w = ro.headless_warning().expect("warning");
+    assert!(w.starts_with("lector: warning: "), "{w}");
+    assert!(
+        w.contains("another process") && w.contains("not kept"),
+        "{w}"
+    );
+    assert!(!w.contains('\n'));
+}
+
+#[test]
+fn a_read_only_store_reports_its_first_state_write_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("lector.redb");
+    {
+        let store = Store::open(&path);
+        let tx = store.db().raw().begin_write().expect("write");
+        tx.open_table(crate::db::META)
+            .expect("meta")
+            .insert("schema_version", crate::db::SCHEMA_VERSION + 1)
+            .expect("insert");
+        tx.commit().expect("commit");
+    }
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = Store::open(&path);
+    assert!(matches!(store.mode(), StoreMode::ReadOnly { .. }));
+    let c = calls.clone();
+    store.on_read_only_write(move || {
+        c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    // Reads and cache writes are not state changes.
+    let _ = store.recent_projects().list();
+    store.db().cache_put("k", b"v").expect("cache");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    store
+        .recent_projects()
+        .record(Path::new("/a"))
+        .expect("record");
+    store.db().kv_put("x", Some(b"1")).expect("kv");
+    store
+        .terminal_sessions()
+        .save(Path::new("/p"), &[])
+        .expect("save");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // In read-write state the hook never runs.
+    let rw = Store::in_memory();
+    let c = calls.clone();
+    rw.on_read_only_write(move || {
+        c.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+    });
+    rw.recent_projects()
+        .record(Path::new("/a"))
+        .expect("record");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn the_health_probe_creates_nothing_and_names_the_problem() {
+    use super::open::Probe;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("lector.redb");
+    assert_eq!(Store::probe(&path), Probe::Missing);
+    assert!(!path.exists(), "the probe creates nothing");
+    drop(Store::open(&path));
+    assert_eq!(Store::probe(&path), Probe::Healthy);
+    assert_eq!(Probe::Healthy.line(), None);
+    // Held by an excluding process: the same line as the window's indicator.
+    let mut child = spawn_child("hold-exclusive", &path);
+    wait_ready(&mut child);
+    let probe = Store::probe(&path);
+    assert!(matches!(probe, Probe::ReadOnly(_)), "{probe:?}");
+    let line = probe.line().expect("line");
+    assert!(
+        line.contains("lost when Lector quits") && line.contains("another process"),
+        "{line}"
+    );
+    assert!(release(child).success());
+    // Damaged: reported, not touched.
+    std::fs::write(&path, b"garbage garbage garbage").expect("write");
+    let probe = Store::probe(&path);
+    assert!(matches!(probe, Probe::Damaged(_)), "{probe:?}");
+    assert!(probe.line().expect("line").contains("damaged"));
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        b"garbage garbage garbage"
+    );
+    assert!(aside_copies(dir.path()).is_empty());
 }
