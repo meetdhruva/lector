@@ -742,10 +742,30 @@ fn run_turn(shared: Arc<Shared>, id: TurnId, text: String, context: Vec<PromptCo
                     }
                     Err(RpcError::Closed(reason)) => {
                         shared.settle_stderr();
-                        TurnState::Failed(with_stderr(
+                        let message = with_stderr(
                             &format!("The agent exited ({reason})."),
                             &shared.stderr.lock(),
-                        ))
+                        );
+                        // The reader thread reports the closed connection too, but possibly
+                        // after this turn is finished: mark the session crashed first, so
+                        // nobody sees a failed turn on a session that still looks alive.
+                        let changed = {
+                            let mut st = shared.state.lock();
+                            if matches!(
+                                st.status,
+                                SessionStatus::Stopped | SessionStatus::Crashed(_)
+                            ) {
+                                false
+                            } else {
+                                st.status = SessionStatus::Crashed(message.clone());
+                                true
+                            }
+                        };
+                        if changed {
+                            shared.idle.notify_all();
+                            shared.emit(AgentEvent::StatusChanged);
+                        }
+                        TurnState::Failed(message)
                     }
                     Err(err) if cancelled => {
                         tracing::debug!("cancelled prompt ended with {err}");
