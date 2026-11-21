@@ -19,7 +19,10 @@ use serde_json::{json, Value};
 use super::*;
 use crate::actions::editor::{Paste, TriggerParameterHints, TriggerSuggest, Undo};
 use crate::code_view::{Pos, Selection};
+use crate::editor::FileView;
 use crate::theme::{ThemeMode, ThemeState};
+use crate::views::Workspace;
+use lector_syntax::SymbolKind;
 
 // ---------------------------------------------------------------------------
 // Model level.
