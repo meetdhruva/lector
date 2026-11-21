@@ -11,7 +11,7 @@ use lector_agent::inline_edit::*;
 use lector_agent::*;
 use lector_app::{AppCore, CoreOptions};
 use lector_buffer::TextEdit;
-use lector_workspace::Project;
+use lector_app::project::Project;
 
 const WAIT: Duration = Duration::from_secs(30);
 

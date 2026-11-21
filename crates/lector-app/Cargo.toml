@@ -19,7 +19,7 @@ lector-process.workspace = true
 lector-search.workspace = true
 lector-lsp.workspace = true
 lector-config.workspace = true
-lector-workspace.workspace = true
+lector-review.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -36,3 +36,8 @@ dunce.workspace = true
 lector-config = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 proptest.workspace = true
+criterion = { workspace = true, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "cache_bench"
+harness = false

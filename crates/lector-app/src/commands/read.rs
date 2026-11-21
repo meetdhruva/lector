@@ -105,7 +105,7 @@ fn repo_rel(cx: &CommandContext, abs: &Path) -> anyhow::Result<String> {
 
 fn changeset_arg(cx: &CommandContext, args: &Value) -> anyhow::Result<Changeset> {
     match str_arg(args, "changeset") {
-        Some(key) => lector_workspace::review::parse_changeset_key(key).ok_or_else(|| {
+        Some(key) => lector_review::review::parse_changeset_key(key).ok_or_else(|| {
             anyhow!("unknown changeset `{key}` (worktree, staged, unstaged, untracked, commit:<sha>, range:<a>..<b>, branch:<base>...<branch>)")
         }),
         None => Ok(cx.focus.changeset.clone().unwrap_or(Changeset::WorkingTree)),
@@ -218,9 +218,9 @@ fn open_changeset() -> FnCommand {
         ),
         |cx, args| {
             let cs = changeset_arg(cx, args)?;
-            let title = lector_workspace::review::changeset_title(cx.project.as_ref().and_then(|p| p.repo()), &cs);
+            let title = lector_review::review::changeset_title(cx.project.as_ref().and_then(|p| p.repo()), &cs);
             Ok(Outcome::new(format!("Opened {title}"))
-                .with_data(json!({ "changeset": lector_workspace::review::changeset_key(&cs), "title": title }))
+                .with_data(json!({ "changeset": lector_review::review::changeset_key(&cs), "title": title }))
                 .with_ui(UiRequest::OpenChangeset(cs)))
         },
     )
@@ -336,7 +336,7 @@ fn find_symbol() -> FnCommand {
             let mut found = project.symbols().definitions(name);
             if !exact {
                 let lower = name.to_lowercase();
-                let mut fuzzy: Vec<_> = lector_workspace::symbols::project_symbols(project)
+                let mut fuzzy: Vec<_> = crate::project::symbols::project_symbols(project)
                     .into_iter()
                     .filter(|s| s.name != name && s.name.to_lowercase().contains(&lower))
                     .collect();
@@ -397,7 +397,7 @@ fn list_changes() -> FnCommand {
             let project = cx.require_project()?;
             let cs = changeset_arg(cx, args)?;
             let view =
-                lector_workspace::review::load_changeset(project, &cs, &cx.core.review_store())
+                crate::project::load_changeset(project, &cs, &cx.core.review_store())
                     .context("cannot load changeset")?;
             let files: Vec<Value> = view
                 .files
@@ -471,10 +471,10 @@ fn show_diff() -> FnCommand {
             let cs = changeset_arg(cx, args)?;
             let ctx_lines = u32_arg(args, "context").unwrap_or(3);
             let max_files = usize_arg(args, "max_files", 50);
-            let view = lector_workspace::review::load_changeset(project, &cs, &cx.core.review_store())
+            let view = crate::project::load_changeset(project, &cs, &cx.core.review_store())
                 .context("cannot load changeset")?;
             let only = str_arg(args, "path").map(|p| p.trim_start_matches("./").to_string());
-            let opts = lector_workspace::review::diff_options(&project.settings().diff);
+            let opts = lector_review::review::diff_options(&project.settings().diff);
             let mut out = Vec::new();
             let selected: Vec<_> = view
                 .files
@@ -485,7 +485,7 @@ fn show_diff() -> FnCommand {
                 bail!("`{}` is not changed in {}", only.unwrap_or_default(), view.title);
             }
             for f in selected.iter().take(max_files) {
-                let diff = lector_workspace::review::load_file_diff(project, &f.change, &opts)?;
+                let diff = crate::project::load_file_diff(project, &f.change, &opts)?;
                 out.push(file_diff_json(f.path(), &diff, ctx_lines));
             }
             Ok(Outcome::new(format!("{} — {} files", view.title, selected.len()))
@@ -502,10 +502,10 @@ fn show_diff() -> FnCommand {
 /// One file's diff as compact JSON: hunks with git-style headers and `+`/`-`/` ` lines.
 pub fn file_diff_json(
     path: &str,
-    diff: &lector_workspace::review::FileDiff,
+    diff: &lector_review::review::FileDiff,
     context: u32,
 ) -> Value {
-    use lector_workspace::review::DiffKind;
+    use lector_review::review::DiffKind;
     let mut v = json!({
         "path": path,
         "kind": format!("{:?}", diff.change.kind).to_lowercase(),
@@ -530,7 +530,7 @@ pub fn file_diff_json(
     v["removed"] = json!(stats.removed);
     // A trailing newline leaves an empty last row that is not a line of the file: never
     // print it as context.
-    let real_lines = |side: &lector_workspace::review::DiffSide| {
+    let real_lines = |side: &lector_review::review::DiffSide| {
         let n = side.line_count();
         if n > 0 && side.line(n - 1).is_empty() {
             n - 1

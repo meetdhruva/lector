@@ -29,7 +29,7 @@ use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::FileDiff;
+use lector_review::review::FileDiff;
 
 use super::{DiffView, Layout};
 use crate::diff_source::{DiffColumn, DisplayRow};
@@ -319,7 +319,7 @@ impl DiffView {
         match self.target.as_ref()? {
             super::DiffTarget::Change(_) => self
                 .changeset()
-                .map(|cs| lector_workspace::review::changeset_key(&cs)),
+                .map(|cs| lector_review::review::changeset_key(&cs)),
             super::DiffTarget::FileVsRev { rev, .. } => Some(format!("workdir:{rev}")),
         }
     }
@@ -1400,7 +1400,7 @@ mod tests {
     use lector_diff::DiffOptions;
     use lector_git::{ChangeKind, FileChange, Side};
     use lector_syntax::LanguageRegistry;
-    use lector_workspace::review::diff_bytes;
+    use lector_review::review::diff_bytes;
 
     use super::*;
 
@@ -1418,7 +1418,7 @@ mod tests {
             Some(old.as_bytes().to_vec()),
             Some(new.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(),
+            &DiffOptions::default(), lector_app::content_cache::ContentCache::global(),
         )
     }
 

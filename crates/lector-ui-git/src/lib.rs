@@ -93,14 +93,14 @@ fn active_changeset(ws: &Workspace, cx: &App) -> Option<lector_git::Changeset> {
     let item = ws.active_pane().read(cx).active_item()?;
     match item.tab_kind(cx)? {
         lector_config::TabKind::Diff { changeset_key, .. } => {
-            lector_workspace::review::parse_changeset_key(&changeset_key)
+            lector_review::review::parse_changeset_key(&changeset_key)
         }
         lector_config::TabKind::Commit { oid } => {
             oid.parse().ok().map(lector_git::Changeset::Commit)
         }
         lector_config::TabKind::Other { label } => label
             .strip_prefix("review:")
-            .and_then(lector_workspace::review::parse_changeset_key),
+            .and_then(lector_review::review::parse_changeset_key),
         lector_config::TabKind::File { .. } => None,
     }
 }
@@ -335,7 +335,7 @@ pub fn init(cx: &mut App) {
             else {
                 return;
             };
-            let Some(base) = lector_workspace::review::default_base(repo, &branch) else {
+            let Some(base) = lector_review::review::default_base(repo, &branch) else {
                 return;
             };
             let s = s.clone();
@@ -622,7 +622,7 @@ pub fn open_file_at_revision(
             .file_at(&rev, &rel)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("{rel} does not exist at {short}"))?;
-        let side = lector_workspace::review::side_from_bytes(&rel, bytes, project.languages());
+        let side = lector_review::review::side_from_bytes(&rel, bytes, project.languages(), lector_app::content_cache::ContentCache::global());
         Ok::<_, String>((side, short, rel))
     });
     window

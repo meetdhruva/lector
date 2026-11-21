@@ -6,9 +6,9 @@ use anyhow::{anyhow, bail, Context as _};
 use lector_app::commands::read::file_diff_json;
 use lector_diff::moves::{detect_moved, detect_moved_across, CrossFileMove, MovedBlock};
 use lector_git::{ChangeKind, Changeset, Repo};
-use lector_workspace::review::{self, ChangesetView, DiffKind, FileDiff, ReviewFile};
-use lector_workspace::risk::{rank_files_with, RiskLevel, RiskReport};
-use lector_workspace::Project;
+use lector_review::review::{self, ChangesetView, DiffKind, FileDiff, ReviewFile};
+use lector_review::risk::{rank_files_with, RiskLevel, RiskReport};
+use lector_app::project::Project;
 use serde_json::{json, Value};
 
 use crate::args::{ChangesArgs, DiffArgs};

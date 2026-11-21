@@ -1,4 +1,4 @@
-//! [`DocumentSource`]: a [`CodeSource`] over a `lector_workspace::Document`.
+//! [`DocumentSource`]: a [`CodeSource`] over a `lector_app::documents::Document`.
 //!
 //! Highlights are computed off the main thread: `highlights()` returns what
 //! is cached and queues missing row chunks on a channel that the owning
@@ -21,7 +21,7 @@ use futures::channel::mpsc::UnboundedSender;
 use gpui::SharedString;
 use lector_buffer::EditDelta;
 use lector_syntax::HighlightId;
-use lector_workspace::{Document, LineHighlights};
+use lector_app::documents::{Document, LineHighlights};
 
 use crate::code_view::{CodeSource, GutterMark, GutterMarkKind, HighlightSpan, SpanStyle};
 

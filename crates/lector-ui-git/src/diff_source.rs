@@ -14,8 +14,8 @@ use lector_app::review_queue::{FileMoves, MoveSpan};
 use lector_diff::{RowKind, Segment};
 use lector_theme::{Color, TextStyle};
 use lector_ui::code_view::{CodeSource, DecorationColor, HighlightSpan, RowDecoration, SpanStyle};
-use lector_workspace::review::{FileDiff, LineSpan};
-use lector_workspace::structural::{Mark, StructuralDiff};
+use lector_review::review::{FileDiff, LineSpan};
+use lector_review::structural::{Mark, StructuralDiff};
 
 static NEXT_VERSION: AtomicU64 = AtomicU64::new(1 << 40);
 
@@ -100,7 +100,7 @@ pub struct DiffMeta {
 impl DiffMeta {
     /// Computes the metadata (call off the main thread for big files).
     pub fn compute(diff: &FileDiff) -> DiffMeta {
-        let max = |side: &lector_workspace::review::DiffSide| {
+        let max = |side: &lector_review::review::DiffSide| {
             let n = side.line_count();
             (0..n)
                 .map(|r| {
@@ -197,7 +197,7 @@ impl StructuralMarks {
 
 fn split_by_line(
     text: Option<&lector_text::Text>,
-    marked: &[lector_workspace::structural::Marked],
+    marked: &[lector_review::structural::Marked],
 ) -> HashMap<u32, Vec<(Range<usize>, Mark)>> {
     let mut out: HashMap<u32, Vec<(Range<usize>, Mark)>> = HashMap::new();
     let Some(text) = text else {
@@ -636,14 +636,14 @@ impl CodeSource for DiffSource {
 /// A read-only file at some revision (one side of a diff), with syntax
 /// highlighting.
 pub struct RevisionSource {
-    side: lector_workspace::review::DiffSide,
+    side: lector_review::review::DiffSide,
     version: u64,
     max_len: usize,
 }
 
 impl RevisionSource {
     /// Source over `side` (text + syntax).
-    pub fn new(side: lector_workspace::review::DiffSide) -> Self {
+    pub fn new(side: lector_review::review::DiffSide) -> Self {
         let n = side.text.as_ref().map(|t| t.line_count()).unwrap_or(0);
         let max_len = (0..n)
             .map(|r| {
@@ -707,7 +707,7 @@ mod tests {
     use lector_diff::DiffOptions;
     use lector_git::{ChangeKind, FileChange, Side};
     use lector_syntax::LanguageRegistry;
-    use lector_workspace::review::diff_bytes;
+    use lector_review::review::diff_bytes;
 
     fn diff(old: &str, new: &str) -> Arc<FileDiff> {
         let change = FileChange {
@@ -723,7 +723,7 @@ mod tests {
             Some(old.as_bytes().to_vec()),
             Some(new.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(),
+            &DiffOptions::default(), lector_app::content_cache::ContentCache::global(),
         ))
     }
 
@@ -861,7 +861,7 @@ mod tests {
         let text = lector_text::Text::from("ab\ncd\nef\n");
         let diff = StructuralDiff {
             old: Vec::new(),
-            new: vec![lector_workspace::structural::Marked {
+            new: vec![lector_review::structural::Marked {
                 range: 1..8,
                 mark: Mark::Moved,
             }],

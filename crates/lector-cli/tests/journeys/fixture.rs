@@ -10,7 +10,7 @@ use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_app::{AppCore, CoreOptions, Outcome};
 use lector_config::Settings;
-use lector_workspace::Project;
+use lector_app::project::Project;
 use serde_json::Value;
 
 /// Makes git in this process ignore global and system configuration and background

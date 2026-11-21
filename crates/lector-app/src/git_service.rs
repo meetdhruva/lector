@@ -17,7 +17,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use lector_git::{HeadInfo, Repo, StatusEntry};
-use lector_workspace::conflicts::ConflictState;
+use lector_review::conflicts::ConflictState;
 use parking_lot::{Mutex, RwLock};
 
 use crate::scheduler::{JobKey, Priority, Scheduler};
@@ -269,7 +269,7 @@ impl RepoState {
         self.computations.fetch_add(1, Ordering::Relaxed);
         let head = self.repo.head();
         let status = self.repo.status();
-        let conflicts = lector_workspace::conflicts::conflict_state(&self.repo);
+        let conflicts = lector_review::conflicts::conflict_state(&self.repo);
         let error = status
             .as_ref()
             .err()

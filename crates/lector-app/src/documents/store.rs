@@ -23,7 +23,8 @@ use lector_git::BlameHunk;
 use lector_lsp::DocumentDiagnostics;
 use lector_syntax::{OutlineItem, Syntax, SyntaxEdit};
 use lector_text::{Rope, Text};
-use lector_workspace::{Document, LineEnding, LineHighlights, Project};
+use crate::documents::{Document, LineEnding, LineHighlights};
+use crate::project::Project;
 use parking_lot::{Mutex, RwLock};
 
 use super::derive::{self, DocDiagnostic};

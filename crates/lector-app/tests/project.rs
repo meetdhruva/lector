@@ -7,10 +7,10 @@ use lector_config::Settings;
 use lector_diff::GutterKind;
 use lector_search::CancelToken;
 use lector_text::Point;
-use lector_workspace::navigation::{Location, NavHistory};
-use lector_workspace::project::{FileGitState, Project};
-use lector_workspace::symbols::{self, TargetSource};
-use lector_workspace::{Indentation, LineEnding};
+use lector_app::project::navigation::{Location, NavHistory};
+use lector_app::project::{FileGitState, Project};
+use lector_app::project::symbols::{self, TargetSource};
+use lector_app::documents::{Indentation, LineEnding};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")

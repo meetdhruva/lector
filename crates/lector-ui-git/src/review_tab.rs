@@ -19,7 +19,7 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{self, changeset_key, ChangesetView};
+use lector_review::review::{self, changeset_key, ChangesetView};
 
 use crate::diff_view::{
     settings_diff_options, stats_label, DiffTarget, DiffView, DiffViewEvent, ViewedTarget,

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, ClipboardItem, Entity, Hsla, SharedString, Window};
-use lector_workspace::{FileGitState, FileList, GitStatusMap};
+use lector_app::project::{FileGitState, FileList, GitStatusMap};
 
 use crate::components::context_menu::ContextMenu;
 use crate::components::tree_view::{TreeDelegate, TreeIcon, TreeNode};

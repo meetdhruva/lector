@@ -1,4 +1,4 @@
-//! `lector_workspace::conflicts` on repositories with real conflicts made by
+//! `lector_review::conflicts` on repositories with real conflicts made by
 //! the git CLI (merge with conflicting edits in merge / diff3 / zdiff3 style,
 //! add/add, modify/delete, CRLF). Hermetic git config. Reading conflict state
 //! must not write anything.
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lector_git::Repo;
-use lector_workspace::conflicts::{
+use lector_review::conflicts::{
     self, apply_edits, conflict_state, parse_conflicts, resolve_all, side_view, stage_text,
     ConflictKind, ConflictStage, OperationKind, Resolution, Side,
 };

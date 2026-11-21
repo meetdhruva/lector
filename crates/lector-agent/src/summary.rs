@@ -16,8 +16,8 @@ use lector_app::review_queue::{analyze, AnalysisOptions, QueueGroup};
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, Changeset, Repo};
 use lector_syntax::LanguageRegistry;
-use lector_workspace::review::{self, DiffKind, FileDiff};
-use lector_workspace::risk::{self, EvidenceSide, RiskKind, RiskLevel};
+use lector_review::review::{self, DiffKind, FileDiff};
+use lector_review::risk::{self, EvidenceSide, RiskKind, RiskLevel};
 
 /// Most files analyzed for one summary; the rest are only counted.
 pub const MAX_SUMMARY_FILES: usize = 300;
@@ -127,7 +127,7 @@ impl TurnSummary {
         let diffs: Vec<Arc<FileDiff>> = changes
             .iter()
             .take(MAX_SUMMARY_FILES)
-            .filter_map(|c| review::load_file_diff_with(repo, languages, c, opts).ok())
+            .filter_map(|c| review::load_file_diff_with(repo, languages, c, opts, lector_app::content_cache::ContentCache::global()).ok())
             .map(Arc::new)
             .collect();
         let mut summary = TurnSummary::from_diffs(&diffs);
@@ -369,7 +369,7 @@ pub fn is_raising(kind: RiskKind) -> bool {
 mod tests {
     use super::*;
     use lector_git::{FileChange, Side};
-    use lector_workspace::review::diff_bytes;
+    use lector_review::review::diff_bytes;
 
     fn diff_for(path: &str, old: Option<&str>, new: Option<&str>) -> Arc<FileDiff> {
         let change = FileChange {
@@ -389,7 +389,7 @@ mod tests {
             old.map(|s| s.as_bytes().to_vec()),
             new.map(|s| s.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(),
+            &DiffOptions::default(), lector_app::content_cache::ContentCache::global(),
         ))
     }
 

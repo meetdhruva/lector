@@ -15,7 +15,7 @@ use gpui::{
     HighlightStyle, SharedString, StyledText, Subscription, Task, Window,
 };
 use lector_search::{CancelToken, CaseMode, LineMatch, SearchEvent, SearchQuery, WalkOptions};
-use lector_workspace::Project;
+use lector_app::project::Project;
 
 use crate::actions::picker::{Confirm, SelectNext, SelectPrev};
 use crate::components::context_menu::{ContextMenu, ContextMenuState};

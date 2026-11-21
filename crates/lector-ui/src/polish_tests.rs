@@ -54,7 +54,7 @@ fn open_workspace<'a>(
     let mut settings = lector_config::Settings::default();
     settings.lsp.enabled = false;
     settings.session.restore = false;
-    let project = lector_workspace::Project::open(root, settings).unwrap();
+    let project = lector_app::project::Project::open(root, settings).unwrap();
     let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
     cx.run_until_parked();
     (ws, cx)

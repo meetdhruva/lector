@@ -11,7 +11,7 @@ use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, Toolti
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::changeset_key;
+use lector_review::review::changeset_key;
 
 use super::ReviewView;
 use crate::util::{now_secs, relative_time};

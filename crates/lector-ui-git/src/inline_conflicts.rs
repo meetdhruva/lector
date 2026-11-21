@@ -24,7 +24,7 @@ use lector_ui::editor::{DocumentEvent, DocumentModel, FileView};
 use lector_ui::scale::px;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::conflicts::{self, ConflictParse, Resolution, Side};
+use lector_review::conflicts::{self, ConflictParse, Resolution, Side};
 
 use crate::store::GitStore;
 

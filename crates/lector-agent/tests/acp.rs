@@ -15,7 +15,7 @@ use lector_app::journal::Journal;
 use lector_app::provenance::{LineQuery, ProvenanceKind};
 use lector_app::{AppCore, CommandContext, CoreOptions};
 use lector_git::Changeset;
-use lector_workspace::Project;
+use lector_app::project::Project;
 use parking_lot::Mutex;
 use serde_json::json;
 
@@ -210,14 +210,14 @@ fn writes_are_checkpointed_reviewable_and_undoable() {
     let new = repo.load(&changes[0].new).unwrap().unwrap();
     assert_eq!(old, b"one\ntwo\nthree\n");
     assert_eq!(new, b"one\nTWO\nthree\n");
-    let key = lector_workspace::review::changeset_key(&cs);
+    let key = lector_review::review::changeset_key(&cs);
     assert_eq!(
-        lector_workspace::review::parse_changeset_key(&key),
+        lector_review::review::parse_changeset_key(&key),
         Some(cs.clone())
     );
-    let title = lector_workspace::review::changeset_title(Some(repo), &cs);
+    let title = lector_review::review::changeset_title(Some(repo), &cs);
     assert!(title.contains("turn 1"), "{title}");
-    let view = lector_workspace::review::load_changeset(&fx.project, &cs, &fx.core.review_store())
+    let view = lector_app::project::load_changeset(&fx.project, &cs, &fx.core.review_store())
         .unwrap();
     assert_eq!(view.files.len(), 2);
 

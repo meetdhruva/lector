@@ -85,40 +85,44 @@ struct Sigs {
     gomod_dep: Regex,
 }
 
-fn sigs() -> &'static Sigs {
-    static S: OnceLock<Sigs> = OnceLock::new();
-    S.get_or_init(|| {
-        let re = |s: &str| Regex::new(s).expect("static pattern");
-        Sigs {
-            auth_removed: re(r"(?i)\b(is_?admin|authorize\w*|authorise\w*|authenticat\w*|login_required|require_?(auth|login|role|permission)\w*|has_?(role|permission|perm)\w*|check_?(access|permission|auth)\w*|permission_required|PreAuthorize|forbidden|unauthori[sz]ed|ensure_?auth\w*|verify_?(token|user|signature|jwt)\w*)\b|\b(401|403)\b"),
-            verification_off: re(r#"(?i)\bverify\s*=\s*False\b|InsecureSkipVerify\s*:\s*true|rejectUnauthorized\s*:\s*false|danger_accept_invalid_(certs|hostnames)\(\s*true|ssl\._create_unverified_context|NODE_TLS_REJECT_UNAUTHORIZED|\b(tls|ssl)_?verify\w*\s*[:=]\s*(false|0|no)\b|check_hostname\s*=\s*False|ParseUnverified|verify_signature["']?\s*[:=]\s*False|SSL_VERIFYPEER[^;\n]*(false|0)|\bverify_none\b|StrictHostKeyChecking\s+no"#),
-            weak_crypto: re(r#"(?i)hashlib\.(md5|sha1)\b|createHash\(\s*["'](md5|sha1)["']|\bmd5::|\bMd5\b|\bSha1\b|sha1::|crypto/(md5|sha1|des|rc4)|\bDES_|AES/ECB|\bECB\b|\brc4\b|\bMessageDigest\.getInstance\(\s*"(MD5|SHA-?1)"|Math\.random\(\)"#),
-            hardening: re(r"(?i)pbkdf2|bcrypt|scrypt|argon2|constant_?time|ct_eq|compare_digest|timingSafeEqual|ConstantTimeCompare|subtle::|hmac\.new|\bsalt\b|os\.urandom|OsRng|SecureRandom|crypto\.randomBytes"),
-            secret_literal: re(r#"(?i)\b\w*(api_?key|secret|passw(or)?d|token|credential|private_?key)\w*\s*[:=]\s*["'][^"'\s]{8,}["']|sk_live_|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY"#),
-            placeholder: re(r#"(?i)example|changeme|placeholder|xxxx|your[_-]|<[^>]+>|\$\{|process\.env|os\.environ|getenv"#),
-            secret_cmp: re(r"(?i)\b\w*(token|secret|passw(or)?d|digest|hmac|signature|credential|api_?key|presented)\w*\b[^;\n(]*(==|!=|===|!==)|(==|!=|===|!==)[^;\n]*\b\w*(token|secret|passw(or)?d|digest|hmac|signature|credential|api_?key|expected)\w*\b"),
-            cmp_noise: re(r#"\.len\(\)|\blen\(|\.length\b|\bnil\b|\bnull\b|\bNone\b|undefined|[=!]=\s*0\b|\bis_empty"#),
-            destructive: re(r"(?i)\bdrop\s+(table|column|database|schema|index|constraint|view)\b|\btruncate\b|\bop\.drop_\w+\(|\bdrop_(table|column|index)\(|\bremove_column\b|\bdrop_table\b"),
-            delete_all: re(r"(?i)^\s*delete\s+from\s+[\w.`\x22]+\s*;"),
-            alter: re(r"(?i)\balter\s+table\b[^;]*\b(not\s+null|type|rename|set\s+default)\b|\balter_column\(|\bchange_column\b|\brename_(column|table)\b"),
-            sync_removed: re(r"(?i)\.lock\(\)|\.Lock\(\)|\.RLock\(\)|\bsynchronized\b|with\s+[\w.]*lock\w*\s*:|\bMutex\b|\bRwLock\b|\bsemaphore\b|\bwg\.Wait\(\)|\.join\(\)|\bawait\b|\.Unlock\(\)|atomic\.|\bSeqCst\b|\bAcquire\b|\bRelease\b"),
-            conc_weak: re(r"Ordering::Relaxed|unsafe\s+impl\s+(Send|Sync)\b|\bstatic\s+mut\b|\bvolatile\b|\bsync\.Pool\b"),
-            conc_added: re(r"\bgo\s+func\b|\bgo\s+\w+(\.\w+)*\(|thread::spawn|tokio::spawn|\bThread\(|asyncio\.create_task|\bnew Worker\(|ThreadPoolExecutor|std::thread::scope|rayon::|\bPromise\.all\b|\bsetInterval\("),
-            shell_interp: re(r#"\bexec(Sync)?\(\s*[`"'][^)\n]*(\$\{|["']\s*\+|\+\s*["'])|\bexec(Sync)?\(\s*`|Command::new\(\s*"(sh|bash|zsh|cmd|cmd\.exe|powershell)"|\bexec\.Command\(\s*"(sh|bash|zsh|cmd)"|\bos\.system\(|shell\s*=\s*True|\bRuntime\.getRuntime\(\)\.exec\(\s*"[^"]*"\s*\+"#),
-            dep_script: re(r#""(preinstall|install|postinstall|prepare|prepublish|prepublishOnly)"\s*:"#),
-            dep_source: re(r#"(?i)git\+|\bgit\s*=|"git"\s*:|\bgit@|github:|https?://|\bfile:|\bpath\s*=|^\s*replace\b|--index-url|--extra-index-url|--trusted-host|[:=]\s*"\*"|:\s*"latest""#),
-            ci_unsafe: re(r"(?i)pull_request_target|permissions:\s*write-all|continue-on-error:\s*true|--no-verify|\bif:\s*(false|\$\{\{\s*false)|curl[^|\n]*\|\s*(ba)?sh|ACTIONS_ALLOW_UNSECURE_COMMANDS|\ballow_failure:\s*true|--insecure\b|\bset\s+\+e\b"),
-            ci_check: re(r"(?i)\b(run|script):.*\b(test|tests|lint|clippy|check|audit|scan|verify|fmt|pytest|jest|vet)\b|uses:\s*\S*(codeql|scan|audit|lint|trivy|snyk)"),
-            docker_bad: re(r"(?i)^\s*USER\s+(root|0)\b|--privileged|^\s*ADD\s+https?://|chmod\s+(-R\s+)?777|curl[^|\n]*\|\s*(ba)?sh|--no-check-certificate|--allow-unauthenticated|--cap-add\s+(ALL|SYS_ADMIN)|^\s*FROM\s+\S+:latest\b"),
-            docker_user: re(r"(?i)^\s*USER\s+\S+"),
-            test_skip: re(r"#\[ignore\b|@pytest\.mark\.skip|@unittest\.skip|\b(it|test|describe)\.skip\(|\bx(it|describe|test)\(|\bt\.Skip(f|Now)?\(|@Disabled\b|@Ignore\b|\bpytest\.skip\(|\bskipTest\(|\bit\.todo\(|@pytest\.mark\.xfail"),
-            boolean: re(r"\b(true|false|True|False|TRUE|FALSE|yes|no|on|off)\b"),
-            key: re(r#"^\s*(?:pub\s+)?(?:const\s+|static\s+|let\s+|var\s+|export\s+)?["']?([A-Za-z_][\w.-]*)["']?\s*[:=]"#),
-            json_dep: re(r#"^\s*"([@\w./-]+)"\s*:\s*"((?:[\^~<>=*\d]|git|http|file|npm|workspace|latest)[^"]*)""#),
-            toml_dep: re(r#"^\s*([\w-]+)\s*=\s*("[^"]*"|\{.*\})"#),
-            req_dep: re(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*(==|>=|~=|<=|@|\[|$)"),
-            gomod_dep: re(r"^\s*(?:require\s+)?([\w.-]+\.[\w./-]+)\s+v\d"),
-        }
+/// The signal regexes, compiled once. `None` only if a pattern does not compile (a bug the
+/// tests catch); the content signals are then skipped instead of panicking.
+fn sigs() -> Option<&'static Sigs> {
+    static SIGNAL_PATTERNS: OnceLock<Option<Sigs>> = OnceLock::new();
+    SIGNAL_PATTERNS.get_or_init(|| compile_sigs().ok()).as_ref()
+}
+
+fn compile_sigs() -> Result<Sigs, regex::Error> {
+    let re = Regex::new;
+    Ok(Sigs {
+        auth_removed: re(r"(?i)\b(is_?admin|authorize\w*|authorise\w*|authenticat\w*|login_required|require_?(auth|login|role|permission)\w*|has_?(role|permission|perm)\w*|check_?(access|permission|auth)\w*|permission_required|PreAuthorize|forbidden|unauthori[sz]ed|ensure_?auth\w*|verify_?(token|user|signature|jwt)\w*)\b|\b(401|403)\b")?,
+        verification_off: re(r#"(?i)\bverify\s*=\s*False\b|InsecureSkipVerify\s*:\s*true|rejectUnauthorized\s*:\s*false|danger_accept_invalid_(certs|hostnames)\(\s*true|ssl\._create_unverified_context|NODE_TLS_REJECT_UNAUTHORIZED|\b(tls|ssl)_?verify\w*\s*[:=]\s*(false|0|no)\b|check_hostname\s*=\s*False|ParseUnverified|verify_signature["']?\s*[:=]\s*False|SSL_VERIFYPEER[^;\n]*(false|0)|\bverify_none\b|StrictHostKeyChecking\s+no"#)?,
+        weak_crypto: re(r#"(?i)hashlib\.(md5|sha1)\b|createHash\(\s*["'](md5|sha1)["']|\bmd5::|\bMd5\b|\bSha1\b|sha1::|crypto/(md5|sha1|des|rc4)|\bDES_|AES/ECB|\bECB\b|\brc4\b|\bMessageDigest\.getInstance\(\s*"(MD5|SHA-?1)"|Math\.random\(\)"#)?,
+        hardening: re(r"(?i)pbkdf2|bcrypt|scrypt|argon2|constant_?time|ct_eq|compare_digest|timingSafeEqual|ConstantTimeCompare|subtle::|hmac\.new|\bsalt\b|os\.urandom|OsRng|SecureRandom|crypto\.randomBytes")?,
+        secret_literal: re(r#"(?i)\b\w*(api_?key|secret|passw(or)?d|token|credential|private_?key)\w*\s*[:=]\s*["'][^"'\s]{8,}["']|sk_live_|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY"#)?,
+        placeholder: re(r#"(?i)example|changeme|placeholder|xxxx|your[_-]|<[^>]+>|\$\{|process\.env|os\.environ|getenv"#)?,
+        secret_cmp: re(r"(?i)\b\w*(token|secret|passw(or)?d|digest|hmac|signature|credential|api_?key|presented)\w*\b[^;\n(]*(==|!=|===|!==)|(==|!=|===|!==)[^;\n]*\b\w*(token|secret|passw(or)?d|digest|hmac|signature|credential|api_?key|expected)\w*\b")?,
+        cmp_noise: re(r#"\.len\(\)|\blen\(|\.length\b|\bnil\b|\bnull\b|\bNone\b|undefined|[=!]=\s*0\b|\bis_empty"#)?,
+        destructive: re(r"(?i)\bdrop\s+(table|column|database|schema|index|constraint|view)\b|\btruncate\b|\bop\.drop_\w+\(|\bdrop_(table|column|index)\(|\bremove_column\b|\bdrop_table\b")?,
+        delete_all: re(r"(?i)^\s*delete\s+from\s+[\w.`\x22]+\s*;")?,
+        alter: re(r"(?i)\balter\s+table\b[^;]*\b(not\s+null|type|rename|set\s+default)\b|\balter_column\(|\bchange_column\b|\brename_(column|table)\b")?,
+        sync_removed: re(r"(?i)\.lock\(\)|\.Lock\(\)|\.RLock\(\)|\bsynchronized\b|with\s+[\w.]*lock\w*\s*:|\bMutex\b|\bRwLock\b|\bsemaphore\b|\bwg\.Wait\(\)|\.join\(\)|\bawait\b|\.Unlock\(\)|atomic\.|\bSeqCst\b|\bAcquire\b|\bRelease\b")?,
+        conc_weak: re(r"Ordering::Relaxed|unsafe\s+impl\s+(Send|Sync)\b|\bstatic\s+mut\b|\bvolatile\b|\bsync\.Pool\b")?,
+        conc_added: re(r"\bgo\s+func\b|\bgo\s+\w+(\.\w+)*\(|thread::spawn|tokio::spawn|\bThread\(|asyncio\.create_task|\bnew Worker\(|ThreadPoolExecutor|std::thread::scope|rayon::|\bPromise\.all\b|\bsetInterval\(")?,
+        shell_interp: re(r#"\bexec(Sync)?\(\s*[`"'][^)\n]*(\$\{|["']\s*\+|\+\s*["'])|\bexec(Sync)?\(\s*`|Command::new\(\s*"(sh|bash|zsh|cmd|cmd\.exe|powershell)"|\bexec\.Command\(\s*"(sh|bash|zsh|cmd)"|\bos\.system\(|shell\s*=\s*True|\bRuntime\.getRuntime\(\)\.exec\(\s*"[^"]*"\s*\+"#)?,
+        dep_script: re(r#""(preinstall|install|postinstall|prepare|prepublish|prepublishOnly)"\s*:"#)?,
+        dep_source: re(r#"(?i)git\+|\bgit\s*=|"git"\s*:|\bgit@|github:|https?://|\bfile:|\bpath\s*=|^\s*replace\b|--index-url|--extra-index-url|--trusted-host|[:=]\s*"\*"|:\s*"latest""#)?,
+        ci_unsafe: re(r"(?i)pull_request_target|permissions:\s*write-all|continue-on-error:\s*true|--no-verify|\bif:\s*(false|\$\{\{\s*false)|curl[^|\n]*\|\s*(ba)?sh|ACTIONS_ALLOW_UNSECURE_COMMANDS|\ballow_failure:\s*true|--insecure\b|\bset\s+\+e\b")?,
+        ci_check: re(r"(?i)\b(run|script):.*\b(test|tests|lint|clippy|check|audit|scan|verify|fmt|pytest|jest|vet)\b|uses:\s*\S*(codeql|scan|audit|lint|trivy|snyk)")?,
+        docker_bad: re(r"(?i)^\s*USER\s+(root|0)\b|--privileged|^\s*ADD\s+https?://|chmod\s+(-R\s+)?777|curl[^|\n]*\|\s*(ba)?sh|--no-check-certificate|--allow-unauthenticated|--cap-add\s+(ALL|SYS_ADMIN)|^\s*FROM\s+\S+:latest\b")?,
+        docker_user: re(r"(?i)^\s*USER\s+\S+")?,
+        test_skip: re(r"#\[ignore\b|@pytest\.mark\.skip|@unittest\.skip|\b(it|test|describe)\.skip\(|\bx(it|describe|test)\(|\bt\.Skip(f|Now)?\(|@Disabled\b|@Ignore\b|\bpytest\.skip\(|\bskipTest\(|\bit\.todo\(|@pytest\.mark\.xfail")?,
+        boolean: re(r"\b(true|false|True|False|TRUE|FALSE|yes|no|on|off)\b")?,
+        key: re(r#"^\s*(?:pub\s+)?(?:const\s+|static\s+|let\s+|var\s+|export\s+)?["']?([A-Za-z_][\w.-]*)["']?\s*[:=]"#)?,
+        json_dep: re(r#"^\s*"([@\w./-]+)"\s*:\s*"((?:[\^~<>=*\d]|git|http|file|npm|workspace|latest)[^"]*)""#)?,
+        toml_dep: re(r#"^\s*([\w-]+)\s*=\s*("[^"]*"|\{.*\})"#)?,
+        req_dep: re(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*(==|>=|~=|<=|@|\[|$)")?,
+        gomod_dep: re(r"^\s*(?:require\s+)?([\w.-]+\.[\w./-]+)\s+v\d")?,
     })
 }
 
@@ -193,8 +197,10 @@ fn in_migration(lower: &str, family: Family) -> bool {
 pub(super) fn detect(cx: &Ctx) -> Vec<Finding> {
     let lower = cx.path.to_ascii_lowercase();
     let name = file_name(cx.path);
-    let s = sigs();
     let mut out: Vec<Finding> = Vec::new();
+    let Some(s) = sigs() else {
+        return out;
+    };
 
     if cx.is_test {
         // Disabled tests.
@@ -697,6 +703,6 @@ mod tests {
 
     #[test]
     fn sigs_compile() {
-        let _ = sigs();
+        assert!(sigs().is_some());
     }
 }

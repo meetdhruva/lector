@@ -12,7 +12,7 @@ use lector_ui::components::{h_flex, metrics};
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::risk::RiskLevel;
+use lector_review::risk::RiskLevel;
 
 use super::{DiffViewEvent, ReviewView};
 use crate::review_model::{analyze_changes, ChangesAnalysis};
@@ -75,7 +75,7 @@ impl ReviewView {
                 | lector_git::Changeset::Unstaged
                 | lector_git::Changeset::Untracked
         ) || matches!(&self.changeset, lector_git::Changeset::Range { to, .. }
-            if to == lector_workspace::review::WORKDIR_REV);
+            if to == lector_review::review::WORKDIR_REV);
         if worktree_like && self.pr.is_none() {
             // Looking at the working-tree review counts as having seen the changes.
             let model = self.store.read(cx).review_model.clone();
@@ -95,7 +95,7 @@ impl ReviewView {
         };
         let languages = project.languages().clone();
         let settings = store.settings(cx);
-        let opts = lector_workspace::review::diff_options(&settings.diff);
+        let opts = lector_review::review::diff_options(&settings.diff);
         let detect = settings.review.detect_moved;
         self.queue.risk_order = settings.review.risk_order;
         let root = repo.workdir().to_path_buf();
@@ -493,7 +493,7 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use lector_app::{AppCore, CoreOptions};
     use lector_ui::views::Workspace;
-    use lector_workspace::Project;
+    use lector_app::project::Project;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")

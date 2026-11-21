@@ -142,7 +142,7 @@ pub struct Comment {
     pub id: u64,
     /// Repository work directory.
     pub repo: String,
-    /// Changeset key (`lector_workspace::review::changeset_key`).
+    /// Changeset key (`lector_review::review::changeset_key`).
     pub changeset: String,
     /// Repo-relative path.
     pub path: String,

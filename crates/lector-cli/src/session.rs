@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _};
 use lector_app::commands::Source;
 use lector_app::{AppCore, CommandContext, CoreOptions};
-use lector_workspace::Project;
+use lector_app::project::Project;
 
 /// The headless application core, with every command that exists without a window.
 ///

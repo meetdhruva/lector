@@ -9,7 +9,7 @@ use lector_app::commands::{CommandSpec, FnCommand, Outcome};
 use lector_app::journal::Journal;
 use lector_app::{AppCore, CoreOptions};
 use lector_mcp::{McpServer, ServerOptions, LATEST_PROTOCOL_VERSION};
-use lector_workspace::Project;
+use lector_app::project::Project;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 

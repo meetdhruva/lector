@@ -4,7 +4,7 @@ use std::io::Read as _;
 
 use anyhow::{anyhow, bail, Context as _};
 use lector_app::commands::CommandError;
-use lector_workspace::Project;
+use lector_app::project::Project;
 use serde_json::{json, Value};
 
 use crate::args::{CommandsArgs, RunArgs};

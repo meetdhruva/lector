@@ -9,7 +9,7 @@ use gpui::{App, Context, Entity, Window};
 use lector_ui::actions::git as git_actions;
 use lector_ui::editor::FileView;
 use lector_ui::views::Workspace;
-use lector_workspace::conflicts::Resolution;
+use lector_review::conflicts::Resolution;
 
 use crate::changes_panel::ChangesPanel;
 use crate::confirm::{confirm, ConfirmSpec};

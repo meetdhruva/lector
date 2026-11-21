@@ -22,7 +22,7 @@ use lector_ui::components::text_area::{TextArea, TextAreaEvent};
 use lector_ui::markdown::Block;
 use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
-use lector_workspace::Project;
+use lector_app::project::Project;
 use serde_json::json;
 
 use crate::feedback::Chip;

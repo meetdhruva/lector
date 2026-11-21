@@ -8,7 +8,7 @@ use lector_app::review_queue::{
     analyze, hunk_fingerprints, AnalysisOptions, FileProgress, HunkReviewStore, QueueGroup,
 };
 use lector_git::Changeset;
-use lector_workspace::review::{self, FileDiff};
+use lector_review::review::{self, FileDiff};
 
 use crate::fixture::{Repo, Session};
 

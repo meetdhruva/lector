@@ -16,7 +16,7 @@ use gpui::{
 use lector_config::{PaneState, Session, TabKind, TabState};
 use lector_lsp::ServerState;
 use lector_search::CancelToken;
-use lector_workspace::{FileList, GitStatusMap, Location, NavHistory, Project};
+use lector_app::project::{FileList, GitStatusMap, Location, NavHistory, Project};
 
 use super::Workspace;
 use super::WorkspaceEvent;
@@ -1025,7 +1025,7 @@ impl Workspace {
             let entries = cx
                 .background_executor()
                 .spawn(async move {
-                    lector_workspace::symbols::project_symbols(&project)
+                    lector_app::project::symbols::project_symbols(&project)
                         .into_iter()
                         .map(|s| {
                             let rel = s
@@ -1069,7 +1069,7 @@ impl Workspace {
 
     // Definitions, references.
 
-    fn active_doc_offset(&self, cx: &App) -> Option<(lector_workspace::Document, usize)> {
+    fn active_doc_offset(&self, cx: &App) -> Option<(lector_app::documents::Document, usize)> {
         let view = self.active_file_view(cx)?;
         let v = view.read(cx);
         let doc = v.live_document(cx)?.clone();
@@ -1091,7 +1091,7 @@ impl Workspace {
             let targets = cx
                 .background_executor()
                 .spawn(
-                    async move { lector_workspace::symbols::definitions(&project, &doc, offset) },
+                    async move { lector_app::project::symbols::definitions(&project, &doc, offset) },
                 )
                 .await
                 .unwrap_or_default();
@@ -1104,7 +1104,7 @@ impl Workspace {
 
     fn show_targets(
         &mut self,
-        targets: Vec<lector_workspace::Target>,
+        targets: Vec<lector_app::project::Target>,
         title: &str,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,

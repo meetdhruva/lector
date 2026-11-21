@@ -27,8 +27,8 @@ use lector_diff::Algorithm;
 use lector_git::{
     Changeset, CommitOptions, OperationKind, Repo, ShadowRepo, ShadowSnapshot, StatusEntry,
 };
-use lector_workspace::conflicts::{self, Resolution};
-use lector_workspace::review::{self, HunkAction, LineSelection};
+use lector_review::conflicts::{self, Resolution};
+use lector_review::review::{self, HunkAction, LineSelection};
 use serde_json::{json, Value};
 
 use super::schema::{object, prop};
@@ -774,7 +774,7 @@ fn apply_hunk(cx: &CommandContext, args: &Value, action: HunkAction) -> anyhow::
         &content_id,
     )
     .map_err(|e| match e {
-        lector_workspace::Error::Git(lector_git::Error::GitCommand { stderr, .. })
+        lector_review::Error::Git(lector_git::Error::GitCommand { stderr, .. })
             if !stderr.is_empty() =>
         {
             anyhow!(stderr)
@@ -797,11 +797,11 @@ fn apply_hunk(cx: &CommandContext, args: &Value, action: HunkAction) -> anyhow::
 }
 
 fn load_diff(
-    project: &lector_workspace::Project,
+    project: &crate::project::Project,
     change: &lector_git::FileChange,
 ) -> anyhow::Result<review::FileDiff> {
     let opts = review::diff_options(&project.settings().diff);
-    review::load_file_diff(project, change, &opts).map_err(|e| anyhow!(e.to_string()))
+    crate::project::load_file_diff(project, change, &opts).map_err(|e| anyhow!(e.to_string()))
 }
 
 fn stage_hunk() -> FnCommand {

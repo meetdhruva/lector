@@ -73,7 +73,7 @@ pub fn turn_json(t: &Turn) -> Value {
         "prompt": t.prompt,
         "state": t.state,
         "changed_files": t.changed_files,
-        "changeset": t.changeset().map(|c| lector_workspace::review::changeset_key(&c)),
+        "changeset": t.changeset().map(|c| lector_review::review::changeset_key(&c)),
         "undone": t.undone,
         "answer": t.answer(),
         "tool_calls": t.tool_calls.iter().map(|c| json!({
@@ -397,13 +397,13 @@ fn register_into(r: &CommandRegistry) {
                         cx.focus
                             .changeset
                             .as_ref()
-                            .map(lector_workspace::review::changeset_key)
+                            .map(lector_review::review::changeset_key)
                     })
                     .or_else(|| {
                         session
                             .last_turn()
                             .and_then(|t| t.changeset())
-                            .map(|c| lector_workspace::review::changeset_key(&c))
+                            .map(|c| lector_review::review::changeset_key(&c))
                     });
                 let extra = args.get("text").and_then(Value::as_str).unwrap_or("");
                 let feedback = feedback_text(cx, key.as_deref(), extra);

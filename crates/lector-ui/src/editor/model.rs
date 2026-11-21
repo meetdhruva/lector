@@ -37,7 +37,8 @@ use lector_app::documents::{
 use lector_buffer::save::Encoding;
 use lector_buffer::{BufferOptions, TextEdit, Transaction};
 use lector_text::Text;
-use lector_workspace::{Document, Project};
+use lector_app::documents::Document;
+use lector_app::project::Project;
 
 pub use lector_app::documents::{is_editable_document, DiskConflict};
 

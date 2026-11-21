@@ -11,7 +11,7 @@ use std::time::Duration;
 use lector_app::commands::{CommandContext, Focus, Source};
 use lector_app::{AppCore, CoreOptions};
 use lector_config::Settings;
-use lector_workspace::Project;
+use lector_app::project::Project;
 use serde_json::{json, Value};
 
 fn git(dir: &Path, args: &[&str]) -> String {

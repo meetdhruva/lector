@@ -17,8 +17,8 @@ use lector_app::review_queue::{
 use lector_diff::DiffOptions;
 use lector_git::{Changeset, FileChange, Repo, StatusEntry};
 use lector_syntax::LanguageRegistry;
-use lector_workspace::review::{self, FileDiff};
-use lector_workspace::risk::RiskLevel;
+use lector_review::review::{self, FileDiff};
+use lector_review::risk::RiskLevel;
 
 /// Changesets with more files than this are not analyzed (the order stays alphabetical).
 pub const MAX_ANALYZED_FILES: usize = 400;
@@ -100,7 +100,7 @@ pub fn analyze_changes(
     }
     let diffs: Vec<Arc<FileDiff>> = changes
         .iter()
-        .filter_map(|c| review::load_file_diff_with(repo, languages, c, diff_options).ok())
+        .filter_map(|c| review::load_file_diff_with(repo, languages, c, diff_options, lector_app::content_cache::ContentCache::global()).ok())
         .map(Arc::new)
         .collect();
     analysis_of(&diffs, detect_moved)

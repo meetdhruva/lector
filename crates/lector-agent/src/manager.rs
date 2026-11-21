@@ -12,7 +12,7 @@ use lector_app::provenance::{
 use lector_app::AppCore;
 use lector_diff::remap::LineMap;
 use lector_diff::{diff_lines, DiffOptions};
-use lector_workspace::Project;
+use lector_app::project::Project;
 use parking_lot::Mutex;
 
 use crate::config::AgentConfig;

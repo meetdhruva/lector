@@ -24,8 +24,8 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::WorkspaceEvent;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{self, ChangesetView, ReviewFile};
-use lector_workspace::risk::RiskLevel;
+use lector_review::review::{self, ChangesetView, ReviewFile};
+use lector_review::risk::RiskLevel;
 
 use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};

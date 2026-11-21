@@ -24,8 +24,8 @@ use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::markdown::{self, RenderOptions};
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{DiffKind, FileDiff};
-use lector_workspace::structural::{self, Budget};
+use lector_review::review::{DiffKind, FileDiff};
+use lector_review::structural::{self, Budget};
 
 use super::{DiffView, DiffViewEvent, Layout};
 use crate::diff_source::{DiffColumn, DiffSource, MovedOverlay, OverlayColors, StructuralMarks};
@@ -578,7 +578,7 @@ impl DiffView {
         };
         if let Some(repo) = store.repo() {
             let root = repo.workdir().to_path_buf();
-            if let Err(e) = lector_workspace::review::set_viewed_with(
+            if let Err(e) = lector_review::review::set_viewed_with(
                 &store.review,
                 &root,
                 &target.key,
@@ -644,9 +644,9 @@ impl DiffView {
         let path = loaded.diff.change.new_path.clone()?;
         let rev = match (&loaded.diff.change.new, self.viewed.as_ref()) {
             (Side::Workdir(_) | Side::Index(_), _) => None,
-            (_, Some(v)) => match lector_workspace::review::parse_changeset_key(&v.key)? {
+            (_, Some(v)) => match lector_review::review::parse_changeset_key(&v.key)? {
                 Changeset::Commit(oid) => Some(oid.to_string()),
-                Changeset::Range { to, .. } if to != lector_workspace::review::WORKDIR_REV => {
+                Changeset::Range { to, .. } if to != lector_review::review::WORKDIR_REV => {
                     Some(to)
                 }
                 Changeset::BranchVsBase { branch, .. } => Some(branch),

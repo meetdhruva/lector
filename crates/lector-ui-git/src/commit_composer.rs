@@ -663,7 +663,7 @@ mod tests {
     use gpui::{div, FocusHandle, TestAppContext, Window};
     use lector_app::{AppCore, CoreOptions};
     use lector_ui::views::Workspace;
-    use lector_workspace::Project;
+    use lector_app::project::Project;
 
     /// Hosts a composer inside a container so the tests can tell when focus leaves it.
     struct Host {

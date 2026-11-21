@@ -742,48 +742,53 @@ struct Danger {
     what: &'static str,
 }
 
-fn patterns() -> &'static Patterns {
-    static P: OnceLock<Patterns> = OnceLock::new();
-    P.get_or_init(|| {
-        let re = |s: &str| Regex::new(s).expect("static pattern");
-        let d = |s: &str, families: &'static [Family], kind, param, what| Danger {
-            re: re(s),
-            families,
-            kind,
-            param,
-            what,
-        };
-        use Family::*;
-        Patterns {
-            cond: re(r"\b(if|else|elif|match|switch|case|while|guard|unless|when)\b"),
-            err_rust: re(r"(?:\w|\)|\]|>)\?\s*(?:[;.,)}\]]|$)|\.map_err\(|\.ok_or(?:_else)?\(|\.context\(|\.with_context\(|\bErr\("),
-            err_script: re(r"\bcatch\b|\.catch\(|\bfinally\b|\bthrow\b|\btry\s*\{"),
-            err_python: re(r"\bexcept\b|\bfinally\b|\braise\b|\btry\s*:"),
-            err_go: re(r"\berr\s*!=\s*nil|errors\.(?:Is|As|New)\b|fmt\.Errorf|\brecover\(\)"),
-            err_jvm: re(r"\bcatch\b|\bfinally\b|\bthrows?\b|\btry\b|\bguard\b"),
-            err_generic: re(r"\bcatch\b|\bfinally\b|\brescue\b|\bensure\b|\braise\b|\bthrow\b|\berrno\b|\bperror\b|set\s+-e|\|\|\s*exit|\btrap\b"),
-            panic_rust: re(r"\.unwrap\(\)|\.expect\(|\bpanic!\(|\bunreachable!\(|\btodo!\(|\bunimplemented!\("),
-            panic_go: re(r"\bpanic\("),
-            assertion: re(r"\bassert\w*\s*[!(]|\bassert\s|\bexpect\(|\.should\b|\brequire\("),
-            test_decl: re(r"#\[test\]|#\[tokio::test\]|\bdef test_|\bfunc Test|\b(?:it|test)\(|@Test\b|\bfn test_"),
-            sql_stmt: re(r"(?i)\b(?:select\s.+\sfrom|insert\s+into|update\s+\w+\s+set|delete\s+from)\b"),
-            sql_dynamic: re(r#"\+\s*\w|"\s*\+|\bformat!?\(|\bf"|\bf'|["']\s*%\s*[(\w]|%s[^"']*["']\s*(?:$|;)|\$\{|\.format\(|\{\w*\}|\bSprintf\("#),
-            danger: vec![
-                d(r"\bunsafe\b", &[Rust, Jvm], RiskKind::UnsafeCode, param!(unsafe_code), "`unsafe` code"),
-                d(r#"\bunsafe\.|"unsafe""#, &[Go], RiskKind::UnsafeCode, param!(unsafe_code), "`unsafe` package use"),
-                d(r"\beval\s*\(|\bnew Function\(|\b__import__\(|\bexec\s*\(\s*[^)]", &[Script, Python, Dynamic], RiskKind::DynamicExecution, param!(dynamic_eval), "dynamic code evaluation (`eval`/`exec`)"),
-                d(r"child_process|\bexecSync\(|\bspawnSync\(|\bspawn\(|\bexecFile\(", &[Script], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution"),
-                d(r"\bsubprocess\.|\bos\.system\(|\bos\.popen\(|shell\s*=\s*True", &[Python], RiskKind::DynamicExecution, param!(dynamic_exec), "subprocess/shell execution"),
-                d(r"\bpickle\.loads?\(|\byaml\.load\(|\bmarshal\.loads?\(", &[Python], RiskKind::DynamicExecution, param!(dynamic_exec), "unsafe deserialization"),
-                d(r"Command::new|std::process::Command|\bprocess::Command", &[Rust], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution"),
-                d(r#"\bexec\.Command\(|"os/exec"|\bsyscall\.Exec"#, &[Go], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution"),
-                d(r"Runtime\.getRuntime\(\)\.exec|\bProcessBuilder\b|\bProcess\.Start\(|Class\.forName\(|ObjectInputStream", &[Jvm], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution / reflection / deserialization"),
-                d(r"\b(?:shell_exec|passthru|popen|proc_open|system|exec)\s*\(|%x\{|\bunserialize\(", &[Dynamic], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution"),
-                d(r"\bsystem\s*\(|\bpopen\s*\(|\bstrcpy\s*\(|\bsprintf\s*\(|\bgets\s*\(", &[CLike], RiskKind::DynamicExecution, param!(dynamic_exec), "shell execution / unbounded string function"),
-                d(r"\beval\b|curl[^|]*\|\s*(?:ba)?sh|\bsudo\b|\brm\s+-rf\b|\bchmod\s+(?:-R\s+)?777", &[Shell], RiskKind::DynamicExecution, param!(dynamic_exec), "shell eval/sudo/destructive command"),
-                d(r"\binnerHTML\b|dangerouslySetInnerHTML|document\.write\(", &[Script], RiskKind::DynamicExecution, param!(html_injection), "raw HTML injection"),
-            ],
-        }
+/// The regex tables, compiled once. `None` only if a pattern does not compile (a bug the
+/// tests catch); the regex-based signals are then skipped instead of panicking.
+fn patterns() -> Option<&'static Patterns> {
+    static RISK_PATTERNS: OnceLock<Option<Patterns>> = OnceLock::new();
+    RISK_PATTERNS.get_or_init(|| compile_patterns().ok()).as_ref()
+}
+
+fn compile_patterns() -> Result<Patterns, regex::Error> {
+    let re = Regex::new;
+    let d = |s: &str, families: &'static [Family], kind, param, what| -> Result<Danger, regex::Error> {
+        Ok(Danger {
+        re: re(s)?,
+        families,
+        kind,
+        param,
+        what,
+    })};
+    use Family::*;
+    Ok(Patterns {
+        cond: re(r"\b(if|else|elif|match|switch|case|while|guard|unless|when)\b")?,
+        err_rust: re(r"(?:\w|\)|\]|>)\?\s*(?:[;.,)}\]]|$)|\.map_err\(|\.ok_or(?:_else)?\(|\.context\(|\.with_context\(|\bErr\(")?,
+        err_script: re(r"\bcatch\b|\.catch\(|\bfinally\b|\bthrow\b|\btry\s*\{")?,
+        err_python: re(r"\bexcept\b|\bfinally\b|\braise\b|\btry\s*:")?,
+        err_go: re(r"\berr\s*!=\s*nil|errors\.(?:Is|As|New)\b|fmt\.Errorf|\brecover\(\)")?,
+        err_jvm: re(r"\bcatch\b|\bfinally\b|\bthrows?\b|\btry\b|\bguard\b")?,
+        err_generic: re(r"\bcatch\b|\bfinally\b|\brescue\b|\bensure\b|\braise\b|\bthrow\b|\berrno\b|\bperror\b|set\s+-e|\|\|\s*exit|\btrap\b")?,
+        panic_rust: re(r"\.unwrap\(\)|\.expect\(|\bpanic!\(|\bunreachable!\(|\btodo!\(|\bunimplemented!\(")?,
+        panic_go: re(r"\bpanic\(")?,
+        assertion: re(r"\bassert\w*\s*[!(]|\bassert\s|\bexpect\(|\.should\b|\brequire\(")?,
+        test_decl: re(r"#\[test\]|#\[tokio::test\]|\bdef test_|\bfunc Test|\b(?:it|test)\(|@Test\b|\bfn test_")?,
+        sql_stmt: re(r"(?i)\b(?:select\s.+\sfrom|insert\s+into|update\s+\w+\s+set|delete\s+from)\b")?,
+        sql_dynamic: re(r#"\+\s*\w|"\s*\+|\bformat!?\(|\bf"|\bf'|["']\s*%\s*[(\w]|%s[^"']*["']\s*(?:$|;)|\$\{|\.format\(|\{\w*\}|\bSprintf\("#)?,
+        danger: vec![
+            d(r"\bunsafe\b", &[Rust, Jvm], RiskKind::UnsafeCode, param!(unsafe_code), "`unsafe` code")?,
+            d(r#"\bunsafe\.|"unsafe""#, &[Go], RiskKind::UnsafeCode, param!(unsafe_code), "`unsafe` package use")?,
+            d(r"\beval\s*\(|\bnew Function\(|\b__import__\(|\bexec\s*\(\s*[^)]", &[Script, Python, Dynamic], RiskKind::DynamicExecution, param!(dynamic_eval), "dynamic code evaluation (`eval`/`exec`)")?,
+            d(r"child_process|\bexecSync\(|\bspawnSync\(|\bspawn\(|\bexecFile\(", &[Script], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution")?,
+            d(r"\bsubprocess\.|\bos\.system\(|\bos\.popen\(|shell\s*=\s*True", &[Python], RiskKind::DynamicExecution, param!(dynamic_exec), "subprocess/shell execution")?,
+            d(r"\bpickle\.loads?\(|\byaml\.load\(|\bmarshal\.loads?\(", &[Python], RiskKind::DynamicExecution, param!(dynamic_exec), "unsafe deserialization")?,
+            d(r"Command::new|std::process::Command|\bprocess::Command", &[Rust], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution")?,
+            d(r#"\bexec\.Command\(|"os/exec"|\bsyscall\.Exec"#, &[Go], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution")?,
+            d(r"Runtime\.getRuntime\(\)\.exec|\bProcessBuilder\b|\bProcess\.Start\(|Class\.forName\(|ObjectInputStream", &[Jvm], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution / reflection / deserialization")?,
+            d(r"\b(?:shell_exec|passthru|popen|proc_open|system|exec)\s*\(|%x\{|\bunserialize\(", &[Dynamic], RiskKind::DynamicExecution, param!(dynamic_exec), "process execution")?,
+            d(r"\bsystem\s*\(|\bpopen\s*\(|\bstrcpy\s*\(|\bsprintf\s*\(|\bgets\s*\(", &[CLike], RiskKind::DynamicExecution, param!(dynamic_exec), "shell execution / unbounded string function")?,
+            d(r"\beval\b|curl[^|]*\|\s*(?:ba)?sh|\bsudo\b|\brm\s+-rf\b|\bchmod\s+(?:-R\s+)?777", &[Shell], RiskKind::DynamicExecution, param!(dynamic_exec), "shell eval/sudo/destructive command")?,
+            d(r"\binnerHTML\b|dangerouslySetInnerHTML|document\.write\(", &[Script], RiskKind::DynamicExecution, param!(html_injection), "raw HTML injection")?,
+        ],
     })
 }
 
@@ -1139,8 +1144,7 @@ fn collect(diff: &FileDiff, langs: &LanguageRegistry, ctx: Context) -> RiskFacts
 
         if family.is_code() {
             // Tests/assertions removed from test files.
-            if is_test {
-                let p = patterns();
+            if let (true, Some(p)) = (is_test, patterns()) {
                 let tests_net = -net_added(&p.test_decl, &removed, &added);
                 let asserts_net = -net_added(&p.assertion, &removed, &added);
                 if tests_net >= 1 {
@@ -1225,10 +1229,9 @@ fn code_signals(
     removed: &[&str],
     added: &[&str],
 ) {
-    if is_test {
+    let Some(p) = patterns().filter(|_| !is_test) else {
         return;
-    }
-    let p = patterns();
+    };
     let new_run = |re: &Regex| first_run(added_rows, re);
     let old_run = |re: &Regex| first_run(removed_rows, re);
     let at = |b: &mut Builder,
@@ -1758,7 +1761,7 @@ mod tests {
             old.map(|s| s.as_bytes().to_vec()),
             new.map(|s| s.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(),
+            &DiffOptions::default(), &crate::content::NoCache,
         )
     }
 

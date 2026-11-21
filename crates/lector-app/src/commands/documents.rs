@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context as _};
 use lector_buffer::TextEdit;
 use lector_config::Settings;
-use lector_workspace::Project;
+use crate::project::Project;
 use serde_json::{json, Value};
 
 use super::schema::{object, prop};

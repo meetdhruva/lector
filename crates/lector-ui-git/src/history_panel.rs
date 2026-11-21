@@ -19,7 +19,7 @@ use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::WORKDIR_REV;
+use lector_review::review::WORKDIR_REV;
 
 use crate::review_tab::ref_pill;
 use crate::store::{GitStore, GitStoreEvent};

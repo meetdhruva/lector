@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use lector_config::Settings;
-use lector_workspace::project::Project;
+use lector_app::project::Project;
 
 #[test]
 #[ignore = "writes a 1 GB file; run explicitly in release mode"]

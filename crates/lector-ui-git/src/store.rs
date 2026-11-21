@@ -14,8 +14,8 @@ use lector_app::git_service::{GitSnapshot, RepoState, Subscription};
 use lector_config::{ReviewStore, Settings};
 use lector_git::{HeadInfo, Repo, StatusEntry};
 use lector_ui::views::{Workspace, WorkspaceEvent};
-use lector_workspace::conflicts::ConflictState;
-use lector_workspace::Project;
+use lector_review::conflicts::ConflictState;
+use lector_app::project::Project;
 
 use crate::review_model::{ModelInputs, ReviewModel};
 
@@ -151,7 +151,7 @@ impl GitStore {
             repo,
             languages: project.languages().clone(),
             status: self.status.clone(),
-            diff_options: lector_workspace::review::diff_options(&settings.diff),
+            diff_options: lector_review::review::diff_options(&settings.diff),
             detect_moved: settings.review.detect_moved,
         };
         self.review_model.update(cx, |m, cx| m.refresh(inputs, cx));

@@ -1,4 +1,14 @@
 //! The project: root folder, optional git repository, file list, status, symbols.
+//!
+//! The open project is app state (ADR 0001). Review analysis of its repository is done by
+//! the stateless `lector-review` crate; [`load_changeset`] and [`load_file_diff`] bind it to
+//! a project (its repository, settings, languages and the app's content cache).
+
+pub mod navigation;
+pub mod symbols;
+
+pub use navigation::{Location, NavHistory};
+pub use symbols::{Target, TargetSource};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,8 +24,50 @@ use lector_syntax::{LanguageRegistry, SymbolIndex, Syntax};
 use lector_text::Text;
 use parking_lot::{Mutex, RwLock};
 
-use crate::document::Document;
-use crate::{Error, Result};
+use lector_diff::DiffOptions;
+use lector_git::{Changeset, FileChange};
+use lector_review::review::{self, ChangesetView, FileDiff};
+
+use crate::content_cache::ContentCache;
+use crate::documents::Document;
+
+/// Errors of the project model.
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectError {
+    /// File system error.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    /// Git error.
+    #[error("git error: {0}")]
+    Git(#[from] lector_git::Error),
+    /// Syntax (tree-sitter) error.
+    #[error("syntax error: {0}")]
+    Syntax(#[from] lector_syntax::SyntaxError),
+    /// Language server error.
+    #[error("language server error: {0}")]
+    Lsp(#[from] lector_lsp::LspError),
+    /// The project is not inside a git repository.
+    #[error("not a git repository")]
+    NotARepository,
+    /// Anything else.
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<lector_review::Error> for ProjectError {
+    fn from(e: lector_review::Error) -> Self {
+        match e {
+            lector_review::Error::Io(e) => ProjectError::Io(e),
+            lector_review::Error::Git(e) => ProjectError::Git(e),
+            lector_review::Error::Other(s) => ProjectError::Other(s),
+        }
+    }
+}
+
+/// `Result` alias for the project model.
+pub type Result<T> = std::result::Result<T, ProjectError>;
+
+use ProjectError as Error;
 
 /// Files larger than this are skipped by the symbol indexer.
 const INDEX_MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -666,6 +718,28 @@ impl Project {
         }
         true
     }
+}
+
+/// Loads a changeset of the project's repository with stats and viewed state.
+pub fn load_changeset(
+    project: &Project,
+    cs: &Changeset,
+    store: &lector_config::ReviewStore,
+) -> Result<ChangesetView> {
+    let repo = project.repo().ok_or(Error::NotARepository)?;
+    let opts = review::diff_options(&project.settings().diff);
+    Ok(review::load_changeset_with(repo, cs, store, &opts)?)
+}
+
+/// Loads and diffs one change of the project's repository (through the app's content cache).
+pub fn load_file_diff(
+    project: &Project,
+    change: &FileChange,
+    opts: &DiffOptions,
+) -> Result<FileDiff> {
+    let repo = project.repo().ok_or(Error::NotARepository)?;
+    let cache = ContentCache::global();
+    Ok(review::load_file_diff_with(repo, project.languages(), change, opts, cache)?)
 }
 
 #[cfg(test)]

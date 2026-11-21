@@ -35,7 +35,8 @@ use gpui::{
 };
 use lector_fs::{FileKind, ImageFormat};
 use lector_syntax::{OutlineItem, SymbolKind};
-use lector_workspace::{Document, Indentation, LineEnding, Project};
+use lector_app::documents::{Document, Indentation, LineEnding};
+use lector_app::project::Project;
 
 pub use doc_store::{document_store, set_document_store};
 pub use model::{
@@ -848,7 +849,7 @@ impl FileView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let md = lector_workspace::symbols::hover(&project, &doc, offset)
+                    let md = lector_app::project::symbols::hover(&project, &doc, offset)
                         .ok()
                         .flatten()
                         .map(|md| md.trim().to_string())

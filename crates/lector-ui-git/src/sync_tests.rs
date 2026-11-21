@@ -12,7 +12,7 @@ use lector_app::{AppCore, CoreOptions};
 use lector_git::SyncErrorKind;
 use lector_process::askpass::{classify_prompt, PromptReply, PromptRequest};
 use lector_ui::views::Workspace;
-use lector_workspace::Project;
+use lector_app::project::Project;
 
 use crate::askpass_ui;
 use crate::confirm::ConfirmDialog;

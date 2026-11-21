@@ -27,7 +27,7 @@ use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{
+use lector_review::review::{
     self, diff_options, DiffKind, FileDiff, HunkAction, LineSelection, ReviewFile,
 };
 
@@ -344,10 +344,10 @@ impl DiffView {
             let languages = project.languages().clone();
             let diff = match &target {
                 DiffTarget::Change(change) => {
-                    review::load_file_diff_with(repo, &languages, change, &opts)
+                    review::load_file_diff_with(repo, &languages, change, &opts, lector_app::content_cache::ContentCache::global())
                 }
                 DiffTarget::FileVsRev { path, rev } => {
-                    review::file_vs_revision_with(repo, &languages, path, rev, &opts)
+                    review::file_vs_revision_with(repo, &languages, path, rev, &opts, lector_app::content_cache::ContentCache::global())
                 }
             }
             .map_err(|e| e.to_string())?;

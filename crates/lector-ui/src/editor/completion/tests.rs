@@ -432,7 +432,7 @@ fn start<'a>(
     wait_for_server: bool,
 ) -> (Session, &'a mut VisualTestContext) {
     init(cx, &env.settings);
-    let project = lector_workspace::Project::open(&env.root, env.settings.clone()).unwrap();
+    let project = lector_app::project::Project::open(&env.root, env.settings.clone()).unwrap();
     let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project, window, cx));
     cx.run_until_parked();
     let view = ws

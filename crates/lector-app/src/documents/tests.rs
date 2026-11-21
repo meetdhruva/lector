@@ -11,7 +11,7 @@ use lector_buffer::TextEdit;
 use lector_config::Settings;
 use lector_lsp::{Diagnostic, DiagnosticSeverity, DocumentDiagnostics};
 use lector_text::PointUtf16;
-use lector_workspace::Project;
+use crate::project::Project;
 use parking_lot::Mutex;
 
 use super::*;

@@ -19,7 +19,7 @@ use lector_theme::{Appearance, ThemeRegistry};
 use lector_ui::commands_bridge::CoreGlobal;
 use lector_ui::theme::{ThemeMode, ThemeState};
 use lector_ui::views::Workspace;
-use lector_workspace::Project;
+use lector_app::project::Project;
 
 use crate::inline_edit::InlineEdits;
 use crate::panel::AgentPanel;

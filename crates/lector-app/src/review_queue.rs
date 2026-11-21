@@ -3,7 +3,7 @@
 //!
 //! UI-free building blocks over [`FileDiff`]s, used by the review tab, the Changes panel and
 //! tests:
-//! * [`analyze`] orders the files of a changeset by [`lector_workspace::risk`] ("needs
+//! * [`analyze`] orders the files of a changeset by [`lector_review::risk`] ("needs
 //!   attention" first, generated / lock / negligible files in a trailing low-risk group),
 //!   finds moved blocks within and across files ([`lector_diff::moves`]) and fingerprints
 //!   every hunk.
@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use lector_diff::moves::{detect_moved, detect_moved_across};
 use lector_diff::remap::{reanchor_with, Anchor, ReanchorOptions};
-use lector_workspace::review::{DiffKind, FileDiff};
-use lector_workspace::risk::{self, RiskLevel, RiskReport};
+use lector_review::review::{DiffKind, FileDiff};
+use lector_review::risk::{self, RiskLevel, RiskReport};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
@@ -205,7 +205,7 @@ fn is_text(diff: &FileDiff) -> bool {
     diff.kind == DiffKind::Text && !diff.diff.hunks.is_empty()
 }
 
-fn side_string(side: &lector_workspace::review::DiffSide) -> String {
+fn side_string(side: &lector_review::review::DiffSide) -> String {
     side.text
         .as_ref()
         .map(|t| t.to_string())
@@ -674,7 +674,7 @@ mod tests {
     use lector_diff::DiffOptions;
     use lector_git::{ChangeKind, FileChange, Side};
     use lector_syntax::LanguageRegistry;
-    use lector_workspace::review::diff_bytes;
+    use lector_review::review::diff_bytes;
 
     fn diff_for(path: &str, old: Option<&str>, new: Option<&str>) -> Arc<FileDiff> {
         let change = FileChange {
@@ -694,7 +694,7 @@ mod tests {
             old.map(|s| s.as_bytes().to_vec()),
             new.map(|s| s.as_bytes().to_vec()),
             &LanguageRegistry::new(),
-            &DiffOptions::default(),
+            &DiffOptions::default(), crate::content_cache::ContentCache::global(),
         ))
     }
 
