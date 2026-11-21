@@ -31,3 +31,36 @@ terminal tabs to a race between two writers of one such file.
 `arch-check state`: no `data_dir()`/`state_dir()` path joins with a literal file name outside
 `lector_app::store`, `lector-config::paths`, logging and crash reporting. Upgrade test from
 0.7.1 fixtures.
+
+## Clarifications at implementation
+Recorded by the architect when reviewing the implementation, before merge.
+
+- **Sharing is the normal case.** Processes open the file in redb's `MultiWriter` mode and
+  share it read-write (0.7.1 included); write transactions are serialized across processes.
+  Read-only state happens only when the file cannot be opened for writing: held exclusively,
+  another lock protocol, written by a newer Lector, or not writable.
+- **Read-only state keeps the session working, in memory.** Writes go to an in-memory copy
+  (seeded from the file when it can be read) and are lost at exit; nothing is written back and
+  no private file is made. This replaces "writes fail" so undo and review marks work for the
+  session. It must stay visible for as long as it lasts: a persistent status bar item, the
+  startup toast, a line in `lector health`, and one stderr line from `lector <subcommand>` /
+  `lector mcp` at the first state write.
+- **A newer file is never opened for writing.** The schema is read through a read-only handle
+  first. Per-concern versions live in `store_meta`: older values migrate on read and the
+  concern on its first write; a newer concern reads as absent and refuses writes.
+- **Corruption recovery is cross-process safe.** A file counts as damaged only if it stays so
+  over repeated opens (about 500 ms); recovery runs under an OS-held lock
+  (`lector.redb.recovery-lock`) and first re-opens the file; the damaged file is renamed (not
+  copied) to `lector.redb.corrupt-<secs>`, owner-only at every moment. A new database file is
+  created 0600; an existing file's mode is left alone.
+- **Import.** Per old file: values and an `import:<path>` marker in one transaction, then
+  rename to `.imported`. Imported values never overwrite what the store holds; symbolic links
+  are not followed; files over 8 MiB are not read; nothing is imported in read-only state.
+- **Where types live.** The store owns names, versions and migrations. Value types for notices
+  and update state stay in `lector-ui-agent` / `lector-forge` (no `lector-app` -> `lector-forge`
+  dependency); session types moved to `lector_app::store`. Hunk-reviewed marks stay in the
+  `kv` table.
+- **Still files, by decision 2:** settings, keymap, themes, logs, crash reports, the shell
+  integration scripts and the journal's shadow repositories.
+- **The `state` rule** also resolves file names held in `const`/`static`, and `paths.rs` and
+  `db/**` are no longer allowlisted.

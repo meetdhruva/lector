@@ -264,16 +264,17 @@ impl RecoveryLock {
 
 /// Recovers a damaged database (see the module doc).
 fn recover(path: &Path, reason: &str) -> Store {
-    let _lock =
-        match RecoveryLock::acquire(path) {
-            Ok(lock) => lock,
-            Err(e) => return read_only(
+    let _lock = match RecoveryLock::acquire(path) {
+        Ok(lock) => lock,
+        Err(e) => {
+            return read_only(
                 path,
                 format!(
                     "the database is damaged ({reason}) and the recovery lock is unavailable ({e})"
                 ),
-            ),
-        };
+            )
+        }
+    };
     // Another process may have recovered it while this one waited.
     let reason = match open_confirmed(path) {
         Ok(database) => return writable(database, path, None),
