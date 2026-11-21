@@ -11,7 +11,8 @@ use gpui::{
     div, prelude::*, AnyElement, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, SharedString, StyledText, Task, Window,
 };
-use lector_workspace::{Document, Project, Target, TargetSource};
+use lector_app::project::{Project, Target, TargetSource};
+use lector_app::Document;
 
 use crate::components::context_menu::{ContextMenu, ContextMenuState};
 use crate::components::list::{virtual_list, VirtualListState};
@@ -96,7 +97,7 @@ impl ReferencesView {
             let targets = cx
                 .background_executor()
                 .spawn(async move {
-                    lector_workspace::symbols::references(&project, &doc, offset)
+                    lector_app::project::symbols::references(&project, &doc, offset)
                         .unwrap_or_default()
                 })
                 .await;

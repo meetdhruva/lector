@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 lector-app.workspace = true
-lector-workspace.workspace = true
+lector-review.workspace = true
 lector-config.workspace = true
 lector-git.workspace = true
 lector-diff.workspace = true

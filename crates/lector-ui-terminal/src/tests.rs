@@ -62,7 +62,7 @@ fn open_workspace<'a>(
     Entity<TerminalPanel>,
     &'a mut VisualTestContext,
 ) {
-    let project = lector_workspace::Project::open(root, settings_with(|_| {})).expect("project");
+    let project = lector_app::Project::open(root, settings_with(|_| {})).expect("project");
     let slot: Rc<RefCell<Option<Entity<Workspace>>>> = Rc::default();
     let s = slot.clone();
     let (_root, cx) = cx.add_window_view(move |window, cx| {

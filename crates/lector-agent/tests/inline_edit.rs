@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use lector_agent::inline_edit::*;
 use lector_agent::*;
+use lector_app::Project;
 use lector_app::{AppCore, CoreOptions};
 use lector_buffer::TextEdit;
-use lector_workspace::Project;
 
 const WAIT: Duration = Duration::from_secs(30);
 

@@ -18,13 +18,13 @@ use gpui::{
     div, prelude::*, AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId,
     EventEmitter, Hsla, SharedString, Subscription, Task, WeakEntity, Window,
 };
+use lector_review::conflicts::{self, ConflictParse, Resolution, Side};
 use lector_ui::code_view::{CodeView, RowBackground, RowWidget, WidgetAnchor};
 use lector_ui::components::{h_flex, metrics, Tooltip};
 use lector_ui::editor::{DocumentEvent, DocumentModel, FileView};
 use lector_ui::scale::px;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::conflicts::{self, ConflictParse, Resolution, Side};
 
 use crate::store::GitStore;
 

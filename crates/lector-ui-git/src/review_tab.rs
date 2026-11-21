@@ -10,6 +10,7 @@ use gpui::{
     Window,
 };
 use lector_git::{ChangeKind, Changeset, CommitDetail, Oid, RefKind};
+use lector_review::review::{self, changeset_key, ChangesetView};
 use lector_ui::actions::diff as diff_actions;
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::list::{virtual_list, VirtualListState};
@@ -19,7 +20,6 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{self, changeset_key, ChangesetView};
 
 use crate::diff_view::{
     settings_diff_options, stats_label, DiffTarget, DiffView, DiffViewEvent, ViewedTarget,

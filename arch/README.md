@@ -27,7 +27,7 @@ also protected by the test suite.
 
 | File | What it is |
 |---|---|
-| `baseline.toml` | Today's violations: rule, then key, then count. Keys are source files, except `deps` (a crate edge such as `lector-ui-git -> lector-process`, or `crate lector-workspace`) and `size` (file and its current line count). Written by `--update` only. |
+| `baseline.toml` | Today's violations: rule, then key, then count. Keys are source files, except `deps` (a crate edge such as `lector-ui-git -> lector-process`, or `crate <name>` for a crate an ADR removes) and `size` (file and its current line count). Written by `--update` only. |
 | `layers.toml` | The crate layering (bottom to top), explicit `[[forbid]]` edges and `[[forbid_crate]]` entries from the ADRs, and the dependency-closure rules (no GPUI, window system or tokio under core crates; no GPUI under `lector-cli`/`lector-mcp`). |
 | `threads.allow` | Files that may create threads (`thread::spawn`, `thread::Builder`, `spawn_scoped`), and the closed list of `kind:` names for `spawn_named` (ADR 0003). |
 | `background.allow` | The one UI bridge module that may call `background_spawn` / `background_executor` (ADR 0003). |

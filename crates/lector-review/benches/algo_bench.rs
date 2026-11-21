@@ -1,21 +1,22 @@
-//! Benchmarks of the structural diff, risk assessment and content cache.
-//! `cargo bench -p lector-workspace --bench algo_bench`
+//! Benchmarks of the structural diff, risk assessment and content identity.
+//! `cargo bench -p lector-review --bench algo_bench` (the content cache lookups are in
+//! `cargo bench -p lector-app --bench cache_bench`).
 
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, FileChange, Side};
+use lector_review::review::diff_bytes;
+use lector_review::risk;
+use lector_review::structural::{self, Budget};
+use lector_review::{ContentId, NoCache};
 use lector_syntax::{LanguageRegistry, Syntax};
 use lector_text::Text;
-use lector_workspace::cache::{ContentCache, ContentId};
-use lector_workspace::review::diff_bytes;
-use lector_workspace::risk;
-use lector_workspace::structural::{self, Budget};
 
-const RUST_SMALL: &str = include_str!("../src/navigation.rs");
-const RUST_MEDIUM: &str = include_str!("../src/symbols.rs");
-const RUST_LARGE: &str = include_str!("../src/project.rs");
+const RUST_SMALL: &str = include_str!("../../lector-app/src/project/navigation.rs");
+const RUST_MEDIUM: &str = include_str!("../../lector-app/src/project/symbols.rs");
+const RUST_LARGE: &str = include_str!("../../lector-app/src/project.rs");
 
 /// A realistic agent-style edit: renames, a few literal tweaks, one inserted function.
 fn edit(src: &str) -> String {
@@ -83,24 +84,16 @@ fn bench(c: &mut Criterion) {
         Some(new.into_bytes()),
         &langs,
         &DiffOptions::default(),
+        &NoCache,
     );
     c.bench_function("risk/assess medium file (tree-sitter API compare)", |b| {
         b.iter(|| risk::assess(&fd, &langs))
     });
 
-    // Cache: parse miss vs hit.
+    // Content identity (the cache key).
     let text = Text::from(RUST_LARGE);
-    let id = ContentId::of_text(&text);
     c.bench_function("cache/ContentId::of_text 60 KB", |b| {
         b.iter(|| ContentId::of_text(&text))
-    });
-    c.bench_function("cache/syntax parse (miss)", |b| {
-        b.iter(|| Syntax::parse(&rust, &text).unwrap())
-    });
-    let cache = ContentCache::default();
-    cache.syntax(id, &rust, &text).unwrap();
-    c.bench_function("cache/syntax lookup (hit)", |b| {
-        b.iter(|| cache.syntax(id, &rust, &text).unwrap())
     });
 }
 

@@ -6,12 +6,14 @@
 
 pub mod commands; // Agent APP
 pub mod comments; // Agent FORGE
+pub mod content_cache; // content-addressed caches passed to lector-review (ADR 0001)
 mod core; // Agent APP
 pub mod db; // Agent APP
 pub mod documents; // Agent DOCS
 pub mod git_service; // Agent APP
 pub mod health; // local crash log and session health
 pub mod journal; // Agent SAFE
+pub mod project; // the open project: files, git status, symbols, navigation (ADR 0001)
 pub mod provenance; // Agent REVIEWUX
 pub mod review_queue; // Agent REVIEWUX
 pub mod scheduler; // Agent APP
@@ -22,5 +24,7 @@ pub use crate::commands::{
 };
 pub use crate::core::{AppCore, CoreOptions};
 pub use crate::db::Db;
+pub use crate::documents::{Document, Indentation, LineEnding, LineHighlights};
 pub use crate::git_service::{GitService, GitSnapshot, RepoState};
+pub use crate::project::{Project, ProjectError};
 pub use crate::scheduler::{JobHandle, JobKey, Priority, Scheduler};

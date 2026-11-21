@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use crate::{Document, LineEnding, LineHighlights, Project};
 use lector_buffer::save::{Encoding, LineEnding as SaveLineEnding, SaveOptions};
 use lector_buffer::{Buffer, BufferOptions, EditDelta, Selection, TextEdit, Transaction};
 use lector_diff::{diff_lines, DiffOptions, GutterMark};
@@ -23,7 +24,6 @@ use lector_git::BlameHunk;
 use lector_lsp::DocumentDiagnostics;
 use lector_syntax::{OutlineItem, Syntax, SyntaxEdit};
 use lector_text::{Rope, Text};
-use lector_workspace::{Document, LineEnding, LineHighlights, Project};
 use parking_lot::{Mutex, RwLock};
 
 use super::derive::{self, DocDiagnostic};

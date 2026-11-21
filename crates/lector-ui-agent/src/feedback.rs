@@ -64,7 +64,7 @@ pub fn selection_feedback(ws: &Workspace, cx: &App) -> Option<Chip> {
         .focus
         .changeset
         .as_ref()
-        .map(lector_workspace::review::changeset_key);
+        .map(lector_review::review::changeset_key);
     let comments = lector_agent::commands::feedback_text(&ctx, key.as_deref(), "");
     if !comments.trim().is_empty() {
         if !text.is_empty() {

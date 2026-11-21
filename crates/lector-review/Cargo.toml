@@ -1,31 +1,26 @@
 [package]
-name = "lector-workspace"
+name = "lector-review"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "UI-free application model for Lector: project, documents, navigation, review."
+description = "Stateless review analysis for Lector: changesets, file diffs, risk, structural diff, conflicts."
 
 [dependencies]
 memchr.workspace = true
 regex.workspace = true
-dunce.workspace = true
 lector-text.workspace = true
 lector-fs.workspace = true
 lector-syntax.workspace = true
 lector-diff.workspace = true
 lector-git.workspace = true
 lector-search.workspace = true
-lector-lsp.workspace = true
 lector-config.workspace = true
 lector-buffer.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
-tracing.workspace = true
-futures = "0.3"
 
 [dev-dependencies]
 lector-config = { workspace = true, features = ["test-support"] }

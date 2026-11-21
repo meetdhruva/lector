@@ -742,7 +742,7 @@ mod tests {
         let mut settings = lector_config::Settings::default();
         settings.lsp.enabled = false;
         settings.session.restore = false;
-        let project = lector_workspace::Project::open(dir, settings).expect("project");
+        let project = lector_app::Project::open(dir, settings).expect("project");
         cx.add_window_view(|window, cx| Workspace::new(project, window, cx))
     }
 

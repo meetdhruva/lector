@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use gpui::{div, prelude::*, ClipboardItem, FontWeight, SharedString, Window};
 use lector_app::comments::{self as cm, CommentStore, DiffSide, Thread, ThreadFilter, ThreadState};
+use lector_review::review::changeset_key;
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::changeset_key;
 
 use super::ReviewView;
 use crate::util::{now_secs, relative_time};

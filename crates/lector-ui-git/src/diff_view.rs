@@ -15,9 +15,10 @@ use gpui::{
 use lector_config::DiffLayout;
 use lector_diff::{DiffOptions, DiffStats, Whitespace};
 use lector_git::{ChangeKind, Changeset, FileChange, Side};
-use lector_ui::actions::diff as diff_actions;
-use lector_ui::actions::editor as editor_actions;
-use lector_ui::actions::git as git_actions;
+use lector_review::review::{
+    self, diff_options, DiffKind, FileDiff, HunkAction, LineSelection, ReviewFile,
+};
+use lector_ui::actions::{diff as diff_actions, editor as editor_actions, git as git_actions};
 use lector_ui::code_view::{CodeSource, CodeView, CodeViewEvent, EditorSettings, Pos, Selection};
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
@@ -27,9 +28,6 @@ use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::{
-    self, diff_options, DiffKind, FileDiff, HunkAction, LineSelection, ReviewFile,
-};
 
 use crate::confirm::{confirm, ConfirmSpec};
 use crate::diff_source::{hunk_display_starts, DiffColumn, DiffMeta, DiffSource};
@@ -342,12 +340,13 @@ impl DiffView {
                     .ok_or_else(|| "Not a git repository".to_string())?,
             };
             let languages = project.languages().clone();
+            let cache = lector_app::content_cache::ContentCache::global();
             let diff = match &target {
                 DiffTarget::Change(change) => {
-                    review::load_file_diff_with(repo, &languages, change, &opts)
+                    review::load_file_diff_with(repo, &languages, change, &opts, cache)
                 }
                 DiffTarget::FileVsRev { path, rev } => {
-                    review::file_vs_revision_with(repo, &languages, path, rev, &opts)
+                    review::file_vs_revision_with(repo, &languages, path, rev, &opts, cache)
                 }
             }
             .map_err(|e| e.to_string())?;

@@ -8,8 +8,8 @@ use std::sync::Once;
 
 use lector_diff::{Algorithm, DiffOptions};
 use lector_git::{Changeset, FileChange, Repo};
+use lector_review::review::{self, FileDiff, HunkAction, LineSelection};
 use lector_syntax::LanguageRegistry;
-use lector_workspace::review::{self, FileDiff, HunkAction, LineSelection};
 
 fn hermetic() {
     static ONCE: Once = Once::new();
@@ -108,6 +108,7 @@ impl Fx {
             &self.languages,
             &change,
             &DiffOptions::default(),
+            &lector_review::NoCache,
         )
         .unwrap()
     }

@@ -19,9 +19,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::project::Project;
 use lector_git::Changeset;
 use lector_text::Point;
-use lector_workspace::Project;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

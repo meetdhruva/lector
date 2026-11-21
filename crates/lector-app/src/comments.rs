@@ -1170,11 +1170,11 @@ fn review_key(cx: &CommandContext, args: &Value) -> (String, Option<Changeset>) 
     match str_arg(args, "changeset") {
         Some(key) => (
             key.to_string(),
-            lector_workspace::review::parse_changeset_key(key),
+            lector_review::review::parse_changeset_key(key),
         ),
         None => {
             let cs = cx.focus.changeset.clone().unwrap_or(Changeset::WorkingTree);
-            (lector_workspace::review::changeset_key(&cs), Some(cs))
+            (lector_review::review::changeset_key(&cs), Some(cs))
         }
     }
 }

@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, FileChange, Side};
+use lector_review::review::{diff_bytes, FileDiff};
 use lector_syntax::LanguageRegistry;
-use lector_workspace::review::{diff_bytes, FileDiff};
 use serde::Deserialize;
 
 /// One file of a changeset: base and head content (`null` = absent on that side).
@@ -97,6 +97,7 @@ pub fn diffs_of(case: &Case, langs: &LanguageRegistry) -> Vec<Arc<FileDiff>> {
                 f.head.as_ref().map(|s| s.as_bytes().to_vec()),
                 langs,
                 &DiffOptions::default(),
+                lector_app::content_cache::ContentCache::global(),
             ))
         })
         .collect()
@@ -260,22 +261,22 @@ pub fn print_report(title: &str, ev: &Evaluation) {
 }
 
 /// Facts of every file of a case (one analysis per file; the changeset context is applied).
-pub fn facts_of(case: &Case, langs: &LanguageRegistry) -> Vec<lector_workspace::risk::RiskFacts> {
+pub fn facts_of(case: &Case, langs: &LanguageRegistry) -> Vec<lector_review::risk::RiskFacts> {
     let diffs = diffs_of(case, langs);
-    let tests = Some(lector_workspace::risk::tests_changed_in(&diffs));
+    let tests = Some(lector_review::risk::tests_changed_in(&diffs));
     diffs
         .iter()
-        .map(|d| lector_workspace::risk::collect_facts(d, langs, tests))
+        .map(|d| lector_review::risk::collect_facts(d, langs, tests))
         .collect()
 }
 
 /// The review-queue order for `weights` from already analyzed facts: the attention group by
 /// descending score, then the low-value group (the same rule as `review_queue::analyze`).
 pub fn queue_order_of(
-    facts: &[lector_workspace::risk::RiskFacts],
-    weights: &lector_workspace::risk::RiskWeights,
+    facts: &[lector_review::risk::RiskFacts],
+    weights: &lector_review::risk::RiskWeights,
 ) -> Vec<usize> {
-    let ranked = lector_workspace::risk::rank_facts(facts, weights);
+    let ranked = lector_review::risk::rank_facts(facts, weights);
     let (low, attention): (Vec<_>, Vec<_>) =
         ranked.into_iter().partition(|(_, r)| r.is_low_value());
     attention.into_iter().chain(low).map(|(i, _)| i).collect()

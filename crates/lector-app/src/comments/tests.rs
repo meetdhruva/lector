@@ -331,7 +331,7 @@ fn sync_changeset_survives_a_rebase() {
         branch: "feature".into(),
         base: "main".into(),
     };
-    let key = lector_workspace::review::changeset_key(&cs);
+    let key = lector_review::review::changeset_key(&cs);
     let store = CommentStore::new(Db::in_memory());
     let (text, blob) = side_text(&repo, Some(&cs), "src/lib.rs", DiffSide::New).expect("text");
     assert!(blob.is_some());
@@ -374,7 +374,7 @@ fn commands_round_trip() {
     let core = AppCore::open(CoreOptions::for_tests());
     let mut settings = lector_config::Settings::default();
     settings.lsp.enabled = false;
-    let project = lector_workspace::Project::open(&root, settings).expect("project");
+    let project = crate::project::Project::open(&root, settings).expect("project");
     let cx = CommandContext::new(core.clone(), Some(project), Source::Internal);
     let reg = core.registry();
     for id in [

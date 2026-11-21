@@ -11,7 +11,7 @@ use gpui::{
     div, prelude::*, AnyElement, App, Corner, Div, Entity, Focusable, MouseButton, MouseMoveEvent,
     Pixels, Point, Window, WindowControlArea,
 };
-use lector_workspace::Project;
+use lector_app::Project;
 
 use super::{Workspace, WorkspaceRoot};
 use crate::actions::workspace::*;

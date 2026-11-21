@@ -18,8 +18,8 @@ use lector_app::comments::{
     self, Anchor, AnchorMatch, CommentStore, DiffSide, NewThread, Origin, Thread, ThreadFilter,
     ThreadState,
 };
-use lector_diff::RowKind;
-use lector_diff::Segment;
+use lector_diff::{RowKind, Segment};
+use lector_review::review::FileDiff;
 use lector_ui::code_view::{
     CodeView, GutterIcon, InlineMarks, Pos, RowBackground, RowWidget, Selection, WidgetAnchor,
 };
@@ -29,7 +29,6 @@ use lector_ui::icons::{Icon, IconName, IconSize};
 use lector_ui::scale::px;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-use lector_workspace::review::FileDiff;
 
 use super::{DiffView, Layout};
 use crate::diff_source::{DiffColumn, DisplayRow};
@@ -319,7 +318,7 @@ impl DiffView {
         match self.target.as_ref()? {
             super::DiffTarget::Change(_) => self
                 .changeset()
-                .map(|cs| lector_workspace::review::changeset_key(&cs)),
+                .map(|cs| lector_review::review::changeset_key(&cs)),
             super::DiffTarget::FileVsRev { rev, .. } => Some(format!("workdir:{rev}")),
         }
     }
@@ -1399,8 +1398,8 @@ mod tests {
 
     use lector_diff::DiffOptions;
     use lector_git::{ChangeKind, FileChange, Side};
+    use lector_review::review::diff_bytes;
     use lector_syntax::LanguageRegistry;
-    use lector_workspace::review::diff_bytes;
 
     use super::*;
 
@@ -1419,6 +1418,7 @@ mod tests {
             Some(new.as_bytes().to_vec()),
             &LanguageRegistry::new(),
             &DiffOptions::default(),
+            lector_app::content_cache::ContentCache::global(),
         )
     }
 

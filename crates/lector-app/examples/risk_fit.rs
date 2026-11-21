@@ -15,8 +15,8 @@
 mod harness;
 
 use harness::{Case, Metrics};
+use lector_review::risk::{RiskFacts, RiskWeights};
 use lector_syntax::LanguageRegistry;
-use lector_workspace::risk::{RiskFacts, RiskWeights};
 
 const FACTORS: &[f32] = &[0.6, 0.8, 1.0, 1.25, 1.5];
 const MARGIN: f32 = 0.05;

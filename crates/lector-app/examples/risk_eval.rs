@@ -26,7 +26,7 @@ fn main() {
             };
             println!("-- {} (risky: {:?})", case.id, case.risky);
             let diffs = harness::diffs_of(case, &langs);
-            for (i, report) in lector_workspace::risk::rank_files_with(&diffs, &langs) {
+            for (i, report) in lector_review::risk::rank_files_with(&diffs, &langs) {
                 println!("  {:.3} {}", report.score, case.files[i].path);
                 for r in report.reasons.iter().take(5) {
                     println!("        {:.2} {:?}: {}", r.weight, r.kind, r.message);

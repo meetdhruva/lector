@@ -13,9 +13,9 @@ use lector_syntax::SymbolLocation;
 use lector_text::{Point, Text};
 use parking_lot::{Condvar, Mutex};
 
-use crate::document::Document;
+use crate::documents::Document;
 use crate::project::Project;
-use crate::Result;
+use crate::project::Result;
 
 /// How long LSP requests may take before falling back.
 const LSP_TIMEOUT: Duration = Duration::from_secs(3);
