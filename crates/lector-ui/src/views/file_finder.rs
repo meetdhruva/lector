@@ -349,27 +349,64 @@ mod tests {
         (picker, opened, cx)
     }
 
+    /// Lets the matcher and the foreground tasks run until `done` holds. The picker's refresh
+    /// loop waits on `background_executor().timer(16 ms)`, which in a test window runs on the
+    /// executor's *simulated* clock: it only fires when the clock is advanced. So every turn
+    /// advances it, exactly as a real 16 ms would pass; without that the rows would only ever
+    /// be read once, in `update_matches` after `tick(8)`, which a slow or coarse-timer machine
+    /// (Windows) can miss.
     fn settle(
         cx: &mut gpui::VisualTestContext,
+        picker: &gpui::Entity<Picker<FileFinderDelegate>>,
+        what: &str,
         done: impl Fn(&mut gpui::VisualTestContext) -> bool,
     ) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
+            cx.executor().advance_clock(Duration::from_millis(16));
             cx.run_until_parked();
             if done(cx) {
                 return;
             }
-            assert!(std::time::Instant::now() < deadline, "timed out");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for {what}: {}", state(picker, cx));
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
-    fn top(
+    /// What the delegate holds, for failure messages.
+    fn state(
         picker: &gpui::Entity<Picker<FileFinderDelegate>>,
         cx: &mut gpui::VisualTestContext,
-    ) -> Option<String> {
+    ) -> String {
         picker.read_with(cx, |p, _| {
-            p.delegate.rows.first().map(|r| r.rel.to_string())
+            let d = &p.delegate;
+            format!(
+                "rows {:?}, rows_stamp {:?}, latest query {}, current {}, waiting {}, counts {:?}",
+                d.rows.iter().map(|r| r.rel.to_string()).collect::<Vec<_>>(),
+                d.rows_stamp,
+                d.list.latest(),
+                d.rows_are_current(),
+                d.confirm_waiting,
+                d.counts,
+            )
+        })
+    }
+
+    /// Whether the first row is the file with these path components (compared as paths, not
+    /// strings: the finder's relative paths are `/`-separated whatever the OS).
+    fn top_is(
+        picker: &gpui::Entity<Picker<FileFinderDelegate>>,
+        cx: &mut gpui::VisualTestContext,
+        components: &[&str],
+    ) -> bool {
+        let expected: PathBuf = components.iter().collect();
+        picker.read_with(cx, |p, _| {
+            p.delegate
+                .rows
+                .first()
+                .is_some_and(|r| std::path::Path::new(&*r.rel) == expected)
         })
     }
 
@@ -377,15 +414,23 @@ mod tests {
     fn enter_never_opens_a_row_of_an_older_query(cx: &mut TestAppContext) {
         let (picker, opened, cx) = finder(cx);
         picker.update_in(cx, |p, window, cx| p.set_query("alpha", window, cx));
-        settle(cx, |cx| top(&picker, cx).as_deref() == Some("src/alpha.rs"));
+        settle(cx, &picker, "alpha's rows", |cx| {
+            top_is(&picker, cx, &["src", "alpha.rs"])
+        });
         // The user typed "beta" but the matcher has not published for it yet: the rows on screen
         // are still those of "alpha". Enter must not open them.
         picker.update_in(cx, |p, window, cx| {
             p.delegate.list.set_query("beta");
             p.delegate.confirm(window, cx);
         });
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The clock is not advanced from here on, so the refresh loop cannot deliver the Enter.
+        std::thread::sleep(Duration::from_millis(200));
         cx.run_until_parked();
+        assert!(
+            picker.read_with(cx, |p, _| p.delegate.confirm_waiting),
+            "{}",
+            state(&picker, cx)
+        );
         assert!(opened.borrow().is_empty(), "opened {:?}", opened.borrow());
     }
 
@@ -393,19 +438,37 @@ mod tests {
     fn enter_right_after_typing_opens_the_new_querys_top_row(cx: &mut TestAppContext) {
         let (picker, opened, cx) = finder(cx);
         picker.update_in(cx, |p, window, cx| p.set_query("alpha", window, cx));
-        settle(cx, |cx| top(&picker, cx).as_deref() == Some("src/alpha.rs"));
+        settle(cx, &picker, "alpha's rows", |cx| {
+            top_is(&picker, cx, &["src", "alpha.rs"])
+        });
         picker.update_in(cx, |p, window, cx| p.set_query("beta", window, cx));
         // Whether the matcher was quick enough or not, Enter ends up on "beta", never "alpha".
         picker.update_in(cx, |p, window, cx| p.delegate.confirm(window, cx));
-        settle(cx, |_| !opened.borrow().is_empty());
-        assert_eq!(*opened.borrow(), [PathBuf::from("/root/src/beta.rs")]);
+        settle(cx, &picker, "beta to be opened", |_| {
+            !opened.borrow().is_empty()
+        });
+        // The same join the finder does, compared as paths.
+        let expected = PathBuf::from("/root").join(["src", "beta.rs"].iter().collect::<PathBuf>());
+        assert_eq!(*opened.borrow(), [expected], "{}", state(&picker, cx));
+    }
+
+    #[gpui::test]
+    fn a_query_typed_with_backslashes_finds_the_path(cx: &mut TestAppContext) {
+        // `update_matches` turns `\` into `/`: typing `src\beta` on Windows finds `src/beta.rs`.
+        let (picker, _opened, cx) = finder(cx);
+        picker.update_in(cx, |p, window, cx| p.set_query("src\\beta", window, cx));
+        settle(cx, &picker, "beta's rows", |cx| {
+            top_is(&picker, cx, &["src", "beta.rs"])
+        });
     }
 
     #[gpui::test]
     fn dismissing_drops_a_waiting_enter(cx: &mut TestAppContext) {
         let (picker, opened, cx) = finder(cx);
         picker.update_in(cx, |p, window, cx| p.set_query("alpha", window, cx));
-        settle(cx, |cx| top(&picker, cx).as_deref() == Some("src/alpha.rs"));
+        settle(cx, &picker, "alpha's rows", |cx| {
+            top_is(&picker, cx, &["src", "alpha.rs"])
+        });
         picker.update_in(cx, |p, window, cx| {
             p.delegate.list.set_query("beta");
             p.delegate.confirm(window, cx);
@@ -413,8 +476,12 @@ mod tests {
             p.delegate.dismissed(window, cx);
             assert!(!p.delegate.confirm_waiting);
         });
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        cx.run_until_parked();
+        // Even with the refresh loop's clock running, nothing is opened after the dismissal.
+        for _ in 0..20 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(opened.borrow().is_empty(), "opened {:?}", opened.borrow());
     }
 
