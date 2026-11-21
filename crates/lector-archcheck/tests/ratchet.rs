@@ -400,3 +400,101 @@ fn allowances_silence_a_rule_for_a_file() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("STALE"), "{out}");
 }
+
+const BIG: &str = "crates/lector-review/src/big.rs";
+const HUGE: &str = "crates/lector-review/src/huge.rs";
+
+fn rename_big(dir: &Path, lines: usize) {
+    fs::remove_file(dir.join(BIG)).expect("remove");
+    write(dir, HUGE, &"pub fn f() {}\n".repeat(lines));
+}
+
+#[test]
+fn a_renamed_file_is_a_new_entry_without_moved() {
+    let dir = baselined();
+    rename_big(dir.path(), 1501);
+    let (code, out) = arch(dir.path(), &["size", "--update"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("refusing to raise the baseline"), "{out}");
+    assert!(out.contains(HUGE), "{out}");
+}
+
+#[test]
+fn moved_transfers_the_entry_when_the_count_does_not_rise() {
+    let dir = baselined();
+    rename_big(dir.path(), 1501);
+    let pair = format!("{BIG}={HUGE}");
+    let (code, out) = arch(dir.path(), &["size", "--update", "--moved", &pair]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains(&format!("moved  size  {BIG} -> {HUGE}")),
+        "{out}"
+    );
+    let size = baseline_of(dir.path()).entries("size");
+    assert!(!size.contains_key(BIG), "{size:?}");
+    assert_eq!(size.get(HUGE), Some(&1501), "{size:?}");
+    let (code, out) = arch(dir.path(), &["size"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+#[test]
+fn moved_lowers_when_the_new_count_is_lower() {
+    let dir = baselined();
+    rename_big(dir.path(), 1500);
+    let pair = format!("{BIG}={HUGE}");
+    let (code, out) = arch(dir.path(), &["--update", "--moved", &pair]);
+    assert_eq!(code, 0, "{out}");
+    // 1500 lines is within the limit: the size entry is gone, not carried over.
+    let size = baseline_of(dir.path()).entries("size");
+    assert!(
+        !size.contains_key(HUGE) && !size.contains_key(BIG),
+        "{size:?}"
+    );
+}
+
+#[test]
+fn moved_refuses_a_higher_count_at_the_new_path() {
+    let dir = baselined();
+    let before = fs::read_to_string(dir.path().join("arch/baseline.toml")).expect("read");
+    rename_big(dir.path(), 1600);
+    let pair = format!("{BIG}={HUGE}");
+    let (code, out) = arch(dir.path(), &["size", "--update", "--moved", &pair]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("refusing to raise the baseline"), "{out}");
+    assert!(out.contains("1501 -> 1600"), "{out}");
+    let after = fs::read_to_string(dir.path().join("arch/baseline.toml")).expect("read");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn moved_with_an_unknown_old_path_or_an_existing_new_one_is_a_usage_error() {
+    let dir = baselined();
+    rename_big(dir.path(), 1501);
+    let (code, out) = arch(
+        dir.path(),
+        &["size", "--update", "--moved", "crates/nope.rs=crates/x.rs"],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("no baseline entry"), "{out}");
+    let (code, out) = arch(
+        dir.path(),
+        &[
+            "--update",
+            "--moved",
+            "crates/lector-review/src/lib.rs=crates/lector-ui-x/src/lib.rs",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("already has an entry"), "{out}");
+}
+
+#[test]
+fn moved_needs_update_and_a_pair() {
+    let dir = baselined();
+    let (code, out) = arch(dir.path(), &["--moved", "a=b"]);
+    assert_eq!(code, 2, "{out}");
+    for bad in ["a", "=b", "a=", "a=a"] {
+        let (code, out) = arch(dir.path(), &["--update", "--moved", bad]);
+        assert_eq!(code, 2, "{bad}: {out}");
+    }
+}

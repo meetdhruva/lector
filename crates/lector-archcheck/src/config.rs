@@ -281,6 +281,7 @@ pub const ALLOW_FILES: &[&str] = &[
     "review-statics",
     "git-read",
     "git-ambiguous",
+    "store-ambiguous",
     "unsafe",
 ];
 

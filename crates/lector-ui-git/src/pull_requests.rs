@@ -12,9 +12,12 @@ use gpui::{
     div, prelude::*, App, Entity, FocusHandle, Focusable, FontWeight, SharedString, Task,
     WeakEntity, Window,
 };
+use lector_app::commands::pull_request::shadow_data_dir;
+use lector_app::commands::{CommandContext, Source};
 use lector_app::comments::{
     self as cm, Anchor, CommentStore, DiffSide, NewThread, Origin, ThreadFilter, ThreadState,
 };
+use lector_app::{AppCore, Project};
 use lector_forge::{
     ChecksState, DraftComment, Forge, ForgeKind, ForgeRemote, PrFilter, PullRequest, RemoteComment,
     ReviewEvent, ReviewSubmission, ReviewThread, Side, SubmittedReview, Token,
@@ -88,34 +91,38 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 impl PrSession {
-    /// Loads pull request `number`, fetches its commits into the shadow repository
-    /// (skipped when they are already reachable there) and computes the merge base.
-    /// Blocking.
+    /// Loads pull request `number`, fetches its commits into the shadow repository through
+    /// the `review.fetch_pull_request` command (skipped when they are already reachable
+    /// there) and computes the merge base. Blocking.
     pub fn open(
-        data_dir: &std::path::Path,
-        repo: &Repo,
+        core: &AppCore,
+        project: &Project,
         forge: Box<dyn Forge>,
         token: Option<&Token>,
         number: u64,
     ) -> Result<PrSession, String> {
+        let repo = project
+            .repo()
+            .ok_or_else(|| "the folder is not in a git repository".to_string())?;
         let pr = forge.pull_request(number).map_err(err)?;
-        let shadow = ShadowRepo::open(data_dir, repo).map_err(err)?;
-        let have = |sha: &str| !sha.is_empty() && matches!(shadow.resolve(sha), Ok(Some(_)));
-        if !have(&pr.head_sha) || !have(&pr.base_sha) {
-            let remote = forge.remote();
-            let specs = forge.fetch_refspecs(&pr);
-            let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
-            let opts = lector_git::shadow::FetchOptions {
-                http_header: token
-                    .filter(|_| remote.remote_url.starts_with("http"))
-                    .map(|t| lector_forge::git_auth_header(remote.kind, t)),
-            };
-            shadow
-                .fetch_with(&remote.remote_url, &refs, &opts)
-                .map_err(|e| {
-                    format!("cannot fetch {} #{number}: {e}", remote.kind.request_noun())
-                })?;
+        let remote = forge.remote();
+        let mut args = serde_json::json!({
+            "url": remote.remote_url,
+            "refspecs": forge.fetch_refspecs(&pr),
+            "have": [pr.head_sha, pr.base_sha],
+        });
+        if let Some(header) = token
+            .filter(|_| remote.remote_url.starts_with("http"))
+            .map(|t| lector_forge::git_auth_header(remote.kind, t))
+        {
+            args["http_header"] = serde_json::json!(header);
         }
+        let ctx = CommandContext::new(core.clone(), Some(project.clone()), Source::Ui);
+        core.registry()
+            .invoke("review.fetch_pull_request", args, &ctx)
+            .map_err(|e| format!("cannot fetch {} #{number}: {e}", remote.kind.request_noun()))?;
+        let shadow = ShadowRepo::open(&shadow_data_dir(core), repo).map_err(err)?;
+        let have = |sha: &str| !sha.is_empty() && matches!(shadow.resolve(sha), Ok(Some(_)));
         let head = shadow
             .resolve(&pr.head_sha)
             .map_err(err)?
@@ -472,23 +479,19 @@ impl PullRequestsPanel {
         let Some(remote) = self.remote.clone() else {
             return;
         };
-        let Some(repo) = self.store.read(cx).repo().cloned() else {
-            return;
+        let project = match self.store.read(cx).project() {
+            Some(p) if p.repo().is_some() => p.clone(),
+            _ => return,
         };
         self.open_error = None;
         let store = self.store.clone();
-        let comments = CommentStore::for_core(&lector_ui::commands_bridge::core(cx));
+        let core = lector_ui::commands_bridge::core(cx);
+        let comments = CommentStore::for_core(&core);
         let work = cx.background_spawn(async move {
             let token = lector_forge::auth_token(&remote)
                 .ok_or_else(|| "no token: see Review > Sign In".to_string())?;
             let forge = lector_forge::connect(&remote, token.clone());
-            let session = PrSession::open(
-                &lector_config::paths::data_dir(),
-                &repo,
-                forge,
-                Some(&token),
-                number,
-            )?;
+            let session = PrSession::open(&core, &project, forge, Some(&token), number)?;
             if let Err(e) = session.sync_threads(&comments) {
                 tracing::warn!("cannot load review threads: {e}");
             }
@@ -1263,9 +1266,13 @@ mod tests {
             remote_url: up.to_string_lossy().into_owned(),
         };
         let data = tempfile::tempdir().expect("tmp");
-        let repo = Repo::discover(&user_path).expect("repo");
+        let core = lector_app::AppCore::open(lector_app::CoreOptions::for_tests());
+        lector_app::journal::Journal::install_in(&core, data.path().to_path_buf());
+        let mut settings = lector_config::Settings::default();
+        settings.lsp.enabled = false;
+        let project = Project::open(&user_path, settings).expect("project");
         let forge = lector_forge::connect(&remote, Token::new("t"));
-        let session = PrSession::open(data.path(), &repo, forge, None, 12).expect("open");
+        let session = PrSession::open(&core, &project, forge, None, 12).expect("open");
         assert_eq!(session.pr.head_sha, head);
         assert_eq!(session.merge_base, base);
         assert_eq!(session.key, "pr:github.com/acme/widgets#12");

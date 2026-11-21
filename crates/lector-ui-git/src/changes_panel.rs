@@ -11,9 +11,10 @@ use gpui::{
     MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Task, Window,
 };
 use lector_app::review_queue::QueueGroup;
+use lector_app::review_service::CancelToken;
 use lector_diff::DiffStats;
-use lector_git::{ChangeKind, Changeset, FileChange, Side};
-use lector_review::review::{self, ChangesetView, ReviewFile};
+use lector_git::{ChangeKind, Changeset};
+use lector_review::review::{ChangesetView, ReviewFile};
 use lector_review::risk::RiskLevel;
 use lector_ui::actions::git as git_actions;
 use lector_ui::actions::picker as picker_actions;
@@ -26,6 +27,9 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::WorkspaceEvent;
 use lector_ui::{ActiveTheme, ColorExt};
+
+mod load;
+use load::conflict_section;
 
 use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};
@@ -244,11 +248,17 @@ impl ChangesPanel {
             cx.notify();
             return;
         };
-        let review = store.review.clone();
+        let review = lector_ui::commands_bridge::core(cx).review();
         let opts = settings_diff_options(store, cx);
         let status = store.status.clone();
         let mode = self.mode.clone();
         let work = cx.background_spawn(async move {
+            let cancel = CancelToken::new();
+            let load = |cs: &Changeset| {
+                review
+                    .changeset(&repo, cs, &opts, &cancel)
+                    .map_err(|e| e.to_string())
+            };
             let mut sections = Vec::new();
             match mode {
                 ChangesMode::WorkingTree => {
@@ -257,39 +267,11 @@ impl ChangesPanel {
                         .filter(|e| e.conflicted)
                         .map(|e| e.path.as_str())
                         .collect();
-                    let staged =
-                        review::load_changeset_with(&repo, &Changeset::Staged, &review, &opts)
-                            .map_err(|e| e.to_string())?;
-                    let mut unstaged =
-                        review::load_changeset_with(&repo, &Changeset::Unstaged, &review, &opts)
-                            .map_err(|e| e.to_string())?;
-                    let untracked =
-                        review::load_changeset_with(&repo, &Changeset::Untracked, &review, &opts)
-                            .map_err(|e| e.to_string())?;
+                    let staged = load(&Changeset::Staged)?;
+                    let mut unstaged = load(&Changeset::Unstaged)?;
+                    let untracked = load(&Changeset::Untracked)?;
                     if !conflicted.is_empty() {
-                        let mut conflicts = unstaged.clone();
-                        conflicts.files.retain(|f| conflicted.contains(f.path()));
-                        for path in &conflicted {
-                            if conflicts.index_of(path).is_none() {
-                                let change = FileChange {
-                                    old_path: Some(path.to_string()),
-                                    new_path: Some(path.to_string()),
-                                    kind: ChangeKind::Modified,
-                                    old: Side::Index(path.to_string()),
-                                    new: Side::Workdir(path.to_string()),
-                                    binary: None,
-                                };
-                                conflicts.files.push(ReviewFile {
-                                    display_path: path.to_string(),
-                                    change,
-                                    stats: None,
-                                    viewed: false,
-                                    content_hash: String::new(),
-                                    binary: false,
-                                });
-                            }
-                        }
-                        unstaged.files.retain(|f| !conflicted.contains(f.path()));
+                        let conflicts = conflict_section(&mut unstaged, &conflicted);
                         sections.push((Section::Conflicts, conflicts));
                     }
                     sections.push((Section::Staged, staged));
@@ -297,9 +279,7 @@ impl ChangesPanel {
                     sections.push((Section::Untracked, untracked));
                 }
                 ChangesMode::Changeset(cs) => {
-                    let view = review::load_changeset_with(&repo, &cs, &review, &opts)
-                        .map_err(|e| e.to_string())?;
-                    sections.push((Section::Files, view));
+                    sections.push((Section::Files, load(&cs)?));
                 }
             }
             Ok::<_, String>(Content { sections })
@@ -899,7 +879,11 @@ impl ChangesPanel {
             .and_then(|h| h.branch.clone());
         let repo = self.store.read(cx).repo().cloned();
         let default_base = match (&repo, &branch) {
-            (Some(r), Some(b)) => review::default_base(r, b),
+            (Some(r), Some(b)) => lector_ui::commands_bridge::core(cx).review().default_base(
+                r,
+                b,
+                &CancelToken::new(),
+            ),
             _ => None,
         };
         let set = move |mode: ChangesMode| {
@@ -994,7 +978,9 @@ impl ChangesPanel {
                         return v.title.clone();
                     }
                 }
-                review::changeset_title(self.store.read(cx).repo(), cs)
+                lector_ui::commands_bridge::core(cx)
+                    .review()
+                    .changeset_title(self.store.read(cx).repo(), cs)
             }
         }
     }

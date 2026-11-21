@@ -58,50 +58,10 @@ pub fn reduce_motion(cx: &App) -> bool {
 }
 
 /// Reads the OS preference. Blocking (spawns a tiny CLI); call from a background thread.
-///
-/// * `LECTOR_REDUCE_MOTION=1|0` overrides everything (also useful in containers).
-/// * macOS: `defaults read com.apple.universalaccess reduceMotion`.
-/// * Linux: GNOME/GTK `org.gnome.desktop.interface enable-animations` through `gsettings`
-///   (animations disabled means reduced motion).
-/// * Windows and other desktops: unknown (`None`); GPUI 0.2.2 does not expose the setting.
+/// See [`lector_app::os::detect_os_reduce_motion`] for the sources (`LECTOR_REDUCE_MOTION`,
+/// macOS `defaults`, GNOME `gsettings`).
 pub fn detect_os_reduce_motion() -> Option<bool> {
-    if let Ok(v) = std::env::var("LECTOR_REDUCE_MOTION") {
-        match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => return Some(true),
-            "0" | "false" | "no" | "off" => return Some(false),
-            _ => {}
-        }
-    }
-    let run = |program: &str, args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    if cfg!(target_os = "macos") {
-        let v = run(
-            "defaults",
-            &["read", "com.apple.universalaccess", "reduceMotion"],
-        )?;
-        return Some(v == "1");
-    }
-    if cfg!(target_os = "linux") {
-        let v = run(
-            "gsettings",
-            &["get", "org.gnome.desktop.interface", "enable-animations"],
-        )?;
-        return match v.as_str() {
-            "false" => Some(true),
-            "true" => Some(false),
-            _ => None,
-        };
-    }
-    None
+    lector_app::os::detect_os_reduce_motion()
 }
 
 /// Detects the OS preference on a background thread (never blocks startup) and stores it

@@ -21,7 +21,9 @@ use gpui::{
     div, prelude::*, AnyWindowHandle, App, Corner, Entity, EventEmitter, MouseButton,
     MouseDownEvent, SharedString, Subscription, Task, WeakEntity, Window,
 };
-use lector_app::commands::git_sync::{SyncHost, SyncProgress, SyncSubscription};
+use lector_app::commands::git_sync::{
+    credential_helpers, SyncHost, SyncProgress, SyncSubscription,
+};
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_app::{Outcome, Priority};
@@ -174,30 +176,6 @@ fn classify(err: &CommandError) -> Failure {
         }
     }
     Failure::Text(command_error_text(err))
-}
-
-fn credential_helpers(workdir: &Path) -> Vec<String> {
-    let cmd = lector_process::ProcessCommand::new("git")
-        .arg("-C")
-        .arg(workdir)
-        .args(["config", "--get-all", "credential.helper"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .kind(lector_process::ProcessKind::Git)
-        .label("git config credential.helper");
-    let opts = lector_process::RunOptions {
-        timeout: Some(Duration::from_secs(5)),
-        ..Default::default()
-    };
-    match lector_process::run(&cmd, &opts) {
-        Ok(out) if out.success() => out
-            .stdout_text()
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 impl SyncController {

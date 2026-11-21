@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use lector_app::commands::{CommandContext, Focus, Source};
+use lector_app::commands::{CommandContext, CommandError, Focus, Source, Sources};
 use lector_app::Project;
 use lector_app::{AppCore, CoreOptions};
 use lector_config::Settings;
@@ -169,9 +169,36 @@ fn read_commands_write_nothing() {
     };
 
     let mut ran = 0;
+    let mut ui_only = 0;
     for command in core.registry().list() {
         let spec = command.spec();
         if spec.writes {
+            continue;
+        }
+        // UI-only commands (fronted by a view) are not listed for, and refused to, every
+        // other caller, whatever the arguments.
+        if spec.sources != Sources::All {
+            for source in [Source::Internal, Source::Cli, Source::Mcp, Source::Agent] {
+                assert!(
+                    !core
+                        .registry()
+                        .list_for(source)
+                        .iter()
+                        .any(|c| c.spec().id == spec.id),
+                    "UI-only `{}` is listed for {source:?}",
+                    spec.id
+                );
+                let cx = CommandContext::new(core.clone(), Some(project.clone()), source);
+                assert!(
+                    matches!(
+                        core.registry().invoke(spec.id, json!({}), &cx),
+                        Err(CommandError::Unavailable(_))
+                    ),
+                    "UI-only `{}` ran for {source:?}",
+                    spec.id
+                );
+            }
+            ui_only += 1;
             continue;
         }
         for args in args_for(spec.id, &head) {
@@ -190,6 +217,7 @@ fn read_commands_write_nothing() {
         }
     }
     assert!(ran >= 20, "only {ran} invocations");
+    assert!(ui_only >= 1, "review.fetch_pull_request is UI-only");
 
     // Shared git state (what every window uses) is read-only too.
     let state = core.git().repo_for(project.repo().unwrap());

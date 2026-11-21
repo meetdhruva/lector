@@ -719,7 +719,7 @@ fn list_commands() -> FnCommand {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let mut out = Vec::new();
-            for c in cx.core.registry().list() {
+            for c in cx.core.registry().list_for(cx.source) {
                 let spec = c.spec();
                 if category.is_some_and(|cat| !spec.category.eq_ignore_ascii_case(cat)) {
                     continue;

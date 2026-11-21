@@ -573,18 +573,13 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) {
         let store = self.store.read(cx);
+        let service = lector_ui::commands_bridge::core(cx).review();
         let Some(target) = &mut self.viewed else {
             return;
         };
         if let Some(repo) = store.repo() {
             let root = repo.workdir().to_path_buf();
-            if let Err(e) = lector_review::review::set_viewed_with(
-                &store.review,
-                &root,
-                &target.key,
-                &mut target.file,
-                new_state,
-            ) {
+            if let Err(e) = service.set_viewed(&root, &target.key, &mut target.file, new_state) {
                 tracing::warn!("could not save viewed state: {e}");
             }
         }

@@ -1,10 +1,9 @@
 //! The review functions run with nothing but the handles passed in (ADR 0001): a `Repo`,
-//! a language registry, a `ReviewStore` and `NoCache`. No project, no app state.
+//! a language registry, viewed marks as a plain input and `NoCache`. No project, no app state.
 
 use std::path::Path;
 use std::process::Command;
 
-use lector_config::ReviewStore;
 use lector_diff::DiffOptions;
 use lector_git::{Changeset, Repo};
 use lector_review::review::{self, DiffKind};
@@ -40,11 +39,10 @@ fn review_functions_run_with_only_a_repo() {
     git(p, &["commit", "-q", "-m", "init"]);
     std::fs::write(p.join("lib.rs"), "fn a() -> u32 {\n    2\n}\n").unwrap();
     let repo = Repo::discover(p).unwrap();
-    let st = tempfile::tempdir().unwrap();
-    let store = ReviewStore::open(st.path().join("review-state.json"));
     let opts = DiffOptions::default();
 
-    let view = review::load_changeset_with(&repo, &Changeset::Unstaged, &store, &opts).unwrap();
+    let view =
+        review::load_changeset_with(&repo, &Changeset::Unstaged, &review::NoMarks, &opts).unwrap();
     assert_eq!(view.files.len(), 1);
     assert_eq!(view.total_stats().added, 1);
     let langs = LanguageRegistry::new();

@@ -288,7 +288,8 @@ fn apply_edits() -> FnCommand {
                 ],
                 &["edits"],
             ),
-        ),
+        )
+        .not_undoable("Edits change the unsaved buffer only; the document's own undo history (Edit > Undo) reverts them."),
         |cx, args| {
             let h = doc(cx, args, true)?;
             let snap = h.snapshot();
@@ -358,7 +359,8 @@ fn save() -> FnCommand {
                 &[],
             ),
         )
-        .with_ui_action("editor::Save"),
+        .with_ui_action("editor::Save")
+        .not_undoable("Saving writes the text the editor shows; the editor's undo history still holds the previous text."),
         |cx, args| {
             let h = doc(cx, args, false)?;
             let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
@@ -383,7 +385,8 @@ fn save_all() -> FnCommand {
             "Documents",
             object(&[], &[]),
         )
-        .with_ui_action("workspace::SaveAll"),
+        .with_ui_action("workspace::SaveAll")
+        .not_undoable("Saving writes the text the editor shows; the editor's undo history still holds the previous text."),
         |cx, _| {
             let mut saved = Vec::new();
             let mut failed = Vec::new();
@@ -419,7 +422,8 @@ fn revert() -> FnCommand {
             object(&[("path", path_schema())], &[]),
         )
         .with_ui_action("editor::RevertFile")
-        .destructive(),
+        .destructive()
+        .not_undoable("Reverting drops the unsaved edits, which exist nowhere else."),
         |cx, args| {
             let h = doc(cx, args, false)?;
             h.reload()?;

@@ -1,0 +1,17 @@
+# lector-config write-method names that are also common method names (`HashMap::remove`,
+# `Vec::clear`, ...). The `purity` rule flags them in lector-review only when the receiver's name
+# contains `store`, `config`, `settings`, `session`, `recent` or `backend`. One name per line,
+# each with a reason.
+
+# Also `HashMap::remove` / `Vec::remove` (RecentProjects::remove writes recents.json).
+remove
+# Also `Vec::clear` / `HashSet::clear` style setters; ReviewBackend::set writes a viewed mark.
+set
+# Also `Vec::insert` / `HashMap::insert`.
+insert
+# Also `Vec::clear` and `HashMap::clear`.
+clear
+# Also `HashSet::add`-style builders.
+add
+# Also `Vec::push`-style recorders (RecentProjects::record).
+record

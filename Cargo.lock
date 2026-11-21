@@ -4919,7 +4919,6 @@ dependencies = [
  "lector-fs",
  "lector-git",
  "lector-icons",
- "lector-process",
  "lector-review",
  "lector-syntax",
  "lector-text",

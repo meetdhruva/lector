@@ -660,6 +660,31 @@ fn run_errors() {
 }
 
 #[test]
+fn ui_only_commands_are_not_listed_and_run_refuses_them() {
+    let fx = fixture();
+    let v = fx.ok_json(&["commands", "--json"]);
+    assert!(!v["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .any(|c| c["id"] == "review.fetch_pull_request"));
+    let listed = fx.ok_json(&["run", "commands.list", "--json"]);
+    assert!(!listed.to_string().contains("review.fetch_pull_request"));
+    let args = "{\"url\":\"x\",\"refspecs\":[\"+refs/pull/1/head:refs/lector/pr/1/head\"]}";
+    for extra in [&[][..], &["--allow-writes"]] {
+        let mut argv = vec!["run", "review.fetch_pull_request", "--args", args];
+        argv.extend_from_slice(extra);
+        let r = fx.run(&argv);
+        assert_eq!(r.code, 1, "{}", r.stdout);
+        assert!(
+            r.stderr.contains("only from Lector's window"),
+            "{}",
+            r.stderr
+        );
+    }
+}
+
+#[test]
 fn run_refuses_writes_without_allow_writes() {
     let fx = fixture();
     let r = fx.run(&["run", "git.stage", "--args", "{\"paths\":[\"README.md\"]}"]);
