@@ -58,6 +58,37 @@ Changes:
 - **The Changes panel's mode menu no longer runs git when it opens**, and Review Branch no longer
   runs git on the UI thread: the branch's base is looked up in the background.
 
+Security:
+
+- **An agent can no longer write into `.git` through a symlink in the project** (also in 0.7.1,
+  fixed in 0.7.2). With a link such as `docs -> .git` or `cfg -> .git/config` committed in a
+  repository, an agent's file writes through the link (`docs/hooks/pre-commit`, `docs/config`,
+  `cfg`) were accepted, because only the spelled path was checked for `.git`. Every path an agent,
+  an MCP client or a command argument names is now resolved with its links before it is checked,
+  `.git` is recognised in every spelling (any case, trailing dots, Windows short names such as
+  `GIT~1`), Lector's own data and settings folders are off limits, and writes never go through a
+  symlink, even one swapped in while the write runs.
+- **Your GitHub or GitLab token is no longer sent to look-alike hosts** (also in 0.7.1, fixed in
+  0.7.2). A repository whose remote was on any host whose name starts with `github.` or `gitlab.`
+  (for example `github.evil.example`) was treated as GitHub or GitLab, and the token from
+  `GITHUB_TOKEN` / `GH_TOKEN` or `GITLAB_TOKEN` was sent to it, in API calls and when fetching a
+  pull request. Now only `github.com`, `gitlab.com` and the hosts you list in `[forge]` are code
+  hosts; `GITHUB_TOKEN` / `GH_TOKEN` and `GITLAB_TOKEN` go only to `github.com` / `gitlab.com`, and a
+  host you list needs its own token (`LECTOR_FORGE_TOKEN_<HOST>`, `gh` / `glab` signed in to that
+  host, or its keychain entry). Tokens travel only over HTTPS and are dropped on redirects.
+- **MCP clients can no longer fetch, pull, push or drive agents.** With `lector mcp --allow-writes`
+  an MCP client could run `git.push` (including with `force_with_lease`), `git.fetch`, `git.pull`,
+  start and prompt agents and answer an agent's permission request in your name. Commands that use
+  the network or your credentials, or start or steer an agent, now run only from Lector's window or
+  `lector run`; answering a permission request only from the window.
+- **An agent write that cannot be undone is refused.** If the backup that makes it undoable fails,
+  or the folder is not a git repository (where Lector has nowhere to keep the backup), the write is
+  refused instead of happening without an undo.
+- **Lector's data folder is private.** The backups Lector keeps (which can include git-ignored
+  files such as `.env`), logs, crash reports and session records were created readable by other
+  users of the machine under the usual umask. Everything Lector creates there is now owner-only,
+  and an existing data folder that others could read is narrowed when Lector starts.
+
 ## 0.7.1 — 2026-11-19
 
 Fixes for problems found in review of 0.7.0.

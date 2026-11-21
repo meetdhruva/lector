@@ -93,9 +93,15 @@ fn private_data_child() {
     write_report(&paths.crashes, 1, "message: test\n", 5).expect("report");
     let session = SessionHealth::begin_in(paths, ProcessIdentity::current(), "0.0.0");
     session.end_clean();
-    assert!(data.join("shadow").is_dir(), "no shadow repository was created");
+    assert!(
+        data.join("shadow").is_dir(),
+        "no shadow repository was created"
+    );
     let wide = too_wide(&data);
-    assert!(wide.is_empty(), "group/world accessible under umask 022: {wide:#?}");
+    assert!(
+        wide.is_empty(),
+        "group/world accessible under umask 022: {wide:#?}"
+    );
     let top = fs::metadata(&data).expect("data").permissions().mode() & 0o777;
     assert_eq!(top, 0o700);
 }

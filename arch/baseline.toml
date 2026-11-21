@@ -7,10 +7,6 @@
 [deps]
 
 [writes]
-# RULE CHANGED, NOT CODE (ADR 0010 item 8, step 8 guardrails): everything below until the next
-# section was found by the stronger rules (whole lector-git surface, callers in every crate above
-# lector-git, derived lector-app wrappers, direct file writes, `-> &Repo` accessors) in code that
-# did not change. Each entry is a product change for the architect, not a rule gap.
 "crates/lector-agent/src/session.rs" = 4
 "crates/lector-app/src/git_service.rs" = 1
 "crates/lector-app/src/journal/undo.rs" = 5
@@ -20,19 +16,15 @@
 "crates/lector-ui-git/src/activity.rs" = 1
 "crates/lector-ui-git/src/store.rs" = 1
 "crates/lector-ui/src/settings.rs" = 2
-"crates/lector-ui/src/views/workspace/chrome.rs" = 2
+"crates/lector-ui/src/views/workspace/chrome.rs" = 1
 
 [threads]
 
 [background]
 
 [state]
-# RULE CHANGED, NOT CODE: a path built by `data_dir().join(..)` is now followed into the sink.
-"crates/lector-ui/src/views/workspace/chrome.rs" = 1
 
 [dupes]
-# RULE CHANGED, NOT CODE: concepts are declared in arch/one-impl.toml; the file watcher has its own
-# debounce loop (debounce belongs to the scheduler, ADR 0003).
 "crates/lector-fs/src/watch.rs" = 1
 
 [size]

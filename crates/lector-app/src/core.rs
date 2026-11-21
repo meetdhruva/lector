@@ -71,7 +71,7 @@ impl std::fmt::Debug for AppCore {
 /// Narrows Lector's data directory `dir` and the directories directly in it (shadow
 /// repositories, health, crash reports, askpass...) to owner-only (`0700`) where they are wider,
 /// logging each one (`lector_base::private::narrow_dir`). Nothing is created.
-pub fn narrow_data_dir(dir: &std::path::Path) {
+pub(crate) fn narrow_data_dir(dir: &std::path::Path) {
     let mut dirs = vec![dir.to_path_buf()];
     if let Ok(entries) = std::fs::read_dir(dir) {
         dirs.extend(

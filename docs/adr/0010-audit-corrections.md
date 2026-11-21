@@ -72,3 +72,44 @@ defeated by an import alias. The first two are also in released 0.7.1.
 ## Checked by
 Tests named in each item; `arch-check dupes` for confinement; the registry source test;
 `lector-archcheck` bypass tests.
+
+## Clarifications at implementation
+Recorded by the architect when reviewing the implementation, before merge.
+
+- **Confinement** is `lector_fs::confine::Confinement` (`check`, `read`, `write`), with one
+  configured instance for commands, agents and MCP (`lector_app::commands::confinement`) that
+  also keeps callers out of Lector's own data and config directories. On Unix a confined write
+  walks the path with `openat(O_NOFOLLOW)` and renames within the opened directory, so a link
+  swapped in after the check fails instead of being followed. On Windows directories and the
+  target are re-checked right before the rename; a short race window remains and is
+  documented. The remaining `confine*` functions are thin delegates listed in
+  `arch/one-impl.toml`.
+- **Tokens for user-listed hosts** come from `LECTOR_FORGE_TOKEN_<HOST>`, from `gh` / `glab`
+  asked for that host with the shared token variables removed from their environment, or from
+  the keychain entry for the host. `GH_ENTERPRISE_TOKEN` is no longer read (it is shared
+  across hosts). A token is never sent over plain HTTP except to loopback, redirects never
+  carry it, and the authenticated fetch does not follow redirects.
+- **Sources are derived.** `CommandSpec::touches` (network, credentials, steers an agent,
+  answers for the user) gives a minimum, and `allowed_sources()` is the stricter of that and
+  the declared sources. `agent.send_comments` is `Interactive` like `agent.prompt`. An
+  exhaustive table test in `lector-cli` fails for an unclassified command.
+- **Write jobs** carry a ticket (queued / started / revoked). `JobKind::is_write()` is the one
+  predicate behind replacement, subject cancellation, drop behaviour, quit policy and
+  run-once-queued. Git writes run on a serial lane keyed by repository, in submission order,
+  on their own threads. `TerminalSessionsSave` uses the same lane per panel so an older save
+  cannot land after a newer one. Undoing an agent turn is its own kind and drains fully at
+  quit. Git writes started through `invoke_async` (palette, CLI, MCP) are not on the serial
+  lane; git's own index lock orders them, as before.
+- **Agent writes in a folder without git are refused** (there is no shadow repository to back
+  them up into). This is narrower than 0.7.1, which wrote there without undo. A per-turn file
+  backup for such folders is not built; it needs its own record.
+- **Owner-only data** is created through `lector_base::private` (directories `0700`, files
+  `0600`); shadow repositories use `core.sharedRepository=0600`. Start narrows an existing
+  wider data directory and logs it.
+- **Guardrails.** The write API of `lector-git` is "every public function not listed as a
+  read" (`arch/git-read.allow`), so a new function is a write until classified. The stronger
+  rules found 20 existing violations the old rules could not see; they are in the baseline
+  under "rule changed, not code" and are the next debt to pay: undo performed and called
+  outside commands, write-capable repository handles handed to callers, two file writes in
+  UI code, one patch apply outside a command, and a second debounce in the file watcher.
+  `--allow-increase` remains for this one case (a rule gets stronger) and needs a reason.

@@ -180,9 +180,8 @@ impl SessionHealth {
             panics: u32::try_from(super::crash::panics_in_process()).unwrap_or(u32::MAX),
         };
         let path = paths.sessions.join(format!("{}.json", record.id));
-        if let Err(e) =
-            lector_base::private::create_dir_all(&paths.sessions)
-                .and_then(|()| write_record(&path, &record))
+        if let Err(e) = lector_base::private::create_dir_all(&paths.sessions)
+            .and_then(|()| write_record(&path, &record))
         {
             tracing::warn!("session health: cannot write {}: {e}", path.display());
         }

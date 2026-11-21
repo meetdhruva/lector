@@ -68,7 +68,9 @@ impl ShadowRepo {
     /// but are unreachable for other users through the narrowed directory.
     fn ensure_private(&self) -> Result<()> {
         let config = fs::read_to_string(self.git_dir.join("config")).unwrap_or_default();
-        if !config.contains("sharedRepository = 0600") && !config.contains("sharedrepository = 0600") {
+        if !config.contains("sharedRepository = 0600")
+            && !config.contains("sharedrepository = 0600")
+        {
             let mut cmd = self.shadow_git();
             cmd.args(["config", "core.sharedRepository", "0600"]);
             exec(cmd, "git config", None)?;

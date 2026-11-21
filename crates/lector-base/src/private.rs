@@ -63,7 +63,11 @@ pub fn open_append(path: &Path) -> io::Result<File> {
 /// Writes `bytes` to `path` (created or truncated), `0600` on Unix; an existing file that others
 /// could read is narrowed first.
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = options().write(true).create(true).truncate(true).open(path)?;
+    let mut file = options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
     narrow_file(&file)?;
     file.write_all(bytes)
 }
