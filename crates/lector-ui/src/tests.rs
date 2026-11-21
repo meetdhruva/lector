@@ -144,6 +144,20 @@ fn command_palette_filters_actions(cx: &mut TestAppContext) {
         // Motion primitives are hidden from the palette.
         assert!(!labels.iter().any(|l| l.contains("Move Up")));
     });
+    // Several words match in any order.
+    for query in ["sidebar toggle", "  side   toggle workspace "] {
+        picker.update_in(cx, |p, window, cx| p.set_query(query, window, cx));
+        picker.read_with(cx, |p, _| {
+            let labels = p.delegate.match_labels();
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.as_ref() == "Workspace: Toggle Sidebar"),
+                "{query:?}: {labels:?}"
+            );
+            assert!(labels.iter().all(|l| l.to_lowercase().contains("toggle")));
+        });
+    }
     picker.update_in(cx, |p, window, cx| p.set_query("zzzzqqq", window, cx));
     picker.read_with(cx, |p, _| assert!(p.delegate.match_labels().is_empty()));
     picker.update_in(cx, |p, window, cx| p.set_query("", window, cx));

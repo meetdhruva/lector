@@ -13,7 +13,6 @@ mod completion;
 mod config;
 mod convert;
 mod error;
-mod fuzzy;
 pub mod install;
 mod manager;
 mod request;
@@ -33,7 +32,7 @@ pub use config::{
 pub use error::{LspError, Result};
 pub use lector_text::PointUtf16;
 pub use manager::{ApplyEditRequest, LspManager, LspOptions, ServerState, ServerStatus};
-pub use request::{CancelToken, RequestOutcome};
+pub use request::RequestOutcome;
 pub use session::{
     ByteEdit, CloseReason, CommitError, CompletionCommit, CompletionSession, InsertMode, Match,
     OpenReason, SessionOptions, Update, WordChars,

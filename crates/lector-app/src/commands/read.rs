@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context as _};
+use lector_base::CancelToken;
 use lector_git::{Changeset, LogQuery};
 use lector_text::Point;
 use parking_lot::Mutex;
@@ -277,7 +278,7 @@ fn search_project() -> FnCommand {
             let files = Mutex::new(Vec::new());
             let done = Mutex::new((0usize, false));
             let error = Mutex::new(None);
-            let cancel = lector_search::CancelToken::new();
+            let cancel = CancelToken::new();
             let result = lector_search::search_project(project.root(), &query, &walk, &cancel, |ev| match ev {
                 lector_search::SearchEvent::File(fm) => files.lock().push(fm),
                 lector_search::SearchEvent::Done { matches, truncated, .. } => *done.lock() = (matches, truncated),
@@ -331,7 +332,7 @@ fn find_symbol() -> FnCommand {
             let exact = args.get("exact").and_then(Value::as_bool).unwrap_or(false);
             let limit = usize_arg(args, "limit", 50);
             if project.symbols().file_count() == 0 {
-                project.index_symbols(&lector_search::CancelToken::new(), |_, _| {});
+                project.index_symbols(&CancelToken::new(), |_, _| {});
             }
             let mut found = project.symbols().definitions(name);
             if !exact {

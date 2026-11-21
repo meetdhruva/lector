@@ -8,7 +8,8 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use lector_app::content_cache::{CacheConfig, ContentCache};
-use lector_app::review_service::{CancelToken, ReviewService};
+use lector_app::review_service::ReviewService;
+use lector_base::CancelToken;
 use lector_config::ReviewStore;
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, Changeset, FileChange, Repo, Side};

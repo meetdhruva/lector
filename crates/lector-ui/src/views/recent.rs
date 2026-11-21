@@ -8,10 +8,11 @@ use std::rc::Rc;
 use crate::scale::px;
 use gpui::{prelude::*, AnyElement, App, DismissEvent, SharedString, Window};
 
+use lector_base::fuzzy::{Matcher, Query};
+
 use super::welcome::{recent_entries, RecentEntry};
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
 use crate::components::{h_flex, metrics};
-use crate::fuzzy::fuzzy_match;
 use crate::icons::{Icon, IconName, IconSize};
 use crate::theme::{ActiveTheme, ColorExt};
 
@@ -72,17 +73,13 @@ impl PickerDelegate for RecentProjectsDelegate {
         if query.is_empty() {
             self.matches = (0..self.entries.len()).map(|ix| (ix, Vec::new())).collect();
         } else {
-            let mut scored: Vec<(i64, usize, Vec<usize>)> = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(ix, e)| {
-                    let m = fuzzy_match(query, &e.display)?;
-                    Some((m.score, ix, m.positions))
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            self.matches = scored.into_iter().map(|(_, ix, p)| (ix, p)).collect();
+            let ranked = Matcher::new().rank_by(
+                &Query::new(query),
+                &self.entries,
+                |e| &*e.display,
+                usize::MAX,
+            );
+            self.matches = ranked.into_iter().map(|r| (r.index, r.positions)).collect();
         }
         self.selected = 0;
     }

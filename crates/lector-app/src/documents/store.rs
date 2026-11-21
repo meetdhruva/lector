@@ -16,12 +16,12 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::{Document, LineEnding, LineHighlights, Project};
+use lector_base::CancelToken;
 use lector_buffer::save::{Encoding, LineEnding as SaveLineEnding, SaveOptions};
 use lector_buffer::{Buffer, BufferOptions, EditDelta, Selection, TextEdit, Transaction};
 use lector_diff::{diff_lines, DiffOptions, GutterMark};
 use lector_fs::{FileKind, FileStamp};
 use lector_git::BlameHunk;
-use lector_lsp::DocumentDiagnostics;
 use lector_syntax::{OutlineItem, Syntax, SyntaxEdit};
 use lector_text::{Rope, Text};
 use parking_lot::{Mutex, RwLock};
@@ -29,7 +29,7 @@ use parking_lot::{Mutex, RwLock};
 use super::derive::{self, DocDiagnostic};
 use super::exec::{DocExecutor, DocJob};
 use super::policy;
-use crate::scheduler::{CancelToken, JobKey, Priority};
+use crate::scheduler::{JobKey, Priority};
 
 /// Rows per highlight chunk (request and cache granularity).
 pub const HIGHLIGHT_CHUNK: u32 = 128;
@@ -1848,7 +1848,7 @@ impl DocHandle {
     /// computed for (its version is the LSP sync tag) and mapped through
     /// every later edit. `None` clears. Publishes for texts older than the
     /// history are ignored (the next publish replaces them).
-    pub fn set_diagnostics(&self, published: Option<DocumentDiagnostics>) {
+    pub fn set_diagnostics(&self, published: Option<lector_lsp::DocumentDiagnostics>) {
         let changed = {
             let mut st = self.shared.state.lock();
             let entries = match published {

@@ -13,6 +13,7 @@ authors = ["Lector contributors"]
 
 [workspace.dependencies]
 # internal
+lector-base = { path = "crates/lector-base" }
 lector-text = { path = "crates/lector-text" }
 lector-buffer = { path = "crates/lector-buffer" }
 lector-syntax = { path = "crates/lector-syntax" }

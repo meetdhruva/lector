@@ -23,9 +23,10 @@ use crate::completion::{
     CompletionResponse, ResolvedCompletion,
 };
 use crate::error::{LspError, Result};
-use crate::request::{CancelToken, RequestOutcome};
+use crate::request::RequestOutcome;
 use crate::signature::{parse_signature_help, signature_params, SignatureHelp, SignatureRequest};
 use crate::types::{DocumentState, ServerCapabilities};
+use lector_base::CancelToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
@@ -89,11 +90,8 @@ impl LspManager {
     fn prepare(&self, path: &Path, kind: Kind, cancel: Option<&CancelToken>) -> Option<Prepared> {
         let (slot, uri) = self.target(path)?;
         let doc = doc_state(&slot, path)?;
-        let token = CancelToken::new();
-        if let Some(user) = cancel {
-            let own = token.clone();
-            user.on_cancel(move || own.cancel());
-        }
+        // Cancelled with the caller's token, and alone when a newer request supersedes it.
+        let token = cancel.map_or_else(CancelToken::new, CancelToken::child);
         let state = &self.inner.events.completion;
         let seq = state.next_seq.fetch_add(1, Ordering::SeqCst);
         let previous = state.inflight.lock().insert(

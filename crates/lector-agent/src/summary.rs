@@ -13,7 +13,8 @@
 use std::sync::Arc;
 
 use lector_app::review_queue::{analyze, AnalysisOptions, QueueGroup};
-use lector_app::review_service::{CancelToken, ReviewService};
+use lector_app::review_service::ReviewService;
+use lector_base::CancelToken;
 use lector_diff::DiffOptions;
 use lector_git::{ChangeKind, Changeset, Repo};
 use lector_review::review::{DiffKind, FileDiff};

@@ -19,7 +19,6 @@ pub mod code_view;
 pub mod commands_bridge;
 pub mod components;
 pub mod editor;
-pub mod fuzzy;
 pub mod icons;
 pub mod keymap;
 pub mod lsp;

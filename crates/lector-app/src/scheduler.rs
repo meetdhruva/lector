@@ -22,9 +22,8 @@ use std::time::{Duration, Instant};
 
 use futures::channel::oneshot;
 use futures::FutureExt;
+use lector_base::CancelToken;
 use parking_lot::{Condvar, Mutex};
-
-pub use lector_search::CancelToken;
 
 /// Scheduling class of a job; earlier variants run first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

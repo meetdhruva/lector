@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 lsp-types = "0.97"
+lector-base.workspace = true
 lector-text.workspace = true
 lector-process.workspace = true
 url = "2"

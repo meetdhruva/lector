@@ -27,7 +27,8 @@ use std::time::UNIX_EPOCH;
 
 use regex_syntax::hir::{Hir, HirKind};
 
-use crate::{CancelToken, SearchQuery};
+use crate::SearchQuery;
+use lector_base::CancelToken;
 
 /// Files larger than this are not indexed (and never searched).
 pub const MAX_INDEXED_FILE_SIZE: u64 = 10 * 1024 * 1024;

@@ -25,9 +25,8 @@ use gpui::{
     div, prelude::*, App, Context, FontWeight, HighlightStyle, IntoElement, Render, SharedString,
     StyledText, Task, WeakEntity, Window,
 };
-use lector_lsp::{
-    CancelToken, LspError, RequestOutcome, SignatureHelp, SignatureSession, SignatureTrigger,
-};
+use lector_base::CancelToken;
+use lector_lsp::{LspError, RequestOutcome, SignatureHelp, SignatureSession, SignatureTrigger};
 use lector_text::Rope;
 
 use super::completion::{caret_state, ensure_synced};

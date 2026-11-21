@@ -12,6 +12,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lector_base::CancelToken;
 use lector_config::{content_hash, DiffSettings};
 use lector_diff::{
     diff_lines, fold_context, refine_inline, split_rows, unified_rows, Algorithm, DiffOptions,
@@ -19,7 +20,6 @@ use lector_diff::{
 };
 use lector_fs::{FileKind, ImageFormat};
 use lector_git::{Changeset, FileChange, Oid, Repo, Side};
-use lector_search::CancelToken;
 use lector_syntax::{HighlightId, Language, LanguageRegistry, Syntax};
 use lector_text::Text;
 use parking_lot::Mutex;

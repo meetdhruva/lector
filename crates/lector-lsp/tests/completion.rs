@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures::executor::block_on;
+use lector_base::CancelToken;
 use lector_lsp::{
-    CancelToken, CloseReason, CompletionRequest, CompletionResponse, CompletionSession,
-    CompletionTrigger, InsertMode, LspError, LspManager, LspOptions, OpenReason, PointUtf16,
-    RequestOutcome, ServerConfig, SessionOptions, SignatureSession, SignatureTrigger, Update,
+    CloseReason, CompletionRequest, CompletionResponse, CompletionSession, CompletionTrigger,
+    InsertMode, LspError, LspManager, LspOptions, OpenReason, PointUtf16, RequestOutcome,
+    ServerConfig, SessionOptions, SignatureSession, SignatureTrigger, Update,
 };
 use lector_text::Rope;
 use serde_json::{json, Value};

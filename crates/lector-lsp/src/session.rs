@@ -19,9 +19,18 @@ use crate::completion::{
     CompletionItem, CompletionRequest, CompletionResponse, CompletionTrigger, InsertFormat,
     InsertTextMode, ResolvedCompletion,
 };
-use crate::fuzzy::{self, FuzzyIndex, Query, Scratch};
 use crate::snippet::{Snippet, TabStop};
 use crate::types::{Command, TextEdit};
+use lector_base::fuzzy::{Index as FuzzyIndex, Matcher, Options as FuzzyOptions, Query};
+
+/// Texts are matched up to this many characters (completion labels are short; bounds the work).
+const MAX_MATCH_CHARS: usize = 128;
+
+fn match_options() -> FuzzyOptions {
+    FuzzyOptions {
+        max_chars: MAX_MATCH_CHARS,
+    }
+}
 
 /// Score subtracted from deprecated items.
 const DEPRECATED_PENALTY: i32 = 3000;
@@ -242,7 +251,7 @@ pub struct CompletionSession {
     // Filter state.
     queries: Vec<Query>,
     matches: Vec<Match>,
-    scratch: Scratch,
+    matcher: Matcher,
     requested_typed: Option<String>,
     // Selection.
     selected: usize,
@@ -407,7 +416,7 @@ impl CompletionSession {
             items: vec![],
             entries: vec![],
             extras: vec![],
-            index: FuzzyIndex::default(),
+            index: FuzzyIndex::new(&match_options()),
             group_starts: vec![anchor],
             base_order: vec![],
             is_incomplete: false,
@@ -416,7 +425,7 @@ impl CompletionSession {
             response_base: caret_pos,
             queries: vec![],
             matches: vec![],
-            scratch: Scratch::default(),
+            matcher: Matcher::with_options(&match_options()),
             requested_typed: None,
             selected: 0,
             user_moved: false,
@@ -530,7 +539,7 @@ impl CompletionSession {
             ranks[i] = rank;
         }
         self.group_starts = vec![self.anchor];
-        self.index = FuzzyIndex::with_capacity(self.items.len());
+        self.index = FuzzyIndex::with_capacity(&match_options(), self.items.len());
         self.entries = Vec::with_capacity(self.items.len());
         self.extras = Vec::with_capacity(self.items.len());
         for (n, item) in self.items.iter().enumerate() {
@@ -726,7 +735,7 @@ impl CompletionSession {
         let mut out = Vec::with_capacity(candidates.len().min(self.items.len()));
         for item in candidates {
             let q = &queries[self.entries[item].group as usize];
-            if let Some(score) = fuzzy::score(&self.index, item, q, &mut self.scratch) {
+            if let Some(score) = self.matcher.score_indexed(&self.index, item, q) {
                 out.push(Match {
                     item,
                     score: self.entry_score(item, score),
@@ -812,19 +821,13 @@ impl CompletionSession {
         let Some(query) = self.queries.get(group).filter(|q| !q.is_empty()) else {
             return vec![];
         };
-        let Some(positions) = fuzzy::positions(&item.label, query) else {
+        let Some(found) = Matcher::with_options(&match_options()).matches(query, &item.label)
+        else {
             return vec![];
         };
-        let offsets: Vec<(usize, usize)> = item
-            .label
-            .char_indices()
-            .map(|(i, c)| (i, i + c.len_utf8()))
-            .collect();
         let mut out: Vec<Range<usize>> = Vec::new();
-        for p in positions {
-            let Some(&(s, e)) = offsets.get(p) else {
-                continue;
-            };
+        for s in found.positions {
+            let e = s + item.label[s..].chars().next().map_or(0, char::len_utf8);
             match out.last_mut() {
                 Some(last) if last.end == s => last.end = e,
                 _ => out.push(s..e),

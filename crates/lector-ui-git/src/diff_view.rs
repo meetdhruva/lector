@@ -12,7 +12,7 @@ use gpui::{
     FontWeight, Hsla, ImageSource, MouseButton, MouseDownEvent, Pixels, SharedString, Subscription,
     Task, WeakEntity, Window,
 };
-use lector_app::review_service::CancelToken;
+use lector_base::CancelToken;
 use lector_config::DiffLayout;
 use lector_diff::{DiffOptions, DiffStats, Whitespace};
 use lector_git::{ChangeKind, Changeset, FileChange, Side};

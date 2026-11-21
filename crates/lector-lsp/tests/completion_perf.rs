@@ -147,3 +147,54 @@ fn ten_thousand_items_filter_in_well_under_5ms_per_keystroke() {
     assert!(back < Duration::from_millis(5), "{back:?}");
     assert!(worst < Duration::from_millis(30), "{worst:?}");
 }
+
+/// A long identifier pasted into the editor while a completion list of 10,000 long labels is open:
+/// the filter must stay linear in the label length (long query atoms are substring searches),
+/// not `query length x label length` per item (that took several hundred milliseconds).
+#[test]
+fn a_pasted_long_word_filters_ten_thousand_long_labels_quickly() {
+    const N: usize = 10_000;
+    let mut list = items(N);
+    for (i, item) in list.iter_mut().enumerate() {
+        item.label = format!("{}{i:05}", "a".repeat(120));
+        item.filter_text = None;
+        item.sort_text = None;
+    }
+    for len in [64usize, 65, 100, 200] {
+        let empty = Rope::from_str("");
+        let mut s =
+            CompletionSession::open(&empty, 0, OpenReason::Manual, SessionOptions::default());
+        let response = CompletionResponse {
+            items: list.clone(),
+            is_incomplete: false,
+            request_pos: PointUtf16 { row: 0, column: 0 },
+            doc_version: 1,
+            tag: None,
+            resolve_supported: false,
+        };
+        assert!(s.set_response(&empty, 0, response));
+        let word = "a".repeat(len);
+        let rope = Rope::from_str(&word);
+        let t = Instant::now();
+        let update = s.update(&rope, len);
+        let took = t.elapsed();
+        println!(
+            "pasted {len:>3} characters: {took:?}, {} matches",
+            s.matches().len()
+        );
+        // 64 is an alignment (bounded, 64 x 128 cells a label, slower); beyond it a linear
+        // search, and beyond the 128 characters kept per label nothing can match.
+        let bound = if len <= 64 { 1500 } else { 80 };
+        assert!(took < Duration::from_millis(bound), "{len}: {took:?}");
+        if len > 128 {
+            assert_eq!(
+                update,
+                Update::Close(lector_lsp::CloseReason::NoMatches),
+                "{len}"
+            );
+        } else {
+            assert_eq!(update, Update::Continue, "{len}");
+            assert_eq!(s.matches().len(), N, "{len}");
+        }
+    }
+}

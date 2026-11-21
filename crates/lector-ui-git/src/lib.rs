@@ -34,7 +34,7 @@ mod sync_tests;
 use std::rc::Rc;
 
 use gpui::{actions, App, AppContext, ClipboardItem, Entity, SharedString, Window};
-use lector_app::review_service::CancelToken;
+use lector_base::CancelToken;
 use lector_git::Oid;
 use lector_ui::actions::{editor, git as git_actions, workspace as ws_actions};
 use lector_ui::code_view::{CodeSource, CodeView};

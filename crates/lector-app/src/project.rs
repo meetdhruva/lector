@@ -16,12 +16,13 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use lector_base::CancelToken;
 use lector_config::Settings;
 use lector_diff::DiffOptions;
 use lector_git::{BlameHunk, ChangeKind, Changeset, FileChange, Oid, Repo, StatusEntry};
 use lector_lsp::{LspManager, ServerConfig};
 use lector_review::review::{self, ChangesetView, FileDiff};
-use lector_search::{walk_files, CancelToken, WalkOptions};
+use lector_search::{walk_files, WalkOptions};
 use lector_syntax::{LanguageRegistry, SymbolIndex, Syntax};
 use lector_text::Text;
 use parking_lot::{Mutex, RwLock};

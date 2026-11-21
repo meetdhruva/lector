@@ -6,15 +6,15 @@
 #
 # The order below was derived from the real graph at 0.7.1 by placing each crate as low as its
 # dependencies allow, so today's tree passes. Do not move a crate up to make an edge legal: that is
-# the violation. Crates that do not exist yet (lector-base, lector-review) are placed where the
-# ADRs put them; they are ignored until they appear.
+# the violation. Crates that do not exist yet are placed where the ADRs put them; they are ignored until
+# they appear.
 #
 # Target rules that the tree does not meet yet are written as [[forbid]] / [[forbid_crate]] entries
 # and baselined in arch/baseline.toml; each consolidation step ends with its entries removed.
 
 [[layer]]
 name = "base"
-# Future (ADR 0005): CancelToken, fuzzy matcher, named threads. Depends on nothing but std.
+# ADR 0005: CancelToken, the fuzzy scorer, named threads. Depends on nothing but std.
 crates = ["lector-base"]
 
 [[layer]]

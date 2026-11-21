@@ -58,8 +58,6 @@ pub use branch::{
     BranchSwitch, DeletedBranch, StashApplied, StashApplyOptions, StashPushOptions,
     APPLY_WITHOUT_INDEX,
 };
-/// Cancellation token of git network / branch operations ([`SyncOptions::cancel`]).
-pub use lector_process::CancelToken;
 pub use proc::SyncOptions;
 pub use sync::{
     FetchOptions, FetchOutcome, Progress, PullMode, PullOutcome, PullStatus, PushOptions,

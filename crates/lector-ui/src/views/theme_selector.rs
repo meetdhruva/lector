@@ -3,9 +3,9 @@
 use gpui::{prelude::*, AnyElement, DismissEvent, SharedString, Window};
 
 use crate::components::picker::{Picker, PickerDelegate, PickerItem};
-use crate::fuzzy::match_and_sort;
 use crate::icons::{Icon, IconName, IconSize};
 use crate::theme::{ThemeMode, ThemeState};
+use lector_base::fuzzy::{Matcher, Query};
 
 /// Theme selector delegate.
 pub struct ThemeSelectorDelegate {
@@ -69,9 +69,15 @@ impl PickerDelegate for ThemeSelectorDelegate {
         _window: &mut Window,
         _cx: &mut Context<Picker<Self>>,
     ) {
-        self.matches = match_and_sort(query, self.names.iter().map(|(n, _)| n.as_ref()))
+        self.matches = Matcher::new()
+            .rank_by(
+                &Query::new(query),
+                &self.names,
+                |(n, _)| n.as_ref(),
+                usize::MAX,
+            )
             .into_iter()
-            .map(|(ix, m)| (ix, m.positions))
+            .map(|r| (r.index, r.positions))
             .collect();
         self.selected = self
             .matches

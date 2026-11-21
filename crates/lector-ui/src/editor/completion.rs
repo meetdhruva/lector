@@ -50,7 +50,6 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,10 +60,11 @@ use gpui::{
     IntoElement, MouseButton, Pixels, Render, ScrollWheelEvent, SharedString, Size, StyledText,
     Subscription, Task, WeakEntity, Window,
 };
+use lector_base::CancelToken;
 use lector_lsp::{
-    CancelToken, CloseReason, CompletionCommit, CompletionKind, CompletionResponse,
-    CompletionSession, InsertMode, LspError, LspManager, OpenReason, RequestOutcome,
-    ResolvedCompletion, ServerState, SessionOptions, Update, WordChars,
+    CloseReason, CompletionCommit, CompletionKind, CompletionResponse, CompletionSession,
+    InsertMode, LspError, LspManager, OpenReason, RequestOutcome, ResolvedCompletion, ServerState,
+    SessionOptions, Update, WordChars,
 };
 use lector_syntax::SymbolKind;
 use lector_text::Rope;
@@ -111,7 +111,7 @@ const WIDTH_SAMPLE_ROWS: usize = 64;
 /// Documentation longer than this many chars is cut for the pane.
 const MAX_DOC_CHARS: usize = 6000;
 
-type ResolveFuture = Pin<
+type ResolveFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<RequestOutcome<ResolvedCompletion>, LspError>>
             + Send,

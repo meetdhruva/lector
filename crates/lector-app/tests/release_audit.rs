@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lector_app::Project;
+use lector_base::CancelToken;
 use lector_config::{ReviewStore, Settings};
 use lector_git::{Changeset, LogQuery};
 use lector_review::{conflicts, review};
-use lector_search::CancelToken;
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
