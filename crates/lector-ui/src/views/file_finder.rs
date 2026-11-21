@@ -2,7 +2,7 @@
 //! recent files first for an empty query, `path:line[:col]` suffixes, file
 //! icons and git status colors.
 
-use crate::background::{background, JobError, JobKey, JobKind, Priority, Subject};
+use crate::background::{background, BackgroundTask, JobKey, JobKind, Priority, Subject};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ pub struct FileFinderDelegate {
     /// Enter was pressed while the rows were still those of an older query.
     confirm_waiting: bool,
     /// Feeds the candidates; dropping it (the finder closed) stops the feed.
-    _feed_task: Task<Result<(), JobError>>,
+    _feed_task: BackgroundTask<()>,
 }
 
 const MAX_ROWS: u32 = 300;

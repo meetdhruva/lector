@@ -3,12 +3,13 @@
 //! UI code (this crate, `lector-ui-git`, `lector-ui-terminal`, `lector-ui-agent`) starts
 //! background work only through [`background`]: the closure runs on the `lector-app`
 //! [`Scheduler`] under a [`JobKey`] and a [`Priority`], and the result is delivered on the main
-//! thread by the returned GPUI [`Task`]:
+//! thread by the returned [`BackgroundTask`] (a future wrapping a GPUI [`Task`]):
 //!
-//! * **Dropping the task cancels the job** (as dropping a GPUI task cancels its future): the
-//!   job's [`CancelToken`] is set, a job that has not started never runs, a running one sees
-//!   the token. Keep the task in a field to keep the work alive; `detach()` it to let the work
-//!   finish without anyone waiting.
+//! * **Dropping the task cancels the job at once** (like dropping a GPUI task cancels its
+//!   future, but synchronously: GPUI only drops a cancelled task's future when its runnable is
+//!   next polled): the job's [`CancelToken`] is set, a job that has not started never runs, a
+//!   running one sees the token. Keep the task in a field to keep the work alive;
+//!   [`BackgroundTask::detach`] lets the work finish without anyone waiting.
 //! * **A result is delivered only if it is still wanted**: the task resolves to
 //!   `Err(JobError::Cancelled)` when the job was replaced by a newer one with the same key, its
 //!   subject was cancelled ([`cancel_subject`]) or the task was asked to stop, even if the job
@@ -95,19 +96,65 @@ pub fn background<C, T>(
     key: JobKey,
     prio: Priority,
     f: impl FnOnce(&CancelToken) -> T + Send + 'static,
-) -> Task<Result<T, JobError>>
+) -> BackgroundTask<T>
 where
     C: BridgeContext + ?Sized,
     T: Send + 'static,
 {
     let handle = scheduler_for(&cx.background_executor_handle()).spawn(key, prio, f);
     let token = handle.token().clone();
-    cx.foreground_executor_handle().spawn(Delivery {
-        token,
+    let task = cx.foreground_executor_handle().spawn(Delivery {
+        token: token.clone(),
         outcome: Box::pin(handle.outcome()),
+    });
+    BackgroundTask {
+        token,
+        task: Box::pin(task),
         done: false,
-    })
+    }
 }
+
+/// The main-thread end of a job started with [`background`]: await it for the result.
+/// Dropping it before it resolved cancels the job immediately.
+#[must_use = "dropping a BackgroundTask cancels its job; keep it or detach() it"]
+pub struct BackgroundTask<T> {
+    token: CancelToken,
+    /// Delivers the outcome on the main thread. Dropping it does not cancel the job (a dropped
+    /// handle never does); this task's own `Drop` does, unless detached.
+    task: Pin<Box<Task<Result<T, JobError>>>>,
+    done: bool,
+}
+
+impl<T> BackgroundTask<T> {
+    /// Lets the job run to completion with nobody waiting for its result.
+    pub fn detach(mut self) {
+        self.done = true;
+    }
+}
+
+impl<T> Future for BackgroundTask<T> {
+    type Output = Result<T, JobError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        match self.task.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(outcome) => {
+                self.done = true;
+                Poll::Ready(outcome)
+            }
+        }
+    }
+}
+
+impl<T> Drop for BackgroundTask<T> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.token.cancel();
+        }
+    }
+}
+
+impl<T> Unpin for BackgroundTask<T> {}
 
 /// Runs `f` on the scheduler without delivering anything: fire and forget (it still is
 /// replaced by a newer job with the same key and cancelled with its subject).
@@ -189,11 +236,11 @@ fn test_scheduler(bg: &BackgroundExecutor) -> Scheduler {
     })
 }
 
-/// Resolves to the job's outcome on the main thread; cancels the job when dropped first.
+/// Resolves to the job's outcome on the main thread, turning a value produced after the job
+/// was replaced or cancelled into `Cancelled`.
 struct Delivery<T> {
     token: CancelToken,
     outcome: Pin<Box<dyn Future<Output = Result<T, JobError>> + Send>>,
-    done: bool,
 }
 
 impl<T> Future for Delivery<T> {
@@ -204,20 +251,11 @@ impl<T> Future for Delivery<T> {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(outcome) => outcome,
         };
-        self.done = true;
         // Replaced or cancelled after the value was produced: the value is stale.
         Poll::Ready(match outcome {
             Ok(_) if self.token.is_cancelled() => Err(JobError::Cancelled),
             other => other,
         })
-    }
-}
-
-impl<T> Drop for Delivery<T> {
-    fn drop(&mut self) {
-        if !self.done {
-            self.token.cancel();
-        }
     }
 }
 
@@ -228,7 +266,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{mpsc, Arc};
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn key(kind: JobKind, n: u64) -> JobKey {
@@ -288,6 +326,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_detached_task_lets_the_job_finish(cx: &mut TestAppContext) {
+        let ran = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            let r = ran.clone();
+            background(cx, key(JobKind::GitLog, 1), Priority::Visible, move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
     fn a_panicking_job_resolves_to_an_error(cx: &mut TestAppContext) {
         let task = cx.update(|cx| {
             background(cx, key(JobKind::GitLog, 1), Priority::Visible, |_| -> u8 {
@@ -328,33 +380,10 @@ mod tests {
         let delivery = Delivery {
             token,
             outcome: Box::pin(handle.outcome()),
-            done: false,
         };
         assert_eq!(
             futures::executor::block_on(delivery),
             Err(JobError::Cancelled)
         );
-    }
-
-    #[test]
-    fn dropping_a_delivery_cancels_a_running_job() {
-        let s = Scheduler::new(1);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (stopped_tx, stopped_rx) = mpsc::channel();
-        let handle = s.spawn(key(JobKind::GitLog, 1), Priority::Visible, move |tok| {
-            started_tx.send(()).ok();
-            while !tok.is_cancelled() {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            stopped_tx.send(()).ok();
-        });
-        started_rx.recv_timeout(Duration::from_secs(5)).ok();
-        let delivery = Delivery {
-            token: handle.token().clone(),
-            outcome: Box::pin(handle.outcome()),
-            done: false,
-        };
-        drop(delivery);
-        assert!(stopped_rx.recv_timeout(Duration::from_secs(5)).is_ok());
     }
 }

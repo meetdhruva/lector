@@ -3,7 +3,7 @@
 //! `lector_search::search_project` on a background thread (debounced,
 //! cancelled on every new query), grouped by file with highlighted matches.
 
-use crate::background::{background, view_key, JobError, JobKind, Priority};
+use crate::background::{background, view_key, BackgroundTask, JobKind, Priority};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -115,7 +115,7 @@ pub struct SearchPanel {
     status: Status,
     match_count: usize,
     /// The running search; dropping it cancels the search.
-    search_job: Option<Task<Result<(), JobError>>>,
+    search_job: Option<BackgroundTask<()>>,
     search_task: Option<Task<()>>,
     debounce_task: Option<Task<()>>,
     list: VirtualListState,
