@@ -1,5 +1,6 @@
 //! Unit tests of the shadow repository's manifest and helpers.
 
+use super::util::quote_path;
 use super::*;
 
 #[test]
