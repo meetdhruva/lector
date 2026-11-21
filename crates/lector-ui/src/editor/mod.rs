@@ -848,25 +848,25 @@ impl FileView {
             // Waits on the language server: a blocking-lane kind.
             let key = view_key(JobKind::LspHover, this.entity_id());
             let result = background(cx, key, Priority::Visible, move |_| {
-                    let md = lector_app::project::symbols::hover(&project, &doc, offset)
-                        .ok()
-                        .flatten()
-                        .map(|md| md.trim().to_string())
-                        .filter(|md| !md.is_empty());
-                    let why = why
-                        .map(|q| core.provenance().explain_all(&q))
-                        .map(|items| lector_app::provenance::explanation_markdown(&items))
-                        .filter(|md| !md.is_empty());
-                    let md = [diagnostics, md, why]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join("\n\n---\n\n");
-                    if md.is_empty() {
-                        return None;
-                    }
-                    Some(Arc::new(markdown::parse(&md)))
-                });
+                let md = lector_app::project::symbols::hover(&project, &doc, offset)
+                    .ok()
+                    .flatten()
+                    .map(|md| md.trim().to_string())
+                    .filter(|md| !md.is_empty());
+                let why = why
+                    .map(|q| core.provenance().explain_all(&q))
+                    .map(|items| lector_app::provenance::explanation_markdown(&items))
+                    .filter(|md| !md.is_empty());
+                let md = [diagnostics, md, why]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n");
+                if md.is_empty() {
+                    return None;
+                }
+                Some(Arc::new(markdown::parse(&md)))
+            });
             let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.hover = result.map(|blocks| HoverPopover {

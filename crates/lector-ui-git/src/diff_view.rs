@@ -19,6 +19,7 @@ use lector_review::review::{
     self, diff_options, DiffKind, FileDiff, HunkAction, LineSelection, ReviewFile,
 };
 use lector_ui::actions::{diff as diff_actions, editor as editor_actions, git as git_actions};
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use lector_ui::code_view::{CodeSource, CodeView, CodeViewEvent, EditorSettings, Pos, Selection};
 use lector_ui::components::context_menu::{ContextMenu, ContextMenuState};
 use lector_ui::components::{h_flex, metrics, v_flex, IconButton, Tooltip};
@@ -27,7 +28,7 @@ use lector_ui::keymap::contexts;
 use lector_ui::scale::px;
 use lector_ui::views::pane::{PaneItem, TabIcon};
 use lector_ui::views::Workspace;
-use lector_ui::{background::{background, view_key, JobKind, Priority}, ActiveTheme, ColorExt};
+use lector_ui::{ActiveTheme, ColorExt};
 
 use crate::confirm::{confirm, ConfirmSpec};
 use crate::diff_source::{hunk_display_starts, DiffColumn, DiffMeta, DiffSource};
@@ -194,19 +195,6 @@ fn empty_view(cx: &mut Context<DiffView>) -> Entity<CodeView> {
     })
 }
 
-fn to_gpui_format(f: lector_fs::ImageFormat) -> Option<gpui::ImageFormat> {
-    use lector_fs::ImageFormat as F;
-    Some(match f {
-        F::Png => gpui::ImageFormat::Png,
-        F::Jpeg => gpui::ImageFormat::Jpeg,
-        F::Gif => gpui::ImageFormat::Gif,
-        F::Webp => gpui::ImageFormat::Webp,
-        F::Svg => gpui::ImageFormat::Svg,
-        F::Bmp => gpui::ImageFormat::Bmp,
-        F::Ico => return None,
-    })
-}
-
 impl DiffView {
     /// A diff view; call [`DiffView::set_target`] to load something.
     pub fn new(store: Entity<GitStore>, _standalone: bool, cx: &mut Context<Self>) -> Self {
@@ -355,7 +343,7 @@ impl DiffView {
             .map_err(|e| e.to_string())?;
             let meta = DiffMeta::compute(&diff);
             let images = match diff.kind {
-                DiffKind::Image(f) => to_gpui_format(f).map(|fmt| {
+                DiffKind::Image(f) => widgets::to_gpui_format(f).map(|fmt| {
                     let make = |side: &review::DiffSide| {
                         side.bytes
                             .as_ref()

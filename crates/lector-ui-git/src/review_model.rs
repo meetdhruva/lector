@@ -273,7 +273,9 @@ impl ReviewModel {
             let fingerprint = background(cx, key, Priority::Background, move |_| {
                 changes_fingerprint(&work_root, &status)
             });
-            let Ok(fingerprint) = fingerprint.await else { return };
+            let Ok(fingerprint) = fingerprint.await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 this.fingerprint = Some(fingerprint);
                 cx.emit(ReviewModelEvent::Hint);

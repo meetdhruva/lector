@@ -393,24 +393,24 @@ impl FindBar {
             // Typing drives it: interactive, newest query wins.
             let key = view_key(JobKind::FindInFile, this.entity_id());
             let result = background(cx, key, Priority::Interactive, move |_| {
-                    let string = text.to_string();
-                    lector_search::find_in_text(&string, &search).map(|ranges| {
-                        ranges
-                            .into_iter()
-                            .take(MAX_MATCHES)
-                            .map(|r| {
-                                let start = text.offset_to_point(r.start);
-                                let end = text.offset_to_point(r.end);
-                                let end_col = if end.row == start.row {
-                                    end.column as usize
-                                } else {
-                                    text.line_len(start.row) as usize
-                                };
-                                (start.row, start.column as usize..end_col)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                });
+                let string = text.to_string();
+                lector_search::find_in_text(&string, &search).map(|ranges| {
+                    ranges
+                        .into_iter()
+                        .take(MAX_MATCHES)
+                        .map(|r| {
+                            let start = text.offset_to_point(r.start);
+                            let end = text.offset_to_point(r.end);
+                            let end_col = if end.row == start.row {
+                                end.column as usize
+                            } else {
+                                text.line_len(start.row) as usize
+                            };
+                            (start.row, start.column as usize..end_col)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            });
             let Ok(result) = result.await else { return };
             let _ = this.update(cx, |this, cx| match result {
                 Ok(matches) => this.apply_matches(matches, cx),

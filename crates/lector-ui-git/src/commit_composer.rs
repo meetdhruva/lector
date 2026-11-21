@@ -3,7 +3,6 @@
 //! git will commit as, the Commit button (disabled with an explanation), hook and
 //! commit errors, and a success toast with the short sha.
 
-use lector_ui::background::{background, view_key, JobKind, Priority};
 use gpui::{
     div, prelude::*, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, Hsla, SharedString, Subscription, Task, Window,
@@ -11,6 +10,7 @@ use gpui::{
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_ui::actions::git as git_actions;
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use lector_ui::components::text_area::{first_line_chars, TextArea, TextAreaEvent};
 use lector_ui::components::{h_flex, metrics, v_flex, Button, ButtonStyle, IconButton, Tooltip};
 use lector_ui::icons::{Icon, IconName, IconSize};
@@ -218,7 +218,9 @@ impl CommitComposer {
         self.amend = true;
         self.saved_message = Some(self.editor.read(cx).text().to_string());
         let key = view_key(JobKind::GitCommitMessage, cx.entity_id());
-        let work = background(cx, key, Priority::Visible, move |_| repo.last_commit_message());
+        let work = background(cx, key, Priority::Visible, move |_| {
+            repo.last_commit_message()
+        });
         cx.spawn(async move |this, cx| {
             let Ok(result) = work.await else { return };
             let _ = this.update(cx, |this, cx| {

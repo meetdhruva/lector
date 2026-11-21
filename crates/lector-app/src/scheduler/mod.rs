@@ -193,7 +193,8 @@ impl Scheduler {
         let finished = Arc::new(AtomicBool::new(false));
         let body = guarded(key.kind, token.clone(), finished.clone(), f, tx);
         let id = self.inner().next_id();
-        self.inner().submit(prio, token.clone(), Job { id, key, body });
+        self.inner()
+            .submit(prio, token.clone(), Job { id, key, body });
         JobHandle {
             id,
             token,

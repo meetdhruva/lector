@@ -28,7 +28,7 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 
 use gpui::{App, AsyncApp, AsyncWindowContext, BackgroundExecutor, Context, EntityId};
-use gpui::{ForegroundExecutor, Task};
+use gpui::{ForegroundExecutor, Subscription, Task};
 use lector_base::thread::TaskRunner;
 use lector_base::CancelToken;
 
@@ -171,6 +171,16 @@ pub fn cancel_subject<C: BridgeContext + ?Sized>(cx: &C, subject: &Subject) -> u
     scheduler_for(&cx.background_executor_handle()).cancel_subject(subject)
 }
 
+/// Cancels every job of the view or model `cx` belongs to ([`view`]) when it is released, detached
+/// ones included. Keep the subscription for as long as the view lives (closing a window
+/// releases its workspace).
+pub fn cancel_on_release<V: 'static>(cx: &mut Context<V>) -> Subscription {
+    let subject = view(cx.entity_id());
+    cx.on_release(move |_, cx| {
+        cancel_subject(cx, &subject);
+    })
+}
+
 /// A [`TaskRunner`] for a crate below `lector-app` (which does not schedule): each task runs
 /// as a job with `key` at `prio`.
 pub fn task_runner<C: BridgeContext + ?Sized>(cx: &C, key: JobKey, prio: Priority) -> TaskRunner {
@@ -185,7 +195,12 @@ pub fn scheduler<C: BridgeContext + ?Sized>(cx: &C) -> Scheduler {
 /// Whether `cx` runs under GPUI's test dispatcher.
 pub fn is_test_dispatcher<C: BridgeContext + ?Sized>(cx: &C) -> bool {
     #[cfg(any(test, feature = "test-support"))]
-    if cx.background_executor_handle().dispatcher.as_test().is_some() {
+    if cx
+        .background_executor_handle()
+        .dispatcher
+        .as_test()
+        .is_some()
+    {
         return true;
     }
     let _ = cx;
@@ -264,7 +279,7 @@ impl<T> Unpin for Delivery<T> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{AppContext as _, TestAppContext};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -308,7 +323,11 @@ mod tests {
         let fg = cx.executor();
         assert_eq!(fg.block_test(mine), Err(JobError::Cancelled));
         assert_eq!(fg.block_test(other), Ok(2));
-        assert_eq!(fg.block_test(write), Ok(3), "a write survives its view closing");
+        assert_eq!(
+            fg.block_test(write),
+            Ok(3),
+            "a write survives its view closing"
+        );
     }
 
     #[gpui::test]
@@ -323,6 +342,26 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    struct Probe(Subscription);
+
+    #[gpui::test]
+    fn releasing_a_view_cancels_its_jobs(cx: &mut TestAppContext) {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let probe = cx.update(|cx| cx.new(|cx| Probe(cancel_on_release(cx))));
+        cx.update(|cx| {
+            let r = ran.clone();
+            let key = view_key(JobKind::Reindex, probe.entity_id());
+            detach(cx, key, Priority::Background, move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            });
+            let _keep = &probe.read(cx).0;
+        });
+        // Released when the update's effects flush, before the test executor runs the job.
+        cx.update(move |_| drop(probe));
+        cx.run_until_parked();
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the view was released first");
     }
 
     #[gpui::test]

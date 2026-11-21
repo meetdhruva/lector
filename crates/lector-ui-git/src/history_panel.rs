@@ -177,35 +177,33 @@ impl HistoryPanel {
         let scope = self.scope.clone();
         let filter = parse_filter(self.filter.read(cx).text());
         let key = view_key(JobKind::GitLog, cx.entity_id());
-        let work = background(cx, key, Priority::Visible, move |_| {
-            match scope {
-                HistoryScope::Log { rev, all } => repo.log(&LogQuery {
-                    rev,
-                    all_refs: all,
-                    path: filter.path,
-                    author: filter.author,
-                    message: filter.message,
-                    skip,
-                    limit: PAGE,
-                }),
-                HistoryScope::File(path) => {
-                    if skip > 0 {
-                        return Ok(Vec::new());
-                    }
-                    repo.file_history(&path, 2000).map(|mut v| {
-                        retain_filtered(&mut v, &filter);
-                        v
-                    })
+        let work = background(cx, key, Priority::Visible, move |_| match scope {
+            HistoryScope::Log { rev, all } => repo.log(&LogQuery {
+                rev,
+                all_refs: all,
+                path: filter.path,
+                author: filter.author,
+                message: filter.message,
+                skip,
+                limit: PAGE,
+            }),
+            HistoryScope::File(path) => {
+                if skip > 0 {
+                    return Ok(Vec::new());
                 }
-                HistoryScope::Lines(path, lines) => {
-                    if skip > 0 {
-                        return Ok(Vec::new());
-                    }
-                    repo.line_history(&path, lines, 500).map(|mut v| {
-                        retain_filtered(&mut v, &filter);
-                        v
-                    })
+                repo.file_history(&path, 2000).map(|mut v| {
+                    retain_filtered(&mut v, &filter);
+                    v
+                })
+            }
+            HistoryScope::Lines(path, lines) => {
+                if skip > 0 {
+                    return Ok(Vec::new());
                 }
+                repo.line_history(&path, lines, 500).map(|mut v| {
+                    retain_filtered(&mut v, &filter);
+                    v
+                })
             }
         });
         self.loading = Some(cx.spawn(async move |this, cx| {

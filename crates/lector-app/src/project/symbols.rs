@@ -379,7 +379,10 @@ mod block_on_timeout_tests {
 
     #[test]
     fn returns_a_ready_value_and_gives_up_on_a_pending_future_without_a_thread() {
-        assert_eq!(block_on_timeout(async { 5 }, Duration::from_secs(1)), Some(5));
+        assert_eq!(
+            block_on_timeout(async { 5 }, Duration::from_secs(1)),
+            Some(5)
+        );
         let started = std::time::Instant::now();
         let never = futures::future::pending::<()>();
         assert_eq!(block_on_timeout(never, Duration::from_millis(50)), None);

@@ -45,7 +45,11 @@ pub fn shutdown_with(
     let scheduler_stopped = scheduler.shutdown(scheduler_timeout);
     let owner_threads_alive: Vec<ThreadInfo> = threads().into_iter().filter(|t| t.alive).collect();
     for t in &owner_threads_alive {
-        tracing::debug!("at shutdown, owner thread still alive: {} {}", t.kind, t.name);
+        tracing::debug!(
+            "at shutdown, owner thread still alive: {} {}",
+            t.kind,
+            t.name
+        );
     }
     ShutdownReport {
         scheduler_stopped,
@@ -92,7 +96,11 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(report.scheduler_stopped);
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
         assert!(running.wait().is_none());
         assert!(queued.into_iter().all(|h| h.wait().is_none()));
         assert!(supervisor.is_shutting_down());

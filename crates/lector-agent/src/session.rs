@@ -382,11 +382,15 @@ impl AgentSession {
         let shared = self.shared.clone();
         let unrun = TurnGuard(Some((self.shared.clone(), id)));
         let key = JobKey::new(JobKind::AgentTurn, self.shared.subject());
-        let _ = self.shared.core.scheduler().spawn(key, Priority::Visible, move |_| {
-            let mut unrun = unrun;
-            unrun.0 = None;
-            run_turn(shared, id, text, context);
-        });
+        let _ = self
+            .shared
+            .core
+            .scheduler()
+            .spawn(key, Priority::Visible, move |_| {
+                let mut unrun = unrun;
+                unrun.0 = None;
+                run_turn(shared, id, text, context);
+            });
         Ok(id)
     }
 

@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use lector_base::thread::{spawn_named, ThreadKind, TaskRunner};
+use lector_base::thread::{spawn_named, TaskRunner, ThreadKind};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 

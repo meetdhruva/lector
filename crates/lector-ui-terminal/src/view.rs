@@ -216,9 +216,9 @@ impl TerminalView {
         });
         let spawn_task = cx.spawn(async move |this, cx| {
             let result = spawn.await.unwrap_or_else(|e| {
-                Err(lector_terminal::TerminalError::Thread(std::io::Error::other(
-                    e.to_string(),
-                )))
+                Err(lector_terminal::TerminalError::Thread(
+                    std::io::Error::other(e.to_string()),
+                ))
             });
             let _ = this.update(cx, |view, cx| view.on_spawned(result, cx));
         });

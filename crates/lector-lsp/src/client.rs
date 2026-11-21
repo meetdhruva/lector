@@ -191,14 +191,18 @@ impl Client {
         .map_err(io_err)?;
 
         let name = label.to_string();
-        spawn_named(ThreadKind::PipeReader, format!("{label} stderr"), move || {
-            for line in BufReader::new(stderr).lines() {
-                match line {
-                    Ok(l) => tracing::debug!(target: "lector_lsp::stderr", "[{name}] {l}"),
-                    Err(_) => break,
+        spawn_named(
+            ThreadKind::PipeReader,
+            format!("{label} stderr"),
+            move || {
+                for line in BufReader::new(stderr).lines() {
+                    match line {
+                        Ok(l) => tracing::debug!(target: "lector_lsp::stderr", "[{name}] {l}"),
+                        Err(_) => break,
+                    }
                 }
-            }
-        })
+            },
+        )
         .map_err(io_err)?;
 
         let reader_shared = shared.clone();

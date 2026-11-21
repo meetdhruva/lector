@@ -39,8 +39,8 @@ use super::{
     CommandContext, CommandRegistry, CommandSpec, FnCommand, NoticeLevel, Outcome, UiRequest,
 };
 use crate::core::AppCore;
-use crate::scheduler::{JobKey, JobKind, Priority, Scheduler, Subject};
 use crate::journal::UndoRecord;
+use crate::scheduler::{JobKey, JobKind, Priority, Scheduler, Subject};
 
 // ---------------------------------------------------------------------------------------------
 // Host: credentials environment, progress, cancellation

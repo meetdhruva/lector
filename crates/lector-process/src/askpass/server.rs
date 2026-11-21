@@ -696,8 +696,10 @@ mod tests {
         let unknown = fake_dir(base.path(), "lector-askpass-00000000000u", None);
         let unknown2 = fake_dir(base.path(), "lector-askpass-000000000000", None);
         let foreign = fake_dir(base.path(), "something-else", Some(dead_pid()));
-        let server = AskpassServer::start(base.path(), crate::askpass::test_runner(), |_| PromptReply::Cancel)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let server = AskpassServer::start(base.path(), crate::askpass::test_runner(), |_| {
+            PromptReply::Cancel
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
         let ours = server.private_dir().map(Path::to_path_buf);
         assert!(!dead.exists(), "a dead owner's directory is removed");
         assert!(live.exists() && foreign.exists() && unknown2.exists());

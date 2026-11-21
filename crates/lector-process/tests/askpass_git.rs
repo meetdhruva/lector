@@ -89,7 +89,8 @@ fn git_credential_fill_uses_askpass() {
 
 fn cancelling_fails_git_without_a_terminal_prompt() {
     let home = tempfile::tempdir().expect("tempdir");
-    let server = AskpassServer::start(home.path(), threads(), |_| PromptReply::Cancel).expect("server");
+    let server =
+        AskpassServer::start(home.path(), threads(), |_| PromptReply::Cancel).expect("server");
     let out = credential_fill(&server, home.path());
     assert!(!out.success(), "git must fail when the user cancels");
     assert!(!out.stdout_text().contains("password="));

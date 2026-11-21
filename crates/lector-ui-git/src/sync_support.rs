@@ -1,10 +1,13 @@
-//! The git reads behind the sync controller (blocking; run them through the background
-//! bridge): the full sync status and the commits a branch deletion would lose.
+//! Helpers of the sync controller: the blocking git reads (run them through the background
+//! bridge) for the full sync status and the commits a branch deletion would lose, and how a
+//! command's outcome is toasted.
 
 use std::path::Path;
 use std::time::SystemTime;
 
+use lector_app::Outcome;
 use lector_git::Repo;
+use lector_ui::views::workspace::ToastLevel;
 
 use crate::sync_model::{RemoteInfo, SyncStatus};
 
@@ -68,4 +71,14 @@ pub fn unreachable_commits(repo: &Repo, branch: &str) -> Vec<String> {
         .take(50)
         .map(|c| format!("{} {}", c.oid.short(), c.summary))
         .collect()
+}
+
+/// The toast level of a command outcome ("nothing to stash" is not a success).
+pub(crate) fn toast_level(outcome: &Outcome) -> ToastLevel {
+    use lector_app::commands::NoticeLevel;
+    match outcome.level {
+        NoticeLevel::Success => ToastLevel::Success,
+        NoticeLevel::Info => ToastLevel::Info,
+        NoticeLevel::Warning => ToastLevel::Warning,
+    }
 }

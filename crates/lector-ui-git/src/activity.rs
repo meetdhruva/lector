@@ -125,7 +125,9 @@ pub fn undo_entry(
     let ctx = context_for(store, cx);
     // A write the user asked for: never replaced, survives the panel closing.
     let key = view_key(JobKind::GitWrite, store.entity_id());
-    let work = background(cx, key, Priority::Visible, move |_| journal.undo(id, &ctx, mode));
+    let work = background(cx, key, Priority::Visible, move |_| {
+        journal.undo(id, &ctx, mode)
+    });
     let store = store.clone();
     window
         .spawn(cx, async move |cx| {

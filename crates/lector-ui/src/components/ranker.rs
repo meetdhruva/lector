@@ -102,15 +102,12 @@ impl<T: Send + Sync + 'static> ListRanker<T> {
         }
         let (items, text, limit) = (self.items.clone(), self.text, self.limit);
         self.spawned = true;
-        let handle = Scheduler::global().spawn(
-            self.key.clone(),
-            Priority::Interactive,
-            move |cancel| {
+        let handle =
+            Scheduler::global().spawn(self.key.clone(), Priority::Interactive, move |cancel| {
                 Matcher::new()
                     .rank_by_cancellable(&query, &items, text, limit, cancel)
                     .ok()
-            },
-        );
+            });
         Ranking::Pending(Pending {
             generation: self.generation,
             handle,

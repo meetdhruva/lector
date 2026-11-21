@@ -487,37 +487,37 @@ pub(crate) fn spawn_reader<R: Read + Send + 'static>(
         Stream::Stderr => "stderr",
     };
     let spawned = spawn_named(ThreadKind::PipeReader, name, move || {
-            let mut splitter = LineSplitter::default();
-            let mut buf = vec![0u8; 16 * 1024];
-            let mut delivering = true;
-            loop {
-                let n = match pipe.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                };
-                if let Some(cap) = &capture {
-                    cap.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(&buf[..n]);
-                }
-                if delivering {
-                    splitter.feed(&buf[..n], &mut |bytes, end| {
-                        if delivering {
-                            delivering = deliver(Line { stream, bytes, end });
-                        }
-                    });
-                }
+        let mut splitter = LineSplitter::default();
+        let mut buf = vec![0u8; 16 * 1024];
+        let mut delivering = true;
+        loop {
+            let n = match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if let Some(cap) = &capture {
+                cap.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(&buf[..n]);
             }
             if delivering {
-                splitter.finish(&mut |bytes, end| {
+                splitter.feed(&buf[..n], &mut |bytes, end| {
                     if delivering {
                         delivering = deliver(Line { stream, bytes, end });
                     }
                 });
             }
-        });
+        }
+        if delivering {
+            splitter.finish(&mut |bytes, end| {
+                if delivering {
+                    delivering = deliver(Line { stream, bytes, end });
+                }
+            });
+        }
+    });
     if let Err(err) = spawned {
         tracing::warn!("cannot start an output reader thread: {err}");
     }

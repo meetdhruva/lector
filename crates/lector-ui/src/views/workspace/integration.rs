@@ -96,7 +96,7 @@ impl Integration {
             session_task: None,
             nav_task: None,
             tasks: Vec::new(),
-            subscriptions: Vec::new(),
+            subscriptions: vec![crate::background::cancel_on_release(cx)],
             last_active: None,
         }
     }
@@ -232,12 +232,12 @@ impl Workspace {
                 let index = Arc::new(DirIndex::from_list(&files));
                 (files, index)
             });
-            let Ok((files, index)) = scan.await else { return };
+            let Ok((files, ix)) = scan.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.integ.files = files;
                 let tree = this.sidebar.read(cx).file_tree().clone();
                 tree.update(cx, |t, cx| {
-                    t.delegate.set_index(index);
+                    t.delegate.set_index(ix);
                     t.refresh(cx);
                 });
                 if let Some(active) = this.active_path(cx) {
@@ -1025,27 +1025,27 @@ impl Workspace {
             let root = project.root().to_path_buf();
             let key = view_key(JobKind::ProjectSymbols, this.entity_id());
             let entries = background(cx, key, Priority::Visible, move |_| {
-                    lector_app::project::symbols::project_symbols(&project)
-                        .into_iter()
-                        .map(|s| {
-                            let rel = s
-                                .path
-                                .strip_prefix(&root)
-                                .unwrap_or(&s.path)
-                                .display()
-                                .to_string();
-                            SymbolEntry {
-                                name: s.name.into(),
-                                kind: Some(s.kind),
-                                detail: rel.into(),
-                                depth: 0,
-                                path: s.path,
-                                row: s.point.row,
-                                cols: s.point.column as usize..s.point.column as usize,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                });
+                lector_app::project::symbols::project_symbols(&project)
+                    .into_iter()
+                    .map(|s| {
+                        let rel = s
+                            .path
+                            .strip_prefix(&root)
+                            .unwrap_or(&s.path)
+                            .display()
+                            .to_string();
+                        SymbolEntry {
+                            name: s.name.into(),
+                            kind: Some(s.kind),
+                            detail: rel.into(),
+                            depth: 0,
+                            path: s.path,
+                            row: s.point.row,
+                            cols: s.point.column as usize..s.point.column as usize,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
             let Ok(entries) = entries.await else { return };
             let _ = this.update_in(cx, |ws, window, cx| {
                 let weak = cx.entity().downgrade();

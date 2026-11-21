@@ -36,7 +36,7 @@ use crate::commit_composer::{CommitComposer, CommitComposerEvent};
 use crate::confirm::{confirm, discard_spec};
 use crate::diff_view::{open_diff, settings_diff_options, DiffTarget, ViewedTarget};
 use crate::operation_banner::OperationBanner;
-use crate::ref_picker::{pick_from_repo};
+use crate::ref_picker::pick_from_repo;
 use crate::review_model::{ChangesAnalysis, FileRisk, ReviewModelEvent};
 use crate::staging::{run_op, unstage_paths_for, GitOp};
 use crate::store::{GitStore, GitStoreEvent};

@@ -1009,43 +1009,43 @@ impl ShadowRepo {
                 .ok_or_else(|| Error::Git("cat-file has no stdout".into()))?,
         );
         let outcome = feed_while(stdin, input.as_bytes(), || {
-        let mut outcome = Ok(());
-        for (index, oid) in oids.iter().enumerate() {
-            let mut header = String::new();
-            if reader.read_line(&mut header)? == 0 {
-                outcome = Err(Error::Git("git cat-file ended early".into()));
-                break;
+            let mut outcome = Ok(());
+            for (index, oid) in oids.iter().enumerate() {
+                let mut header = String::new();
+                if reader.read_line(&mut header)? == 0 {
+                    outcome = Err(Error::Git("git cat-file ended early".into()));
+                    break;
+                }
+                let mut parts = header.split_whitespace();
+                let (_, Some(kind), Some(size)) = (parts.next(), parts.next(), parts.next()) else {
+                    outcome = Err(Error::Git(format!(
+                        "object {oid} is missing from the shadow"
+                    )));
+                    break;
+                };
+                let Ok(size) = size.parse::<u64>() else {
+                    outcome = Err(Error::Parse(format!("bad cat-file header {header:?}")));
+                    break;
+                };
+                if kind != "blob" {
+                    outcome = Err(Error::Parse(format!("{oid} is not a blob")));
+                    break;
+                }
+                let mut limited = (&mut reader).take(size);
+                let sunk = sink(index, &mut limited, size);
+                // Drain what the sink left, then the trailing newline.
+                let _ = io::copy(&mut limited, &mut io::sink());
+                let mut newline = [0u8; 1];
+                let _ = reader.read_exact(&mut newline);
+                if let Err(err) = sunk {
+                    outcome = Err(err);
+                    break;
+                }
             }
-            let mut parts = header.split_whitespace();
-            let (_, Some(kind), Some(size)) = (parts.next(), parts.next(), parts.next()) else {
-                outcome = Err(Error::Git(format!(
-                    "object {oid} is missing from the shadow"
-                )));
-                break;
-            };
-            let Ok(size) = size.parse::<u64>() else {
-                outcome = Err(Error::Parse(format!("bad cat-file header {header:?}")));
-                break;
-            };
-            if kind != "blob" {
-                outcome = Err(Error::Parse(format!("{oid} is not a blob")));
-                break;
-            }
-            let mut limited = (&mut reader).take(size);
-            let sunk = sink(index, &mut limited, size);
-            // Drain what the sink left, then the trailing newline.
-            let _ = io::copy(&mut limited, &mut io::sink());
-            let mut newline = [0u8; 1];
-            let _ = reader.read_exact(&mut newline);
-            if let Err(err) = sunk {
-                outcome = Err(err);
-                break;
-            }
-        }
-        drop(reader);
-        let _ = child.kill();
-        let _ = child.wait();
-        outcome
+            drop(reader);
+            let _ = child.kill();
+            let _ = child.wait();
+            outcome
         });
         let _ = stderr.join();
         outcome

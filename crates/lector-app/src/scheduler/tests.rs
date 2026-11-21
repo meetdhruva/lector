@@ -83,9 +83,7 @@ fn priority_order_on_the_general_workers() {
         } else {
             JobKind::DocumentHighlight
         };
-        handles.push(s.spawn(key(kind, i as u64), p, move |_| {
-            order.lock().push((p, i))
-        }));
+        handles.push(s.spawn(key(kind, i as u64), p, move |_| order.lock().push((p, i))));
     }
     for r in release {
         r.send(()).unwrap();
@@ -118,7 +116,11 @@ fn an_interactive_job_runs_while_every_general_worker_is_busy_with_background_wo
     let started = Instant::now();
     let h = s.spawn(key(JobKind::PickerRank, 1), Priority::Interactive, |_| 7);
     assert_eq!(h.wait(), Some(7));
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
     for r in release {
         r.send(()).unwrap();
     }
@@ -158,10 +160,14 @@ fn a_newer_job_replaces_an_older_one_with_the_same_key() {
     let handles: Vec<_> = (0..5u64)
         .map(|i| {
             let ran = ran.clone();
-            s.spawn(key(JobKind::GitChangeset, 1), Priority::Visible, move |_| {
-                ran.fetch_add(1, Ordering::SeqCst);
-                i
-            })
+            s.spawn(
+                key(JobKind::GitChangeset, 1),
+                Priority::Visible,
+                move |_| {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    i
+                },
+            )
         })
         .collect();
     // Another subject is not affected.
@@ -201,16 +207,20 @@ fn a_running_job_sees_cancellation_and_its_result_is_not_delivered() {
     let (finish_tx, finish_rx) = mpsc::channel::<()>();
     let observed = Arc::new(AtomicBool::new(false));
     let seen = observed.clone();
-    let first = s.spawn(key(JobKind::GitChangeset, 1), Priority::Visible, move |tok| {
-        tx.send(()).unwrap();
-        while !tok.is_cancelled() {
-            thread::sleep(Duration::from_millis(1));
-        }
-        seen.store(true, Ordering::SeqCst);
-        // Finishes with a value after the cancellation: a stale result.
-        let _ = finish_rx.recv_timeout(Duration::from_millis(50));
-        1
-    });
+    let first = s.spawn(
+        key(JobKind::GitChangeset, 1),
+        Priority::Visible,
+        move |tok| {
+            tx.send(()).unwrap();
+            while !tok.is_cancelled() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            seen.store(true, Ordering::SeqCst);
+            // Finishes with a value after the cancellation: a stale result.
+            let _ = finish_rx.recv_timeout(Duration::from_millis(50));
+            1
+        },
+    );
     rx.recv_timeout(SECS5).unwrap();
     let second = s.spawn(key(JobKind::GitChangeset, 1), Priority::Visible, |_| 2);
     drop(finish_tx);
@@ -266,7 +276,11 @@ fn cancel_subject_cancels_queued_running_and_debounced_jobs_but_not_writes() {
     }
     assert_eq!(queued.wait_outcome(), Err(JobError::Cancelled));
     assert_eq!(accumulating.wait_outcome(), Err(JobError::Cancelled));
-    assert_eq!(save.wait_outcome(), Ok(()), "a save survives its document closing");
+    assert_eq!(
+        save.wait_outcome(),
+        Ok(()),
+        "a save survives its document closing"
+    );
     assert_eq!(unrelated.wait_outcome(), Ok(()));
     assert!(s.wait_idle(SECS5));
     thread::sleep(Duration::from_millis(60));
@@ -396,6 +410,8 @@ fn no_lost_or_duplicated_jobs_under_contention() {
     let counts = counts.lock();
     assert_eq!(counts.len(), 2000);
     assert!(counts.values().all(|&c| c == 1));
+    // A waiter can see its result just before the worker unregisters the job.
+    assert!(s.wait_idle(SECS5));
     assert_eq!(s.live_jobs(), 0, "every finished job is unregistered");
 }
 
@@ -473,10 +489,7 @@ fn blocking_jobs_never_occupy_the_compute_workers() {
         started_rx.recv_timeout(SECS5).unwrap();
     }
     // The blocking lane is full (3 of 6 waiting); compute work still runs at once.
-    assert_eq!(
-        s.spawn(any(1), Priority::Background, |_| 5).wait(),
-        Some(5)
-    );
+    assert_eq!(s.spawn(any(1), Priority::Background, |_| 5).wait(), Some(5));
     assert_eq!(peak.load(Ordering::SeqCst), 3, "bounded by blocking_max");
     assert!(s.inner().blocking_threads() <= 3);
     for _ in 0..6 {
@@ -538,7 +551,11 @@ fn shutdown_cancels_queued_and_running_jobs_and_stops_the_threads_promptly() {
     );
     let started = Instant::now();
     assert!(s.shutdown(SECS5));
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(s.inner().threads_alive(), 0);
     assert_eq!(running.wait_outcome(), Err(JobError::Cancelled));
     assert_eq!(blocking.wait_outcome(), Err(JobError::Cancelled));
@@ -566,7 +583,10 @@ fn shutdown_is_bounded_when_a_job_ignores_its_token() {
     let started = Instant::now();
     assert!(!s.shutdown(Duration::from_millis(100)));
     let took = started.elapsed();
-    assert!(took >= Duration::from_millis(100) && took < Duration::from_secs(2), "{took:?}");
+    assert!(
+        took >= Duration::from_millis(100) && took < Duration::from_secs(2),
+        "{took:?}"
+    );
     release_tx.send(()).unwrap();
 }
 

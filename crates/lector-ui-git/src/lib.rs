@@ -26,7 +26,7 @@ pub mod store;
 pub mod sync;
 pub mod sync_dialogs;
 pub mod sync_model;
-pub mod sync_reads;
+pub mod sync_support;
 pub mod util;
 
 #[cfg(test)]

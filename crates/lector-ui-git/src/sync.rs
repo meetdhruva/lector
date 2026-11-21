@@ -39,8 +39,6 @@ use lector_ui::views::sidebar::SidebarPanel;
 use lector_ui::views::workspace::ToastLevel;
 use lector_ui::views::Workspace;
 use lector_ui::{ActiveTheme, ColorExt};
-
-pub use crate::sync_reads::{load_status, unreachable_commits};
 use serde_json::{json, Value};
 
 use crate::askpass_ui::{self, PromptContext};
@@ -53,6 +51,7 @@ use crate::sync_model::{
     validate_branch_name, FailureContext, FailureView, NextStep, OpKind, Plan, PrimaryAction,
     SyncAction, SyncStatus,
 };
+use crate::sync_support::{load_status, toast_level, unreachable_commits};
 
 /// Commands of one operation, run in order.
 type Steps = Vec<(&'static str, Value)>;
@@ -536,8 +535,7 @@ impl SyncController {
         cx.emit(SyncEvent2::Changed);
         cx.notify();
         let core = lector_ui::commands_bridge::core(cx);
-        // Network and writes: the blocking lane (it waits on the remote), never replaced; the
-        // operation is cancelled through `SyncHost::cancel_repo`, which kills git.
+        // Network and writes: the blocking lane. Cancelled by `SyncHost::cancel_repo` (kills git).
         let key = view_key(JobKind::Command, cx.entity_id());
         let job = background(cx, key, Priority::Visible, move |_| {
             Journal::install(&core);
@@ -922,7 +920,8 @@ impl SyncController {
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let Ok((local, choices)) = work.await else { return };
+                let Ok(found) = work.await else { return };
+                let (local, choices) = found;
                 let _ = cx.update(|window, cx| {
                     let existing = local.clone();
                     let spec = InputSpec {
@@ -1148,7 +1147,9 @@ impl SyncController {
         };
         let n = name.clone();
         let key = view_key(JobKind::GitRefs, cx.entity_id());
-        let work = background(cx, key, Priority::Visible, move |_| unreachable_commits(&repo, &n));
+        let work = background(cx, key, Priority::Visible, move |_| {
+            unreachable_commits(&repo, &n)
+        });
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
@@ -1860,14 +1861,4 @@ pub fn register(
             control.update(cx, |ctl, cx| ctl.deploy_menu(position, window, cx));
         });
     });
-}
-
-/// The toast icon of a command outcome.
-fn toast_level(outcome: &Outcome) -> ToastLevel {
-    use lector_app::commands::NoticeLevel;
-    match outcome.level {
-        NoticeLevel::Success => ToastLevel::Success,
-        NoticeLevel::Info => ToastLevel::Info,
-        NoticeLevel::Warning => ToastLevel::Warning,
-    }
 }

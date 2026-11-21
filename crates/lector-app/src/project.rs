@@ -367,7 +367,19 @@ impl Project {
             })
             .unwrap_or_default();
         let lsp = settings.lsp.enabled.then(|| {
-            let manager = LspManager::new(root.clone(), lsp_configs(&settings));
+            // Launches wait for the server's `initialize`: the scheduler's blocking lane.
+            let launcher = crate::scheduler::Scheduler::global().task_runner(
+                crate::scheduler::JobKey::new(
+                    crate::scheduler::JobKind::LspLaunch,
+                    crate::scheduler::Subject::path(&root),
+                ),
+                crate::scheduler::Priority::Background,
+            );
+            let opts = lector_lsp::LspOptions {
+                launcher: Some(launcher),
+                ..lector_lsp::LspOptions::default()
+            };
+            let manager = LspManager::with_options(root.clone(), lsp_configs(&settings), opts);
             // Told to servers at `initialize`: set before any document is opened.
             manager.set_completion_snippets(settings.editor.completion.snippets);
             manager

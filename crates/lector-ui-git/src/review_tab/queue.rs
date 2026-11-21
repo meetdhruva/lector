@@ -106,24 +106,26 @@ impl ReviewView {
         self.queue.task = Some(cx.spawn(async move |this, cx| {
             let job = view_key(JobKind::ReviewAnalysis, this.entity_id());
             let analysis = background(cx, job, Priority::Visible, move |_| {
-                    let analysis =
-                        analyze_changes(&service, &repo, &languages, &changes, &opts, detect);
-                    // Persisted reviewed hunks of every analyzed file.
-                    let store = HunkReviewStore::new(&db);
-                    let marks: Vec<(String, Vec<bool>)> = analysis
-                        .order
-                        .iter()
-                        .filter_map(|path| {
-                            let file = analysis.get(path)?;
-                            Some((
-                                path.clone(),
-                                store.reviewed(&root, &key, path, &file.hunks, None),
-                            ))
-                        })
-                        .collect();
-                    (analysis, marks)
-                });
-            let Ok((analysis, marks)) = analysis.await else { return };
+                let analysis =
+                    analyze_changes(&service, &repo, &languages, &changes, &opts, detect);
+                // Persisted reviewed hunks of every analyzed file.
+                let store = HunkReviewStore::new(&db);
+                let marks: Vec<(String, Vec<bool>)> = analysis
+                    .order
+                    .iter()
+                    .filter_map(|path| {
+                        let file = analysis.get(path)?;
+                        Some((
+                            path.clone(),
+                            store.reviewed(&root, &key, path, &file.hunks, None),
+                        ))
+                    })
+                    .collect();
+                (analysis, marks)
+            });
+            let Ok((analysis, marks)) = analysis.await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 if let Some(view) = &this.view {
                     let mut all = vec![Vec::new(); view.files.len()];

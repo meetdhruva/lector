@@ -22,6 +22,19 @@ Changes:
   still share the database normally.
 - **A damaged state database is set aside and replaced**, with a note naming the kept copy. 0.7.1
   kept trying to open the damaged file and silently ran without saving anything, on every start.
+- **Background work has one scheduler with priorities.** What answers a keystroke (reparse, picker
+  ranking, find as you type) always has a worker of its own, so it stays quick while large diffs,
+  indexing or blame run; waits on the network, language servers, agents and credential prompts run
+  on a separate bounded set of threads and can no longer hold up local work. Before, a fetch or
+  push ran on the same few workers as everything else.
+- **Closing a view, document or repository stops its background work**: a newer request replaces an
+  older one, and results that are no longer wanted are dropped instead of being applied late. The
+  project file scan and symbol indexing of a closed window, and diff and changeset loads that were
+  superseded, now stop instead of running to the end.
+- **A background job that panics is caught**: the worker keeps running, the panic is written to the
+  crash log (`lector health`), and views that report errors (diffs, panels, commits) show it.
+- **Quitting stops background work promptly**: running and queued jobs are cancelled and Lector
+  waits at most half a second for them, after stopping child processes as before.
 
 ## 0.7.1 — 2026-11-19
 

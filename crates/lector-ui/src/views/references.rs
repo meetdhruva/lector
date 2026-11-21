@@ -98,8 +98,7 @@ impl ReferencesView {
             // Waits on the language server (then searches text): the blocking lane.
             let key = view_key(JobKind::LspReferences, this.entity_id());
             let targets = background(cx, key, Priority::Visible, move |_| {
-                lector_app::project::symbols::references(&project, &doc, offset)
-                    .unwrap_or_default()
+                lector_app::project::symbols::references(&project, &doc, offset).unwrap_or_default()
             });
             let Ok(targets) = targets.await else { return };
             let _ = this.update(cx, |this, cx| {

@@ -1,4 +1,5 @@
-//! Small views shared by the diff and review panels: the `+N -M` label and the viewed checkbox.
+//! Small views shared by the diff and review panels: the `+N -M` label and the viewed checkbox;
+//! the image format mapping of image diffs.
 
 use super::*;
 
@@ -61,4 +62,18 @@ pub fn viewed_checkbox(id: &'static str, viewed: bool, cx: &App) -> gpui::Statef
             .color(if viewed { accent } else { ui.text_faint.hsla() }),
         )
         .child("Viewed")
+}
+
+/// GPUI's format for an image diff side (`None`: GPUI cannot show it).
+pub(super) fn to_gpui_format(f: lector_fs::ImageFormat) -> Option<gpui::ImageFormat> {
+    use lector_fs::ImageFormat as F;
+    Some(match f {
+        F::Png => gpui::ImageFormat::Png,
+        F::Jpeg => gpui::ImageFormat::Jpeg,
+        F::Gif => gpui::ImageFormat::Gif,
+        F::Webp => gpui::ImageFormat::Webp,
+        F::Svg => gpui::ImageFormat::Svg,
+        F::Bmp => gpui::ImageFormat::Bmp,
+        F::Ico => return None,
+    })
 }

@@ -8,13 +8,13 @@
 //! will be lost, and show an "Undo" toast instead of asking first; only when the backup
 //! cannot be taken does a confirmation come up.
 
-use lector_ui::background::{background, view_key, JobKind, Priority};
 use gpui::{App, Entity, SharedString, Task};
 use lector_app::commands::git_write::BackupUnavailable;
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::Journal;
 use lector_git::{Changeset, FileChange, OperationKind};
 use lector_review::review::{self, HunkAction, LineSelection};
+use lector_ui::background::{background, view_key, JobKind, Priority};
 use serde_json::{json, Value};
 
 use crate::activity;

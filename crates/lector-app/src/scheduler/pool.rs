@@ -352,7 +352,10 @@ impl Inner {
                         return;
                     }
                     st.blocking_idle += 1;
-                    let timed_out = self.blocking_cv.wait_for(&mut st, BLOCKING_IDLE).timed_out();
+                    let timed_out = self
+                        .blocking_cv
+                        .wait_for(&mut st, BLOCKING_IDLE)
+                        .timed_out();
                     st.blocking_idle -= 1;
                     let empty = st.blocking.iter().all(VecDeque::is_empty);
                     if timed_out && empty {

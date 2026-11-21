@@ -69,6 +69,11 @@ macro_rules! job_kinds {
 }
 
 // (lane, replaces, cancelled_with_subject, may_be_interactive)
+//
+// `replaces` only where one subject runs one such job at a time and the newest answer is the
+// only one wanted (a query, a reload). Where one view runs several independent jobs of a kind
+// (two menus, a list refresh and opening an item) the kind accumulates; a superseded job held in
+// a field is still cancelled when its bridge task is dropped.
 job_kinds! {
     // ---- documents (lector-app document store) ----
     /// Reparse after an edit.
@@ -90,7 +95,7 @@ job_kinds! {
     /// Saving a document (a write the user asked for).
     DocumentSave = (Compute, false, false, false),
     /// Reading a file for a view (not through the document store).
-    FileRead = (Compute, true, true, false),
+    FileRead = (Compute, false, true, false),
     /// Image metadata or an SVG rasterization.
     ImageDecode = (Compute, true, true, false),
     /// Markdown parsing for a preview or hover.
@@ -133,8 +138,9 @@ job_kinds! {
     LspReferences = (Blocking, true, true, false),
     /// Opening a document on a language server from the UI.
     LspSync = (Blocking, true, true, false),
-    /// Launching or restarting a language server (waits for `initialize`).
-    LspLaunch = (Blocking, true, true, false),
+    /// Launching or restarting a language server (waits for `initialize`). Several servers
+    /// may launch at once: launches accumulate.
+    LspLaunch = (Blocking, false, true, false),
 
     // ---- git (local) ----
     /// Re-reading HEAD, status and conflicts of a repository.
@@ -142,7 +148,7 @@ job_kinds! {
     /// Sync status (ahead/behind, upstream).
     GitSyncStatus = (Compute, true, true, false),
     /// Branches, stashes, refs, unreachable commits: lists for a menu or panel.
-    GitRefs = (Compute, true, true, false),
+    GitRefs = (Compute, false, true, false),
     /// The committer identity.
     GitIdentity = (Compute, true, true, false),
     /// The last commit message (amend).
@@ -156,7 +162,7 @@ job_kinds! {
     /// One file's diff summary.
     GitFileSummary = (Compute, true, true, false),
     /// A permalink or a revision lookup.
-    GitLookup = (Compute, true, true, false),
+    GitLookup = (Compute, false, true, false),
     /// Credential helpers git is configured with.
     GitConfigRead = (Compute, true, true, false),
     /// Conflict parsing for inline conflicts or the merge editor.
@@ -182,7 +188,7 @@ job_kinds! {
 
     // ---- network ----
     /// A forge request that only reads (pull requests, opening a review).
-    ForgeRead = (Blocking, true, true, false),
+    ForgeRead = (Blocking, false, true, false),
     /// A forge request that writes (reply, resolve, submit a review).
     ForgeWrite = (Blocking, false, false, false),
     /// Checking for an update.
@@ -206,7 +212,7 @@ job_kinds! {
     /// Starting a terminal session.
     TerminalSpawn = (Compute, true, true, false),
     /// Loading or saving the terminal tabs of a project.
-    TerminalSessions = (Compute, true, true, false),
+    TerminalSessions = (Compute, false, true, false),
     /// Resolving a clicked link in a terminal.
     TerminalLink = (Compute, true, true, false),
     /// Killing a terminal's process tree after its grace period.
