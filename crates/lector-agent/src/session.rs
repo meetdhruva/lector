@@ -1087,10 +1087,23 @@ impl Shared {
         let abs = target.path();
         let rel = target.relative_slash();
         let turn = self.state.lock().current;
+        // The write goes through the open document (its encoding, BOM and line endings kept) or
+        // writes the text as is; decided once, so the size checked is the size written.
+        let store = DocumentStore::for_core(&self.core);
+        let open = store.get(&abs);
+        let on_disk = match &open {
+            Some(handle) => handle
+                .encoded_len(content)
+                .map_err(|e| RpcError::remote(rpc::INTERNAL_ERROR, format!("{rel}: {e}")))?,
+            None => content.len() as u64,
+        };
         // A write that cannot be undone is refused (ADR 0010, item 6; ADR 0011): the turn's
         // checkpoint covers the file, or it was backed up earlier in the turn, or it is backed up
         // now (first touch); a backup that fails, or a file too large to back up in a folder
         // without git, refuses the write. Backups of one turn are taken one at a time.
+        // The file's identity as the file system resolves it (ADR 0011): one file, one key,
+        // whatever the spelling. A per-write backup is keyed by it as it is before the write.
+        let backup_key = self.backups.file_key(&rel);
         let backup = {
             let mut slot = self.ledger.lock();
             let ledger = match (slot.as_mut(), turn) {
@@ -1098,12 +1111,11 @@ impl Shared {
                 _ => None,
             };
             self.backups
-                .before_write(ledger, &rel, content.len())
+                .before_write(ledger, &rel, on_disk)
                 .map_err(refused)?
         };
         let err = |e: String| RpcError::remote(rpc::INTERNAL_ERROR, format!("{rel}: {e}"));
-        let store = DocumentStore::for_core(&self.core);
-        match store.get(&abs) {
+        match open {
             Some(handle) => {
                 if handle.is_read_only() {
                     return Err(err("the file is locked (read-only) in Lector".into()));
@@ -1126,22 +1138,41 @@ impl Shared {
                 .write(content.as_bytes(), CreateDirs::Yes)
                 .map_err(|e| err(e.to_string()))?,
         }
+        // A file the turn created has its on-disk name now: re-key its first touch to it.
+        {
+            let mut slot = self.ledger.lock();
+            if let (Some((id, ledger)), Some(current)) = (slot.as_mut(), turn) {
+                if *id == current {
+                    self.backups.after_write(ledger);
+                }
+            }
+        }
+        let key = self.backups.file_key(&rel);
         self.update_turn(|t| {
-            if !t.written.contains(&rel) {
-                t.written.push(rel.clone());
+            if !t.written.contains(&key) {
+                t.written.push(key.clone());
             }
         });
-        self.journal_write(&abs, &rel, turn, backup);
+        self.journal_write(
+            &self.project.absolute_path(&key),
+            &key,
+            &backup_key,
+            turn,
+            backup,
+        );
         if let Some(id) = turn {
             self.emit(AgentEvent::TurnUpdated(id));
         }
         Ok(json!({}))
     }
 
+    /// Journals one agent write of the file `rel` (its on-disk key now); its own undo, if it took
+    /// a backup, restores `backup_key` (the key that backup was recorded under).
     fn journal_write(
         &self,
         abs: &Path,
         rel: &str,
+        backup_key: &str,
         turn: Option<TurnId>,
         backup: Option<lector_git::ShadowSnapshot>,
     ) {
@@ -1150,8 +1181,8 @@ impl Shared {
         };
         let undo = backup.map(|shadow| UndoRecord::RestoreFiles {
             shadow,
-            paths: vec![self.backups.shadow_path(rel)],
-            after: self.backups.fingerprints_now(rel),
+            paths: vec![self.backups.shadow_path(backup_key)],
+            after: self.backups.fingerprints_now(backup_key),
         });
         let summary = match turn {
             Some(t) => format!("{} wrote {rel} (turn {t})", self.config.name),

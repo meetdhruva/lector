@@ -357,6 +357,12 @@ impl Journal {
                 paths,
                 after: left,
             } => {
+                // An undo that restores nothing is not an undo: never a successful no-op.
+                if paths.is_empty() {
+                    return Err(UndoError::NotUndoable(
+                        "this operation recorded no files to restore".into(),
+                    ));
+                }
                 let shadow = self.shadow_for(repo.unwrap_or(Path::new("")))?;
                 let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                 // Back up what the restore is about to overwrite: this is what makes
@@ -394,6 +400,11 @@ impl Journal {
                 paths,
                 ..
             } => {
+                if paths.is_empty() {
+                    return Err(UndoError::NotUndoable(
+                        "this operation recorded no index entries to restore".into(),
+                    ));
+                }
                 let shadow = self.shadow_for(repo.unwrap_or(Path::new("")))?;
                 let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                 let backup = shadow

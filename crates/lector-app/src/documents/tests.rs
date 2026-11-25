@@ -557,3 +557,54 @@ fn subscribers_may_call_back_into_the_handle() {
     insert(&h, 0, "b");
     assert_eq!(seen.lock().len(), 2);
 }
+
+/// `DocHandle::encoded_len` is exactly what a save of that text writes (the size an agent write
+/// is checked against): UTF-16 with its BOM, CRLF conversion of `\n` text, a UTF-8 BOM.
+#[test]
+fn encoded_len_is_what_a_save_writes() {
+    let utf16: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain("a\r\nb\r\n".encode_utf16().flat_map(|u| u.to_le_bytes()))
+        .collect();
+    let fx = fixture(
+        &[
+            ("crlf.txt", b"one\r\ntwo\r\n"),
+            ("u16.txt", &utf16),
+            ("bom.txt", b"\xEF\xBB\xBFx\n"),
+            ("plain.txt", b"x\n"),
+        ],
+        false,
+    );
+    let store = inline_store();
+    let text = "line one\nline two\nthree é 😀\n".repeat(50);
+    for (name, expected) in [
+        // UTF-16: BOM + two bytes per unit (the emoji is two units), `\n` -> `\r\n`.
+        (
+            "u16.txt",
+            2 + 2 * text.replace('\n', "\r\n").encode_utf16().count() as u64,
+        ),
+        ("crlf.txt", text.replace('\n', "\r\n").len() as u64),
+        ("bom.txt", 3 + text.len() as u64),
+        ("plain.txt", text.len() as u64),
+    ] {
+        let path = fx.root.join(name);
+        let h = store.open(&path, &fx.project).unwrap();
+        let predicted = h.encoded_len(&text).unwrap();
+        assert_eq!(predicted, expected, "{name}");
+        h.replace_all(&text).unwrap();
+        h.save(SaveRequest {
+            force: false,
+            trim_trailing_whitespace: false,
+            ensure_final_newline: false,
+            run_hooks: false,
+            path: None,
+            confine: None,
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            predicted,
+            "{name}: what the save wrote"
+        );
+    }
+}

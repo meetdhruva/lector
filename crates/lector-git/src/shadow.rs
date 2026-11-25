@@ -64,6 +64,9 @@ use util::{check_rel, dir_size, is_within, parse_ls_files_stage, ref_time};
 
 /// Default size cap of one shadow repository for [`ShadowRepo::prune`].
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// Snapshots younger than this are never removed to meet the size cap by
+/// [`ShadowRepo::prune`] (the trim every backup path runs).
+pub const SIZE_TRIM_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 /// The largest file the shadow of a folder without git stores (ADR 0011): larger ones are
 /// recorded as skipped ([`ShadowRepo::snapshot_paths`]) or refused ([`Oversize::Refuse`]).
 pub const FOLDER_MAX_FILE: u64 = 64 * 1024 * 1024;
@@ -77,13 +80,15 @@ pub enum Oversize {
     /// Record a file over the limit as skipped without reading it (a restore of that path then
     /// refuses); still fail for a directory, FIFO, socket or device.
     Skip,
-    /// Record every such path as skipped without reading it: for recording the state at the end
-    /// of an agent turn, which must not fail because a file was replaced by a directory.
+    /// Record every such path as skipped without reading it, and also a path now reached through
+    /// a symlinked parent: for recording the state at the end of an agent turn, which must not
+    /// fail (and so lose the turn's undo) because a file was replaced by a directory or a parent
+    /// by a link. A restore of a skipped path refuses, naming it.
     SkipAll,
 }
 /// Files larger than this are skipped (and recorded as skipped) by
 /// [`ShadowRepo::snapshot_worktree`]; explicit [`ShadowRepo::snapshot_paths`] never skips.
-const WORKTREE_MAX_FILE: u64 = 256 * 1024 * 1024;
+pub const WORKTREE_MAX_FILE: u64 = 256 * 1024 * 1024;
 /// Files up to this size are buffered; larger ones are streamed to `fast-import`.
 const BUFFER_LIMIT: u64 = 64 * 1024 * 1024;
 const REF_PREFIX: &str = "refs/lector/snapshots/";
@@ -826,6 +831,16 @@ impl ShadowRepo {
     /// recreated or deleted as recorded, executable bit and symlinks kept. Directories
     /// restore every file recorded below them. **Writes user files — call it only from
     /// an explicit undo.** Never writes inside `.git` or through symlinked directories.
+    ///
+    /// **All or nothing.** It restores every requested path to the snapshot's recorded state,
+    /// or fails as a whole, naming the paths it cannot restore, before writing anything. A path
+    /// cannot be restored when the snapshot does not cover it, when the snapshot recorded it (or
+    /// a file below it) as *skipped* (not stored: too large, or not a regular file; for every
+    /// snapshot kind, so an unavailable backup is never a successful no-op), when it is now a
+    /// folder, FIFO, socket or device (never replaced or removed), or when a parent is now a file
+    /// or a link. The files are then staged next to their destinations and renamed into place,
+    /// so a failure while reading or writing data changes nothing; only a failing rename or
+    /// delete (the last step) can leave the restore partly done, and the error says so.
     pub fn restore_paths(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()> {
         let manifest = self.manifest(snap)?;
         if manifest.kind == SnapshotKind::Index {
@@ -839,9 +854,14 @@ impl ShadowRepo {
         // Plan first: nothing is written when any requested path is unusable.
         let mut writes: Vec<(String, String, Oid)> = Vec::new(); // (rel, mode, oid)
         let mut deletes: Vec<String> = Vec::new();
+        let mut not_backed_up: Vec<String> = Vec::new();
+        let mut blocked: Vec<String> = Vec::new();
         for path in paths {
             let rel = check_rel(path)?;
-            self.no_symlink_parents(&rel)?;
+            if self.no_symlink_parents(&rel).is_err() {
+                blocked.push(format!("{rel} is now reached through a link"));
+                continue;
+            }
             let mut found = false;
             for (name, (mode, oid)) in &files {
                 if is_within(name, &rel) {
@@ -850,12 +870,8 @@ impl ShadowRepo {
                 }
             }
             if manifest.skipped.iter().any(|s| is_within(s, &rel)) {
-                if manifest.kind == SnapshotKind::Paths {
-                    return Err(Error::Io(io::Error::other(format!(
-                        "{rel} was not backed up (too large, or not a regular file), so it cannot be restored from this backup"
-                    ))));
-                }
-                found = true;
+                not_backed_up.push(rel.clone());
+                continue;
             }
             if manifest.absent.iter().any(|a| a == &rel) || (!found && full) {
                 found = true;
@@ -867,41 +883,87 @@ impl ShadowRepo {
                 )));
             }
         }
+        if !not_backed_up.is_empty() {
+            return Err(Error::Io(io::Error::other(format!(
+                "{} was not backed up (too large, or not a regular file), so it cannot be restored from this backup; nothing was restored",
+                not_backed_up.join(", ")
+            ))));
+        }
         // A path restored from a file and deleted at the same time can't be both.
         writes.sort();
         writes.dedup();
         deletes.sort();
         deletes.dedup();
-        for (rel, ..) in &writes {
-            self.no_symlink_parents(rel)?;
-            let abs = self.workdir.join(rel);
-            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
-                return Err(Error::Io(io::Error::other(format!(
-                    "{rel} is now a directory; move it away to restore the file"
-                ))));
+        for rel in writes.iter().map(|(r, ..)| r).chain(&deletes) {
+            if self.no_symlink_parents(rel).is_err() {
+                blocked.push(format!("{rel} is now reached through a link"));
+            } else if let Some(why) = self.blocks_restore(rel) {
+                blocked.push(why);
             }
         }
-        for rel in &deletes {
-            let abs = self.workdir.join(rel);
-            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
-                return Err(Error::Io(io::Error::other(format!(
-                    "{rel} is now a directory; it was absent when the snapshot was taken"
-                ))));
-            }
+        if !blocked.is_empty() {
+            blocked.sort();
+            blocked.dedup();
+            return Err(Error::Io(io::Error::other(format!(
+                "{}; move it away to restore; nothing was restored",
+                blocked.join("; ")
+            ))));
         }
 
+        // Stage every file, then put them in place.
         let oids: Vec<Oid> = writes.iter().map(|(_, _, o)| *o).collect();
-        self.cat_blobs(&oids, |i, reader, size| {
+        let mut staged: Vec<(PathBuf, String)> = Vec::with_capacity(writes.len());
+        let staging = self.cat_blobs(&oids, |i, reader, size| {
             let (rel, mode, _) = &writes[i];
-            self.write_restored(rel, mode, reader, size)
-        })?;
+            staged.push((self.stage_restored(rel, mode, reader, size)?, rel.clone()));
+            Ok(())
+        });
+        if staging.is_err() || staged.len() != writes.len() {
+            for (tmp, rel) in &staged {
+                let _ = fs::remove_file(tmp);
+                self.remove_empty_parents(&self.workdir.join(rel));
+            }
+            return staging.and(Err(Error::Git(
+                "the backup's contents could not be read; nothing was restored".into(),
+            )));
+        }
+        let mut done = 0usize;
+        let partly = |done: usize, err: Error| {
+            if done == 0 {
+                err
+            } else {
+                Error::Io(io::Error::other(format!(
+                    "the restore stopped after {done} of {} paths ({err}); the rest is unchanged",
+                    writes.len() + deletes.len()
+                )))
+            }
+        };
+        for (i, (tmp, rel)) in staged.iter().enumerate() {
+            if let Err(err) = self.commit_restored(tmp, rel) {
+                for (tmp, _) in &staged[i..] {
+                    let _ = fs::remove_file(tmp);
+                }
+                return Err(partly(done, err));
+            }
+            done += 1;
+        }
         for rel in &deletes {
             let abs = self.workdir.join(rel);
+            // On a case-insensitive or normalising file system `A.txt` (recorded absent) can be
+            // the file just restored as `a.txt`: removing it would undo the restore.
+            if writes
+                .iter()
+                .any(|(w, ..)| util::same_entry(&abs, &self.workdir.join(w)))
+            {
+                done += 1;
+                continue;
+            }
             match fs::remove_file(&abs) {
                 Ok(()) => self.remove_empty_parents(&abs),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(partly(done, err.into())),
             }
+            done += 1;
         }
         Ok(())
     }
@@ -1149,10 +1211,21 @@ impl ShadowRepo {
 
     /// Deletes snapshots older than `keep` and trims to [`DEFAULT_MAX_BYTES`].
     pub fn prune(&self, keep: Duration) -> Result<()> {
-        self.prune_with(PruneOptions {
-            keep,
-            max_bytes: Some(DEFAULT_MAX_BYTES),
-        })
+        self.prune_capped(keep, DEFAULT_MAX_BYTES)
+    }
+
+    /// [`ShadowRepo::prune`] with another size cap. Trimming for size never removes a snapshot
+    /// taken in the last [`SIZE_TRIM_GRACE`]: another session's running agent turn (or one that
+    /// just ended) keeps its backups even while the shadow is over the cap, so its undo stays
+    /// possible; age-based pruning (`keep`) is not affected.
+    pub fn prune_capped(&self, keep: Duration, max_bytes: u64) -> Result<()> {
+        self.prune_impl(
+            PruneOptions {
+                keep,
+                max_bytes: Some(max_bytes),
+            },
+            now_secs() - SIZE_TRIM_GRACE.as_secs() as i64,
+        )
         .map(drop)
     }
 
@@ -1160,6 +1233,12 @@ impl ShadowRepo {
     /// objects fit in `opts.max_bytes` (the newest snapshot always stays), then
     /// repacks and drops unreachable objects. Only the shadow repository is touched.
     pub fn prune_with(&self, opts: PruneOptions) -> Result<PruneReport> {
+        self.prune_impl(opts, i64::MAX)
+    }
+
+    /// [`ShadowRepo::prune_with`]; size trimming only removes snapshots taken at or before
+    /// `trimmable_until` (Unix seconds).
+    fn prune_impl(&self, opts: PruneOptions, trimmable_until: i64) -> Result<PruneReport> {
         let _lock = self.lock()?;
         let mut snaps = self.snapshots()?;
         let cutoff = now_secs() - opts.keep.as_secs() as i64;
@@ -1183,8 +1262,13 @@ impl ShadowRepo {
                 self.gc()?;
                 bytes = dir_size(&self.git_dir.join("objects"));
             }
-            while bytes > cap && snaps.len() > 1 {
-                let batch = (snaps.len() / 4).max(1).min(snaps.len() - 1);
+            loop {
+                let trimmable = snaps.iter().filter(|s| s.time <= trimmable_until).count();
+                if bytes <= cap || snaps.len() <= 1 || trimmable == 0 {
+                    break;
+                }
+                // The trimmable snapshots are the oldest: at the back.
+                let batch = (trimmable / 4).max(1).min(trimmable).min(snaps.len() - 1);
                 let victims: Vec<ShadowSnapshot> = snaps.split_off(snaps.len() - batch);
                 removed += self.delete_snapshots(&victims)?;
                 self.gc()?;

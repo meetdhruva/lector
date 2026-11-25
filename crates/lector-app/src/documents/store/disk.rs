@@ -17,7 +17,40 @@ use super::{
     SaveRequest, Slot, Structure,
 };
 
+/// The encoding options a save writes with: the document's encoding (BOM included) and line
+/// endings. Cleanup (trailing whitespace, final newline) is applied to the buffer before, so it is
+/// not an encoding option.
+fn save_options(encoding: lector_buffer::save::Encoding, line_ending: LineEnding) -> SaveOptions {
+    SaveOptions {
+        encoding,
+        line_ending: match line_ending {
+            LineEnding::CrLf => Some(SaveLineEnding::CrLf),
+            LineEnding::Lf => Some(SaveLineEnding::Lf),
+            _ => None,
+        },
+        trim_trailing_whitespace: false,
+        ensure_final_newline: false,
+    }
+}
+
 impl DocHandle {
+    /// The exact number of bytes [`DocHandle::save`] would write if the buffer's text were
+    /// `text` (a replacement of all of it, as an agent write does) and the save ran no hooks and
+    /// no cleanup: the document's encoding (UTF-16 doubles ASCII), its byte order mark and its
+    /// line-ending conversion applied, with the same options a save uses. Encodes a copy; the
+    /// buffer is not touched.
+    pub fn encoded_len(&self, text: &str) -> Result<u64, DocError> {
+        let opts = {
+            let st = self.shared.state.lock();
+            if st.buffer.is_none() {
+                return Err(DocError::NotEditable);
+            }
+            save_options(st.disk.encoding, st.line_ending())
+        };
+        let rope = lector_text::Rope::from_str(text);
+        Ok(lector_buffer::save::encode(&rope, &opts).len() as u64)
+    }
+
     /// Saves (blocking): before-save hooks, cleanup edits, encoding/line
     /// endings kept, "changed on disk" check (unless `force`), atomic write.
     pub fn save(&self, req: SaveRequest) -> Result<SaveOutcome, DocError> {
@@ -75,16 +108,7 @@ impl DocHandle {
                     self.record_edit(&mut st, EditOrigin::SAVE, tx, true, &mut fx);
                 }
             }
-            let opts = SaveOptions {
-                encoding,
-                line_ending: match line_ending {
-                    LineEnding::CrLf => Some(SaveLineEnding::CrLf),
-                    LineEnding::Lf => Some(SaveLineEnding::Lf),
-                    _ => None,
-                },
-                trim_trailing_whitespace: false,
-                ensure_final_newline: false,
-            };
+            let opts = save_options(encoding, line_ending);
             let Some(buffer) = st.buffer.as_ref() else {
                 return Err(DocError::NotEditable);
             };

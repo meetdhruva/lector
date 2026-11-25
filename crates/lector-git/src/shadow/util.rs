@@ -203,3 +203,24 @@ pub(super) fn apply_permissions(
     }
     Ok(())
 }
+
+/// Whether two existing paths are the same directory entry (case-insensitive or normalising
+/// file systems give one file several spellings). `false` when either does not exist.
+#[cfg(unix)]
+pub(super) fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::symlink_metadata(a), fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Whether two existing paths are the same directory entry (see the Unix version): compared by
+/// their canonical paths, which Windows returns in the stored spelling.
+#[cfg(not(unix))]
+pub(super) fn same_entry(a: &Path, b: &Path) -> bool {
+    match (dunce::canonicalize(a), dunce::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}

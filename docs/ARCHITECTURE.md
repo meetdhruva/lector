@@ -527,7 +527,21 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    `ShadowRepo::existing_folder`). The journal's check / force / redo apply unchanged, with one
    rule for content the shadow could not store: an undo overwrites or removes such a file only
    while it is exactly as the turn left it (in check and force mode alike; otherwise it refuses
-   and writes nothing), and the undo then says the file cannot be redone (`args.not_redoable`). In a
+   and writes nothing), and the undo then says the file cannot be redone (`args.not_redoable`).
+   A restore (`ShadowRepo::restore_paths`) restores every requested path to its recorded state
+   or fails as a whole naming the paths it cannot restore (not stored, now a directory or
+   special file, a parent now a file or link) before writing anything, for every snapshot kind;
+   files are staged next to their destinations and renamed into place last. An undo record
+   without paths is refused. For an open document the size an agent write is checked against is
+   the bytes the save will write (`DocHandle::encoded_len`: encoding, BOM, line endings).
+   Trimming for size never removes snapshots from the last day (`SIZE_TRIM_GRACE`), so another
+   session's running turn keeps its backups. Everything a turn records is keyed by the file's
+   identity as the file system resolves it (`AgentBackups::file_key`, `lector_fs::on_disk_relative`:
+   each existing component in its stored spelling, found by inode on Unix and through the
+   canonical path elsewhere), so `README.md` / `readme.md` or the NFC and NFD forms of a name are
+   one file with one first-touch backup on macOS and Windows, and a restore never renames a file;
+   a file the turn creates is re-keyed to its stored name after the write
+   (`AgentBackups::after_write`). In a
    repository the turn's changes are a `lector_git::Changeset::Snapshots` reviewable in the normal
    review tab; a folder without git has no review, status or history ("Review" says it needs a git
    repository), but its workspace registers the Activity log, `workspace::UndoLastOperation`, Undo

@@ -109,7 +109,7 @@ impl Fx {
         let mut ledger = backups.begin_turn("Before agent turn 1: test");
         for (rel, text) in writes {
             backups
-                .before_write(Some(&mut ledger), rel, text.len())
+                .before_write(Some(&mut ledger), rel, text.len() as u64)
                 .unwrap();
             self.write(rel, text);
         }
@@ -251,7 +251,7 @@ fn files_over_the_limit_are_not_backed_up_in_a_folder() {
     let backups = AgentBackups::new(&fx.core, &fx.project);
     let mut ledger = backups.begin_turn("t");
     let err = backups
-        .before_write(Some(&mut ledger), "a.txt", MAX_FOLDER_BACKUP as usize + 1)
+        .before_write(Some(&mut ledger), "a.txt", MAX_FOLDER_BACKUP + 1)
         .unwrap_err();
     assert!(err.contains("64 MiB"), "{err}");
     assert_eq!(ledger.touched().count(), 0);
@@ -352,7 +352,7 @@ fn every_write_in_a_folder_checks_the_size_limit() {
     let mut ledger = backups.begin_turn("t");
     backups.before_write(Some(&mut ledger), "a.txt", 3).unwrap();
     let err = backups
-        .before_write(Some(&mut ledger), "a.txt", MAX_FOLDER_BACKUP as usize + 1)
+        .before_write(Some(&mut ledger), "a.txt", MAX_FOLDER_BACKUP + 1)
         .unwrap_err();
     assert!(err.contains("64 MiB"), "{err}");
 }
@@ -403,7 +403,7 @@ fn a_turn_refuses_writes_beyond_its_backup_budget() {
     let fx = Fx::new(false);
     let backups = AgentBackups::new(&fx.core, &fx.project);
     let mut ledger = backups.begin_turn("t");
-    let each = 60 * 1024 * 1024;
+    let each: u64 = 60 * 1024 * 1024;
     let mut refused = None;
     for i in 0..20 {
         if let Err(err) = backups.before_write(Some(&mut ledger), &format!("f{i}.bin"), each) {
@@ -412,7 +412,7 @@ fn a_turn_refuses_writes_beyond_its_backup_budget() {
         }
     }
     let (i, err) = refused.expect("refused before 20 x 60 MiB");
-    assert_eq!(i as u64, TURN_BACKUP_BUDGET / each as u64, "{err}");
+    assert_eq!(i as u64, TURN_BACKUP_BUDGET / each, "{err}");
     assert!(err.contains("1024 MiB"), "{err}");
 }
 
@@ -527,4 +527,296 @@ fn force_refuses_to_remove_a_large_file_changed_since_the_turn() {
         "nothing restored: all or nothing"
     );
     assert!(!journal.get(id).unwrap().undone);
+}
+
+/// Codex finding: in a repository a turn deletes a file over the checkpoint's 256 MiB limit. The
+/// checkpoint did not store it, so the turn's undo cannot bring it back: it must fail naming the
+/// file, write nothing and leave the turn not undone, never succeed as a no-op.
+#[test]
+fn undoing_a_repository_turn_that_deleted_an_unstored_file_fails_naming_it() {
+    let fx = Fx::new(true);
+    sparse(
+        &fx.root.join("huge.bin"),
+        lector_git::shadow::WORKTREE_MAX_FILE + 1,
+    );
+    let backups = AgentBackups::new(&fx.core, &fx.project);
+    let ledger = backups.begin_turn("Before agent turn 1");
+    assert!(ledger.checkpoint.is_some());
+    fs::remove_file(fx.root.join("huge.bin")).unwrap();
+    fx.write("a.txt", "two\n");
+    let backup = backups.finish_turn(&ledger, "Agent turn 1").unwrap();
+    let paths: Vec<&str> = backup.changes.iter().map(|c| c.path()).collect();
+    assert_eq!(paths, ["a.txt", "huge.bin"]);
+    let journal = Journal::of(&fx.core).unwrap();
+    let id = journal
+        .append(entry(backups.workdir(), Vec::new(), backup.undo))
+        .unwrap();
+    match journal.undo(id, &fx.cx(), UndoMode::Check) {
+        Err(UndoError::Failed(why)) => assert!(why.contains("huge.bin"), "{why}"),
+        other => panic!("a no-op undo: {other:?}"),
+    }
+    assert!(!journal.get(id).unwrap().undone);
+    assert_eq!(fx.read("a.txt").unwrap(), "two\n", "all or nothing");
+}
+
+/// A restore record with no paths is not an undo: it is refused, never a successful no-op.
+#[test]
+fn an_undo_record_without_paths_is_refused() {
+    let fx = Fx::new(false);
+    let backups = AgentBackups::new(&fx.core, &fx.project);
+    let journal = Journal::of(&fx.core).unwrap();
+    let id = fx.turn(&backups, &journal, &[("a.txt", "agent\n")]);
+    let Some(UndoRecord::RestoreFiles { shadow, .. }) = journal.get(id).unwrap().undo else {
+        panic!("a turn record");
+    };
+    let empty = journal
+        .append(entry(
+            backups.workdir(),
+            Vec::new(),
+            Some(UndoRecord::RestoreFiles {
+                shadow,
+                paths: Vec::new(),
+                after: Default::default(),
+            }),
+        ))
+        .unwrap();
+    assert!(journal.undo(empty, &fx.cx(), UndoMode::Force).is_err());
+    assert!(!journal.get(empty).unwrap().undone);
+}
+
+/// Self-audit b/d: a touched file whose parent became a link during the turn keeps the turn
+/// undoable on record (never a silently dropped undo), its after-state lists every changed path
+/// (an empty map would turn the undo check off), and the undo refuses naming it, writing nothing.
+#[cfg(unix)]
+#[test]
+fn a_parent_replaced_by_a_link_keeps_the_turn_on_record_and_the_undo_refuses() {
+    let fx = Fx::new(false);
+    fx.write("d/x.txt", "x\n");
+    let outside = fx.root.parent().unwrap().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let backups = AgentBackups::new(&fx.core, &fx.project);
+    let mut ledger = backups.begin_turn("Before agent turn 1");
+    backups.before_write(Some(&mut ledger), "a.txt", 6).unwrap();
+    backups
+        .before_write(Some(&mut ledger), "d/x.txt", 6)
+        .unwrap();
+    fx.write("a.txt", "agent\n");
+    fx.write("d/x.txt", "agent\n");
+    fs::remove_dir_all(fx.root.join("d")).unwrap();
+    std::os::unix::fs::symlink(&outside, fx.root.join("d")).unwrap();
+    let backup = backups
+        .finish_turn(&ledger, "Agent turn 1")
+        .expect("the turn is on record");
+    match &backup.undo {
+        Some(UndoRecord::RestoreFiles { paths, after, .. }) => {
+            assert_eq!(paths.len(), 2);
+            assert_eq!(after.len(), 2, "{after:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let journal = Journal::of(&fx.core).unwrap();
+    let id = journal
+        .append(entry(backups.workdir(), Vec::new(), backup.undo))
+        .unwrap();
+    assert!(journal.undo(id, &fx.cx(), UndoMode::Force).is_err());
+    assert_eq!(fx.read("a.txt").unwrap(), "agent\n", "nothing restored");
+    assert!(!journal.get(id).unwrap().undone);
+}
+
+/// Self-audit b: an index record with no paths is refused like a file record without paths.
+#[test]
+fn an_index_undo_record_without_paths_is_refused() {
+    let fx = Fx::new(true);
+    let shadow = ShadowRepo::open(&fx.data, fx.project.repo().unwrap()).unwrap();
+    let snap = shadow.snapshot_index(&["a.txt"], "index").unwrap();
+    let journal = Journal::of(&fx.core).unwrap();
+    let workdir = fx.project.repo().unwrap().workdir().to_path_buf();
+    let id = journal
+        .append(entry(
+            &workdir,
+            Vec::new(),
+            Some(UndoRecord::RestoreIndex {
+                shadow: snap,
+                paths: Vec::new(),
+                after: Default::default(),
+            }),
+        ))
+        .unwrap();
+    assert!(journal.undo(id, &fx.cx(), UndoMode::Force).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// One file, one identity: keys by on-disk spelling (case-insensitive / normalising file systems).
+// ---------------------------------------------------------------------------------------------
+
+/// Case and NFC/NFD folding, as macOS and Windows compare names.
+fn fold(s: &str) -> String {
+    s.replace("e\u{301}", "\u{e9}").to_lowercase()
+}
+
+/// A resolver that behaves like a case-insensitive, normalisation-insensitive file system over
+/// the real directory: a name reaches the listed entry it folds to. With it, the folding logic
+/// runs on any platform; the test writes to the name the "file system" stores.
+struct FoldingNames;
+
+impl lector_fs::EntryNames for FoldingNames {
+    fn on_disk(&self, dir: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+        let wanted = fold(&name.to_string_lossy());
+        fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.file_name())
+            .find(|n| fold(&n.to_string_lossy()) == wanted)
+    }
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `a.txt` then `A.txt` in one turn on a folding file system: one file, one first-touch backup,
+/// and the undo restores the original bytes under the original name. The same for a file the
+/// turn creates (`New.txt`, stored by the file system as `new.txt`, the way HFS+ stores NFD) and
+/// for NFC then NFD spellings, in a folder and in a repository (git-ignored files).
+#[test]
+fn spellings_of_one_file_share_one_ledger_entry_with_a_folding_resolver() {
+    for git in [false, true] {
+        let fx = Fx::new(git);
+        if git {
+            fx.write(".gitignore", "*.env\n");
+        }
+        let ext = if git { "env" } else { "txt" };
+        fx.write(&format!("Readme.{ext}"), "original\n");
+        fx.write(&format!("caf\u{e9}.{ext}"), "nfc\n");
+        let backups =
+            AgentBackups::new(&fx.core, &fx.project).with_entry_names(Arc::new(FoldingNames));
+        let mut ledger = backups.begin_turn("Before agent turn 1");
+        // Writes as a folding file system would carry them out: to the stored name.
+        let write = |ledger: &mut lector_app::commands::agent_backup::TurnLedger, req: &str| {
+            backups.before_write(Some(ledger), req, 6).unwrap();
+            let key = backups.file_key(req);
+            fx.write(&key, &format!("{req}\n"));
+            backups.after_write(ledger);
+        };
+        write(&mut ledger, &format!("README.{ext}"));
+        write(&mut ledger, &format!("readme.{ext}"));
+        write(&mut ledger, &format!("cafe\u{301}.{ext}"));
+        write(&mut ledger, &format!("CAF\u{c9}.{ext}"));
+        // A new file the file system stores under another spelling than the one requested.
+        backups
+            .before_write(Some(&mut ledger), &format!("New.{ext}"), 6)
+            .unwrap();
+        fx.write(&format!("new.{ext}"), "created\n");
+        backups.after_write(&mut ledger);
+        write(&mut ledger, &format!("NEW.{ext}"));
+        let mut touched: Vec<&str> = ledger.touched().collect();
+        touched.sort();
+        assert_eq!(
+            touched,
+            [
+                format!("Readme.{ext}"),
+                format!("caf\u{e9}.{ext}"),
+                format!("new.{ext}")
+            ],
+            "git={git}: one entry per file, in its on-disk spelling"
+        );
+        let backup = backups.finish_turn(&ledger, "Agent turn 1").unwrap();
+        let journal = Journal::of(&fx.core).unwrap();
+        let id = journal
+            .append(entry(backups.workdir(), Vec::new(), backup.undo))
+            .unwrap();
+        journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+        assert_eq!(fx.read(&format!("Readme.{ext}")).unwrap(), "original\n");
+        assert_eq!(fx.read(&format!("caf\u{e9}.{ext}")).unwrap(), "nfc\n");
+        assert!(fx.read(&format!("new.{ext}")).is_none(), "git={git}");
+        let names = names_in(&fx.root);
+        assert!(
+            names.contains(&format!("Readme.{ext}")),
+            "git={git}: {names:?}"
+        );
+        assert!(
+            !names.contains(&format!("README.{ext}")),
+            "never renamed: {names:?}"
+        );
+    }
+}
+
+/// How the temp directory's file system compares names, probed at run time.
+fn probe_folding(dir: &Path) -> (bool, bool) {
+    let probe = dir.join("probe-case");
+    fs::write(&probe, "p").unwrap();
+    let case = dir.join("PROBE-CASE").exists();
+    fs::remove_file(&probe).unwrap();
+    let nfc = dir.join("probe-caf\u{e9}");
+    fs::write(&nfc, "p").unwrap();
+    let normalising = dir.join("probe-cafe\u{301}").exists();
+    fs::remove_file(&nfc).unwrap();
+    (case, normalising)
+}
+
+/// The real file system, every platform: two spellings of one file in a turn (`a.txt` then
+/// `A.txt`, NFC then NFD, and a file the turn creates as `New.txt` then writes as `new.txt`). On
+/// a case-insensitive / normalising file system that is one file with one first-touch backup and
+/// the undo restores the original bytes under the original name; on a case-sensitive one they
+/// are two files, each undone on its own. Prints which branch ran.
+#[test]
+fn spellings_of_one_file_on_the_real_file_system() {
+    for git in [false, true] {
+        let fx = Fx::new(git);
+        let (case, normalising) = probe_folding(&fx.root);
+        println!("git={git}: case-insensitive={case} normalising={normalising}");
+        if git {
+            fx.write(".gitignore", "*.env\n");
+        }
+        let ext = if git { "env" } else { "txt" };
+        let a = format!("a.{ext}");
+        let nfc = format!("caf\u{e9}.{ext}");
+        fx.write(&a, "original\n");
+        fx.write(&nfc, "nfc\n");
+        let backups = AgentBackups::new(&fx.core, &fx.project);
+        let mut ledger = backups.begin_turn("Before agent turn 1");
+        // Each write as a program would do it: to the spelling it was asked for.
+        for req in [
+            a.clone(),
+            format!("A.{ext}"),
+            nfc.clone(),
+            format!("cafe\u{301}.{ext}"),
+            format!("New.{ext}"),
+            format!("new.{ext}"),
+        ] {
+            backups.before_write(Some(&mut ledger), &req, 6).unwrap();
+            fx.write(&req, &format!("{req}\n"));
+            backups.after_write(&mut ledger);
+        }
+        let touched: Vec<String> = ledger.touched().map(str::to_owned).collect();
+        let expected = (if case { 2 } else { 4 }) + if normalising { 1 } else { 2 };
+        assert_eq!(touched.len(), expected, "git={git}: {touched:?}");
+        let backup = backups.finish_turn(&ledger, "Agent turn 1").unwrap();
+        let journal = Journal::of(&fx.core).unwrap();
+        let id = journal
+            .append(entry(backups.workdir(), Vec::new(), backup.undo))
+            .unwrap();
+        journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+        assert_eq!(fx.read(&a).unwrap(), "original\n", "git={git}");
+        assert_eq!(fx.read(&nfc).unwrap(), "nfc\n", "git={git}");
+        let names = names_in(&fx.root);
+        assert!(names.contains(&a), "the original name: {names:?}");
+        assert!(!names.contains(&format!("A.{ext}")), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&format!("new.{ext}"))),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&format!("cafe\u{301}.{ext}")) || normalising,
+            "the NFD file the turn created is gone: {names:?}"
+        );
+    }
 }
