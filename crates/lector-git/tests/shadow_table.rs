@@ -503,3 +503,136 @@ fn require_ci_folding(dir: &Path, case: bool, normalising: Option<bool>) {
         }
     }
 }
+
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".git")
+        .collect();
+    names.sort();
+    names
+}
+
+/// The Unicode-normalisation variant: `café.txt` recorded in NFC, its entry renamed to the NFD
+/// form. On a normalising file system (APFS keeps the form as written) the restore gives the
+/// entry the recorded NFC name back; where the file system cannot store it (HFS+ always stores
+/// NFD) the entry keeps resolving to the restored file and that is accepted; where names are
+/// not normalised (Linux, NTFS) the two forms are two files and the NFD one is left alone.
+#[test]
+fn a_normalisation_rename_is_restored_with_the_recorded_form() {
+    std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    let tmp = tempfile::tempdir().unwrap();
+    let base = dunce::canonicalize(tmp.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir_all(&root).unwrap();
+    let (nfc, nfd) = ("caf\u{e9}.txt", "cafe\u{301}.txt");
+    fs::write(root.join(nfc), "p").unwrap();
+    let normalising = root.join(nfd).exists();
+    println!("normalising file system: {normalising}");
+    if std::env::var_os("CI").is_some() && cfg!(target_os = "macos") {
+        assert!(
+            normalising,
+            "CI on macOS: {} does not fold normalisation",
+            root.display()
+        );
+    }
+    fs::write(root.join(nfc), "original\n").unwrap();
+    let shadow = ShadowRepo::open_folder(&base.join("data"), &root).unwrap();
+    let before = shadow
+        .snapshot_files(&[nfc], FOLDER_MAX_FILE, Oversize::Refuse, "before")
+        .unwrap();
+    fs::rename(root.join(nfc), root.join(nfd)).unwrap();
+    fs::write(root.join(nfd), "agent\n").unwrap();
+    let renamed = listing(&root);
+    let report = shadow.restore_paths_reporting(&before, &[nfc]).unwrap();
+    let after = listing(&root);
+    let msg = format!(
+        "on {}: after the rename {renamed:?}, after the restore {after:?}, report {report:?}",
+        std::env::consts::OS
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(nfc)).unwrap(),
+        "original\n",
+        "{msg}"
+    );
+    assert!(report.unrenamed.is_empty(), "{msg}");
+    if normalising {
+        // APFS: the recorded form; HFS+ cannot store NFC, so NFD there is accepted.
+        assert!(after == [nfc] || after == [nfd], "{msg}");
+        if cfg!(target_os = "macos") && std::env::var_os("CI").is_some() {
+            assert_eq!(after, [nfc], "APFS keeps the form written: {msg}");
+        }
+    } else {
+        let mut both = vec![nfc.to_owned(), nfd.to_owned()];
+        both.sort();
+        assert_eq!(after, both, "two files: {msg}");
+        assert_eq!(
+            fs::read_to_string(root.join(nfd)).unwrap(),
+            "agent\n",
+            "{msg}"
+        );
+    }
+}
+
+/// A parent directory whose case changed (`Src/a.txt` recorded, `src/` on disk): the restore
+/// puts the bytes back through the directory as it is now and does not re-spell directories
+/// (only the final component gets the recorded name). On a case-sensitive file system `Src` and
+/// `src` are two directories and the restore recreates `Src/a.txt`.
+#[test]
+fn a_restore_does_not_re_spell_parent_directories() {
+    std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    let tmp = tempfile::tempdir().unwrap();
+    let base = dunce::canonicalize(tmp.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir_all(root.join("Src")).unwrap();
+    fs::write(root.join("Src/a.txt"), "original\n").unwrap();
+    let insensitive = root.join("SRC/A.TXT").exists();
+    println!("case-insensitive file system: {insensitive}");
+    require_ci_folding(&root, insensitive, None);
+    let shadow = ShadowRepo::open_folder(&base.join("data"), &root).unwrap();
+    let before = shadow
+        .snapshot_files(&["Src/a.txt"], FOLDER_MAX_FILE, Oversize::Refuse, "before")
+        .unwrap();
+    fs::rename(root.join("Src"), root.join("src")).unwrap();
+    fs::rename(root.join("src/a.txt"), root.join("src/A.txt")).unwrap();
+    fs::write(root.join("src/A.txt"), "agent\n").unwrap();
+    let renamed = format!("{:?} / {:?}", listing(&root), listing(&root.join("src")));
+    let report = shadow
+        .restore_paths_reporting(&before, &["Src/a.txt"])
+        .unwrap();
+    let msg = format!(
+        "on {}: after the rename {renamed}, after the restore {:?} / src {:?}, report {report:?}",
+        std::env::consts::OS,
+        listing(&root),
+        listing(&root.join("src"))
+    );
+    assert!(report.unrenamed.is_empty(), "{msg}");
+    if insensitive {
+        assert_eq!(
+            listing(&root),
+            ["src"],
+            "the directory keeps its spelling: {msg}"
+        );
+        assert_eq!(
+            listing(&root.join("src")),
+            ["a.txt"],
+            "the file gets its own: {msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/a.txt")).unwrap(),
+            "original\n"
+        );
+    } else {
+        assert_eq!(listing(&root), ["Src", "src"], "{msg}");
+        assert_eq!(
+            fs::read_to_string(root.join("Src/a.txt")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/A.txt")).unwrap(),
+            "agent\n"
+        );
+    }
+}

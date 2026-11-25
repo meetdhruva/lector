@@ -199,6 +199,14 @@ pub struct PruneOptions {
     pub max_bytes: Option<u64>,
 }
 
+/// What [`ShadowRepo::restore_paths_reporting`] restored only in part.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Restored files whose directory entry keeps another spelling than the recorded one,
+    /// because renaming it failed: (spelling on disk, recorded path).
+    pub unrenamed: Vec<(String, String)>,
+}
+
 /// Outcome of [`ShadowRepo::prune_with`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PruneReport {
@@ -841,131 +849,32 @@ impl ShadowRepo {
     /// or a link. The files are then staged next to their destinations and renamed into place,
     /// so a failure while reading or writing data changes nothing; only a failing rename or
     /// delete (the last step) can leave the restore partly done, and the error says so.
+    ///
+    /// **Spelling.** A restored file gets its recorded name, also on a case-insensitive or
+    /// normalising file system where the destination already exists under another spelling
+    /// (`A.txt` on disk, `a.txt` recorded; NFD on disk, NFC recorded): APFS keeps the existing
+    /// entry's spelling when a file is renamed onto it, so after the staged file is in place
+    /// (the content is restored, never missing) the entry is renamed to the recorded spelling,
+    /// a metadata-only change. When the file system will not store that spelling (HFS+ stores
+    /// every name in NFD) the entry still resolves to the restored file and that is accepted. If
+    /// that rename fails, the content is restored but the name is not: this function then fails
+    /// naming both spellings, and [`ShadowRepo::restore_paths_reporting`] returns it in its
+    /// report instead. Only the final component is re-spelled; parent directories keep the
+    /// spelling they have on disk.
     pub fn restore_paths(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()> {
-        let manifest = self.manifest(snap)?;
-        if manifest.kind == SnapshotKind::Index {
-            return Err(Error::Parse(
-                "this snapshot recorded the index, not files; use restore_index".into(),
-            ));
+        let report = self.restore_paths_reporting(snap, paths)?;
+        if report.unrenamed.is_empty() {
+            return Ok(());
         }
-        let files = self.tree_files(snap)?;
-        let full = manifest.kind == SnapshotKind::Worktree;
-
-        // Plan first: nothing is written when any requested path is unusable.
-        let mut writes: Vec<(String, String, Oid)> = Vec::new(); // (rel, mode, oid)
-        let mut deletes: Vec<String> = Vec::new();
-        let mut not_backed_up: Vec<String> = Vec::new();
-        let mut blocked: Vec<String> = Vec::new();
-        for path in paths {
-            let rel = check_rel(path)?;
-            if self.no_symlink_parents(&rel).is_err() {
-                blocked.push(format!("{rel} is now reached through a link"));
-                continue;
-            }
-            let mut found = false;
-            for (name, (mode, oid)) in &files {
-                if is_within(name, &rel) {
-                    found = true;
-                    writes.push((name.clone(), mode.clone(), *oid));
-                }
-            }
-            if manifest.skipped.iter().any(|s| is_within(s, &rel)) {
-                not_backed_up.push(rel.clone());
-                continue;
-            }
-            if manifest.absent.iter().any(|a| a == &rel) || (!found && full) {
-                found = true;
-                deletes.push(rel.clone());
-            }
-            if !found {
-                return Err(Error::Parse(format!(
-                    "{rel:?} is not part of this snapshot"
-                )));
-            }
-        }
-        if !not_backed_up.is_empty() {
-            return Err(Error::Io(io::Error::other(format!(
-                "{} was not backed up (too large, or not a regular file), so it cannot be restored from this backup; nothing was restored",
-                not_backed_up.join(", ")
-            ))));
-        }
-        // A path restored from a file and deleted at the same time can't be both.
-        writes.sort();
-        writes.dedup();
-        deletes.sort();
-        deletes.dedup();
-        for rel in writes.iter().map(|(r, ..)| r).chain(&deletes) {
-            if self.no_symlink_parents(rel).is_err() {
-                blocked.push(format!("{rel} is now reached through a link"));
-            } else if let Some(why) = self.blocks_restore(rel) {
-                blocked.push(why);
-            }
-        }
-        if !blocked.is_empty() {
-            blocked.sort();
-            blocked.dedup();
-            return Err(Error::Io(io::Error::other(format!(
-                "{}; move it away to restore; nothing was restored",
-                blocked.join("; ")
-            ))));
-        }
-
-        // Stage every file, then put them in place.
-        let oids: Vec<Oid> = writes.iter().map(|(_, _, o)| *o).collect();
-        let mut staged: Vec<(PathBuf, String)> = Vec::with_capacity(writes.len());
-        let staging = self.cat_blobs(&oids, |i, reader, size| {
-            let (rel, mode, _) = &writes[i];
-            staged.push((self.stage_restored(rel, mode, reader, size)?, rel.clone()));
-            Ok(())
-        });
-        if staging.is_err() || staged.len() != writes.len() {
-            for (tmp, rel) in &staged {
-                let _ = fs::remove_file(tmp);
-                self.remove_empty_parents(&self.workdir.join(rel));
-            }
-            return staging.and(Err(Error::Git(
-                "the backup's contents could not be read; nothing was restored".into(),
-            )));
-        }
-        let mut done = 0usize;
-        let partly = |done: usize, err: Error| {
-            if done == 0 {
-                err
-            } else {
-                Error::Io(io::Error::other(format!(
-                    "the restore stopped after {done} of {} paths ({err}); the rest is unchanged",
-                    writes.len() + deletes.len()
-                )))
-            }
-        };
-        for (i, (tmp, rel)) in staged.iter().enumerate() {
-            if let Err(err) = self.commit_restored(tmp, rel) {
-                for (tmp, _) in &staged[i..] {
-                    let _ = fs::remove_file(tmp);
-                }
-                return Err(partly(done, err));
-            }
-            done += 1;
-        }
-        for rel in &deletes {
-            let abs = self.workdir.join(rel);
-            // On a case-insensitive or normalising file system `A.txt` (recorded absent) can be
-            // the file just restored as `a.txt`: removing it would undo the restore.
-            if writes
-                .iter()
-                .any(|(w, ..)| util::same_entry(&abs, &self.workdir.join(w)))
-            {
-                done += 1;
-                continue;
-            }
-            match fs::remove_file(&abs) {
-                Ok(()) => self.remove_empty_parents(&abs),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(partly(done, err.into())),
-            }
-            done += 1;
-        }
-        Ok(())
+        let names: Vec<String> = report
+            .unrenamed
+            .iter()
+            .map(|(now, recorded)| format!("{now} (recorded as {recorded})"))
+            .collect();
+        Err(Error::Io(io::Error::other(format!(
+            "the files were restored, but the name of {} could not be changed back",
+            names.join(", ")
+        ))))
     }
 
     /// Puts the recorded index entries of `paths` back (`git update-index --index-info`

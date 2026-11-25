@@ -224,3 +224,36 @@ pub(super) fn same_entry(a: &Path, b: &Path) -> bool {
         _ => false,
     }
 }
+
+/// The name, as stored in `dir`, of the entry that `name` reaches there (`None` when it reaches
+/// nothing): `name` itself when `dir` lists it, else the one entry with the same inode (a case or
+/// normalisation variant). With several such entries (hard links) `name` is returned: no other
+/// link's name is ever taken for it.
+#[cfg(unix)]
+pub(super) fn stored_name(dir: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    use std::os::unix::fs::{DirEntryExt, MetadataExt};
+    let ino = fs::symlink_metadata(dir.join(name)).ok()?.ino();
+    let mut same = Vec::new();
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        if entry.file_name() == name {
+            return Some(entry.file_name());
+        }
+        if entry.ino() == ino {
+            same.push(entry.file_name());
+        }
+    }
+    match same.len() {
+        1 => same.pop(),
+        _ => Some(name.to_os_string()),
+    }
+}
+
+/// The stored name of the entry `name` reaches in `dir` (see the Unix version): the canonical
+/// path's file name, which Windows returns as stored.
+#[cfg(not(unix))]
+pub(super) fn stored_name(dir: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    dunce::canonicalize(dir.join(name))
+        .ok()?
+        .file_name()
+        .map(|n| n.to_os_string())
+}

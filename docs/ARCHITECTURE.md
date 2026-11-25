@@ -555,7 +555,8 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    every requested path or fails as a whole, naming what it cannot restore, before writing
    anything. Sizes are checked as the bytes a save will write (`DocHandle::encoded_len`), and
    everything a turn records is keyed by the file as the file system resolves it
-   (`AgentBackups::file_key`), so two spellings of one name on macOS or Windows are one file.
+   (`AgentBackups::file_key`), so two spellings of one name on macOS or Windows are one file, and a restore gives the file
+   its recorded spelling (a name it could not change back is reported, not hidden).
    The state table and the limits are in the rustdoc of `ShadowRepo::changes_between` and
    `lector_app::commands::agent_backup`. In a repository the turn's changes are a
    `lector_git::Changeset::Snapshots` reviewable in the normal review tab; a folder without git
