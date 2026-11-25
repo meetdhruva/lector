@@ -65,6 +65,51 @@ pub enum UndoError {
     Failed(String),
 }
 
+/// What an undo completed only in part, carried into the undo's own entry (summary and args).
+#[derive(Default)]
+struct UndoNotes {
+    /// Files restored whose present state could not be backed up first: no redo for them.
+    not_redoable: Vec<String>,
+    /// Files restored whose name keeps another spelling than the recorded one (the rename to it
+    /// failed): (spelling on disk, recorded path).
+    unrenamed: Vec<(String, String)>,
+}
+
+impl UndoNotes {
+    fn summary(&self, of: &str) -> String {
+        let mut out = format!("Undid: {of}");
+        if !self.not_redoable.is_empty() {
+            out.push_str(&format!(
+                " ({} cannot be redone: too large for Lector to back up)",
+                describe_paths(&self.not_redoable)
+            ));
+        }
+        if !self.unrenamed.is_empty() {
+            let names: Vec<String> = self
+                .unrenamed
+                .iter()
+                .map(|(now, recorded)| format!("{now} should be {recorded}"))
+                .collect();
+            out.push_str(&format!(
+                " (restored, but the name could not be changed back: {})",
+                names.join(", ")
+            ));
+        }
+        out
+    }
+
+    fn args(&self, id: u64) -> serde_json::Value {
+        let mut args = serde_json::json!({ "entry": id });
+        if !self.not_redoable.is_empty() {
+            args["not_redoable"] = serde_json::json!(self.not_redoable);
+        }
+        if !self.unrenamed.is_empty() {
+            args["unrenamed"] = serde_json::json!(self.unrenamed);
+        }
+        args
+    }
+}
+
 fn describe_paths(paths: &[String]) -> String {
     match paths {
         [] => "Files".to_owned(),
@@ -167,7 +212,7 @@ impl Journal {
         }
         let mut redo: Vec<UndoRecord> = Vec::new();
         let mut invoked: Vec<u64> = Vec::new();
-        let mut not_redoable: Vec<String> = Vec::new();
+        let mut notes = UndoNotes::default();
         self.apply(
             &entry,
             &record,
@@ -175,7 +220,7 @@ impl Journal {
             cx,
             &mut redo,
             &mut invoked,
-            &mut not_redoable,
+            &mut notes,
         )?;
 
         // The entry for the undo itself: the inverse command's own entry when the record was a
@@ -206,24 +251,12 @@ impl Journal {
                     id: 0,
                     time: SystemTime::now(),
                     command: "journal.undo".into(),
-                    summary: if not_redoable.is_empty() {
-                        format!("Undid: {}", entry.summary)
-                    } else {
-                        format!(
-                            "Undid: {} ({} cannot be redone: too large for Lector to back up)",
-                            entry.summary,
-                            describe_paths(&not_redoable)
-                        )
-                    },
+                    summary: notes.summary(&entry.summary),
                     repo: entry.repo.clone(),
                     paths: entry.paths.clone(),
                     undo,
                     undone: false,
-                    args: if not_redoable.is_empty() {
-                        serde_json::json!({ "entry": id })
-                    } else {
-                        serde_json::json!({ "entry": id, "not_redoable": not_redoable })
-                    },
+                    args: notes.args(id),
                     source: cx.source,
                     undo_of: Some(id),
                     undone_by: None,
@@ -348,7 +381,7 @@ impl Journal {
         cx: &CommandContext,
         redo: &mut Vec<UndoRecord>,
         invoked: &mut Vec<u64>,
-        not_redoable: &mut Vec<String>,
+        not_redoable: &mut UndoNotes,
     ) -> Result<(), UndoError> {
         let fail = |e: lector_git::Error| UndoError::Failed(e.to_string());
         match record {
@@ -385,9 +418,12 @@ impl Journal {
                             describe_paths(&changed)
                         )));
                     }
-                    not_redoable.extend(unsaved);
+                    not_redoable.not_redoable.extend(unsaved);
                 }
-                shadow.restore_paths(snap, &refs).map_err(fail)?;
+                // The contents are restored when this succeeds; a name the file system kept in
+                // another spelling is reported with the undo, not hidden.
+                let report = shadow.restore_paths_reporting(snap, &refs).map_err(fail)?;
+                not_redoable.unrenamed.extend(report.unrenamed);
                 let after = shadow.fingerprints(&refs).map_err(fail)?;
                 redo.push(UndoRecord::RestoreFiles {
                     shadow: backup,

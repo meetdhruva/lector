@@ -10,7 +10,9 @@ use crate::error::{Error, Result};
 
 use super::command::exec;
 use super::util::{apply_permissions, make_symlink};
-use super::ShadowRepo;
+use super::util::{check_rel, is_within};
+use super::{RestoreReport, ShadowRepo, ShadowSnapshot, SnapshotKind};
+use crate::Oid;
 
 impl ShadowRepo {
     pub(super) fn remove_empty_parents(&self, file: &Path) {
@@ -81,6 +83,37 @@ impl ShadowRepo {
         Ok(())
     }
 
+    /// Gives the restored file at `rel` its recorded final-component spelling when its entry is
+    /// stored under another one (a case-insensitive or normalising file system kept the old
+    /// entry's name when the staged file was renamed onto it). A metadata-only rename of the same
+    /// entry, so the file is never missing. `Ok` also when the file system will not store the
+    /// recorded spelling (the entry still resolves to the file afterwards); `Err(spelling on
+    /// disk)` when the rename failed or the entry no longer resolves.
+    pub(super) fn respell(&self, rel: &str) -> std::result::Result<(), String> {
+        let abs = self.workdir.join(rel);
+        let (Some(dir), Some(name)) = (abs.parent(), abs.file_name()) else {
+            return Ok(());
+        };
+        let Some(stored) = super::util::stored_name(dir, name) else {
+            return Ok(());
+        };
+        if stored.as_os_str() == name {
+            return Ok(());
+        }
+        let shown = || match rel.rsplit_once('/') {
+            Some((parent, _)) => format!("{parent}/{}", stored.to_string_lossy()),
+            None => stored.to_string_lossy().into_owned(),
+        };
+        if fs::rename(dir.join(&stored), &abs).is_err() {
+            return Err(shown());
+        }
+        match super::util::stored_name(dir, name) {
+            // Renamed, or the file system keeps its own form of the name (HFS+ and NFD).
+            Some(_) => Ok(()),
+            None => Err(shown()),
+        }
+    }
+
     /// What is at `rel` now that a restore must not replace or remove: a directory, a FIFO,
     /// socket or device, or a parent component that is a file (so nothing can be created below
     /// it). `None` when the path is absent, a regular file or a link.
@@ -133,5 +166,146 @@ impl ShadowRepo {
             }
         }
         Ok(out)
+    }
+}
+
+impl ShadowRepo {
+    /// [`ShadowRepo::restore_paths`], returning what it could not complete beyond the contents:
+    /// the restored files whose entry keeps another spelling than the recorded one. Every error
+    /// is a restore that failed as described there.
+    pub fn restore_paths_reporting(
+        &self,
+        snap: &ShadowSnapshot,
+        paths: &[&str],
+    ) -> Result<RestoreReport> {
+        let manifest = self.manifest(snap)?;
+        if manifest.kind == SnapshotKind::Index {
+            return Err(Error::Parse(
+                "this snapshot recorded the index, not files; use restore_index".into(),
+            ));
+        }
+        let files = self.tree_files(snap)?;
+        let full = manifest.kind == SnapshotKind::Worktree;
+
+        // Plan first: nothing is written when any requested path is unusable.
+        let mut writes: Vec<(String, String, Oid)> = Vec::new(); // (rel, mode, oid)
+        let mut deletes: Vec<String> = Vec::new();
+        let mut not_backed_up: Vec<String> = Vec::new();
+        let mut blocked: Vec<String> = Vec::new();
+        for path in paths {
+            let rel = check_rel(path)?;
+            if self.no_symlink_parents(&rel).is_err() {
+                blocked.push(format!("{rel} is now reached through a link"));
+                continue;
+            }
+            let mut found = false;
+            for (name, (mode, oid)) in &files {
+                if is_within(name, &rel) {
+                    found = true;
+                    writes.push((name.clone(), mode.clone(), *oid));
+                }
+            }
+            if manifest.skipped.iter().any(|s| is_within(s, &rel)) {
+                not_backed_up.push(rel.clone());
+                continue;
+            }
+            if manifest.absent.iter().any(|a| a == &rel) || (!found && full) {
+                found = true;
+                deletes.push(rel.clone());
+            }
+            if !found {
+                return Err(Error::Parse(format!(
+                    "{rel:?} is not part of this snapshot"
+                )));
+            }
+        }
+        if !not_backed_up.is_empty() {
+            return Err(Error::Io(io::Error::other(format!(
+                "{} was not backed up (too large, or not a regular file), so it cannot be restored from this backup; nothing was restored",
+                not_backed_up.join(", ")
+            ))));
+        }
+        // A path restored from a file and deleted at the same time can't be both.
+        writes.sort();
+        writes.dedup();
+        deletes.sort();
+        deletes.dedup();
+        for rel in writes.iter().map(|(r, ..)| r).chain(&deletes) {
+            if self.no_symlink_parents(rel).is_err() {
+                blocked.push(format!("{rel} is now reached through a link"));
+            } else if let Some(why) = self.blocks_restore(rel) {
+                blocked.push(why);
+            }
+        }
+        if !blocked.is_empty() {
+            blocked.sort();
+            blocked.dedup();
+            return Err(Error::Io(io::Error::other(format!(
+                "{}; move it away to restore; nothing was restored",
+                blocked.join("; ")
+            ))));
+        }
+
+        // Stage every file, then put them in place.
+        let oids: Vec<Oid> = writes.iter().map(|(_, _, o)| *o).collect();
+        let mut staged: Vec<(PathBuf, String)> = Vec::with_capacity(writes.len());
+        let staging = self.cat_blobs(&oids, |i, reader, size| {
+            let (rel, mode, _) = &writes[i];
+            staged.push((self.stage_restored(rel, mode, reader, size)?, rel.clone()));
+            Ok(())
+        });
+        if staging.is_err() || staged.len() != writes.len() {
+            for (tmp, rel) in &staged {
+                let _ = fs::remove_file(tmp);
+                self.remove_empty_parents(&self.workdir.join(rel));
+            }
+            return staging.and(Err(Error::Git(
+                "the backup's contents could not be read; nothing was restored".into(),
+            )));
+        }
+        let mut done = 0usize;
+        let partly = |done: usize, err: Error| {
+            if done == 0 {
+                err
+            } else {
+                Error::Io(io::Error::other(format!(
+                    "the restore stopped after {done} of {} paths ({err}); the rest is unchanged",
+                    writes.len() + deletes.len()
+                )))
+            }
+        };
+        let mut report = RestoreReport::default();
+        for (i, (tmp, rel)) in staged.iter().enumerate() {
+            if let Err(err) = self.commit_restored(tmp, rel) {
+                for (tmp, _) in &staged[i..] {
+                    let _ = fs::remove_file(tmp);
+                }
+                return Err(partly(done, err));
+            }
+            done += 1;
+            // The content is in place; now the recorded spelling of its name.
+            if let Err(now) = self.respell(rel) {
+                report.unrenamed.push((now, rel.clone()));
+            }
+        }
+        for rel in &deletes {
+            let abs = self.workdir.join(rel);
+            // On a case-insensitive or normalising file system `A.txt` (recorded absent) can be
+            // the file just restored as `a.txt`: removing it would undo the restore.
+            if writes
+                .iter()
+                .any(|(w, ..)| super::util::same_entry(&abs, &self.workdir.join(w)))
+            {
+                done += 1;
+                continue;
+            }
+            match fs::remove_file(&abs) {
+                Ok(()) => self.remove_empty_parents(&abs),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(partly(done, err.into())),
+            }
+            done += 1;
+        }
+        Ok(report)
     }
 }

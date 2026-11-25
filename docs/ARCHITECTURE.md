@@ -531,7 +531,11 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    A restore (`ShadowRepo::restore_paths`) restores every requested path to its recorded state
    or fails as a whole naming the paths it cannot restore (not stored, now a directory or
    special file, a parent now a file or link) before writing anything, for every snapshot kind;
-   files are staged next to their destinations and renamed into place last. An undo record
+   files are staged next to their destinations and renamed into place last; a restored file then
+   gets its recorded name when the file system kept the old entry's spelling (APFS on a case or
+   normalisation variant: a metadata-only rename of the same entry; a spelling the file system
+   cannot store, such as NFC on HFS+, is accepted; a failed rename is reported with the undo,
+   `args.unrenamed`). Parent directories are not re-spelled. An undo record
    without paths is refused. For an open document the size an agent write is checked against is
    the bytes the save will write (`DocHandle::encoded_len`: encoding, BOM, line endings).
    Trimming for size never removes snapshots from the last day (`SIZE_TRIM_GRACE`), so another
