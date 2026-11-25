@@ -55,6 +55,38 @@ fn run_scenario(extra_files: usize, wrapper_dir: &Path) -> (Vec<String>, PathBuf
     (lines, fx.root.clone())
 }
 
+/// One turn whose only write names a big directory; returns the logged git invocations.
+fn run_directory_scenario(wrapper_dir: &Path) -> (Vec<String>, PathBuf) {
+    let fx = need_or_panic(Fx::build(
+        |base| {
+            for i in 0..20_000 {
+                let dir = base.join(format!("proj/many/d{}", i / 500));
+                if i % 500 == 0 {
+                    fs::create_dir_all(&dir).unwrap();
+                }
+                fs::write(dir.join(format!("f{i}.txt")), "x").unwrap();
+            }
+            fs::File::create(base.join("proj/many/big.iso"))
+                .unwrap()
+                .set_len(65 * 1024 * 1024)
+                .unwrap();
+        },
+        "proj",
+    ));
+    let log = wrapper_dir.join("log-directory");
+    std::env::set_var("LECTOR_TEST_GIT_LOG", &log);
+    let s = fx.start();
+    let t = fx.run(&s, "write many oops\n");
+    assert!(t.answer().contains("not a regular file"), "{}", t.answer());
+    s.stop();
+    let lines = fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (lines, fx.root.clone())
+}
+
 fn need_or_panic(fx: Option<Fx>) -> Fx {
     fx.expect("python3 is needed for this test")
 }
@@ -81,6 +113,13 @@ fn folder_backups_cost_the_same_in_a_folder_with_20000_files() {
     let mut paths = vec![wrapper.path().to_path_buf()];
     paths.extend(std::env::split_paths(&old_path));
     std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+
+    // A write naming a directory (20,000 files and a 65 MiB file below it) runs no git at all.
+    let (refused, _) = run_directory_scenario(wrapper.path());
+    assert!(
+        refused.is_empty(),
+        "git ran for a refused write: {refused:#?}"
+    );
 
     let (empty, _) = run_scenario(0, wrapper.path());
     let (many, root) = run_scenario(20_000, wrapper.path());

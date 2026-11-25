@@ -3,11 +3,11 @@
 //! byte-exact, and never running git in (or above) the folder in a way that reads its settings.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
 
-use lector_git::shadow::SnapshotKind;
+use lector_git::shadow::{Oversize, SnapshotEntry, SnapshotKind, FOLDER_MAX_FILE};
 use lector_git::ShadowRepo;
 
 fn hermetic() {
@@ -63,7 +63,7 @@ impl Fx {
 }
 
 #[cfg(unix)]
-fn mode(path: &Path) -> u32 {
+fn mode(path: &std::path::Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
 }
@@ -151,7 +151,7 @@ fn folder_snapshots_restore_bytes_modes_links_and_absence() {
         assert_eq!(mode(&fx.folder.join("run.sh")) & 0o111, 0o111);
         assert_eq!(
             fs::read_link(fx.folder.join("link")).unwrap(),
-            Path::new("/etc/hostname")
+            std::path::Path::new("/etc/hostname")
         );
     }
     assert_ne!(shadow.fingerprints(&paths).unwrap(), before);
@@ -300,4 +300,123 @@ fn orphaned_shadows_are_pruned_by_age_and_live_ones_are_kept() {
     assert!(!shadow.git_dir().exists());
     assert!(live_shadow.git_dir().exists());
     assert!(ShadowRepo::prune_orphans(&fx.data.join("missing"), Duration::ZERO).is_ok());
+}
+
+/// A sparse file of `len` bytes (no data blocks: creating it reads and writes nothing).
+fn sparse(path: &std::path::Path, len: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
+/// Size of the shadow's object store: what a snapshot copied.
+fn stored(shadow: &ShadowRepo) -> u64 {
+    fn walk(dir: &std::path::Path) -> u64 {
+        fs::read_dir(dir)
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .map(|e| match e.metadata() {
+                        Ok(m) if m.is_dir() => walk(&e.path()),
+                        Ok(m) => m.len(),
+                        Err(_) => 0,
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+    walk(&shadow.git_dir().join("objects"))
+}
+
+/// Path-scoped means files: a folder shadow never walks a directory it is handed (it may be
+/// `Documents` or a home directory), and never opens a FIFO, socket or device.
+#[test]
+fn folder_snapshots_refuse_directories_and_special_files() {
+    let fx = Fx::new();
+    sparse(&fx.folder.join("Documents/big.iso"), 65 * 1024 * 1024);
+    fx.write("Documents/note.txt", "n");
+    let shadow = fx.shadow();
+    let before = stored(&shadow);
+    let err = shadow
+        .snapshot_paths(&["Documents"], "dir")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a regular file"), "{err}");
+    assert!(shadow
+        .snapshot_files(&["Documents"], u64::MAX, Oversize::Refuse, "dir")
+        .is_err());
+    #[cfg(unix)]
+    {
+        let fifo = fx.folder.join("pipe");
+        let ok = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            assert!(shadow.snapshot_paths(&["pipe"], "fifo").is_err());
+        }
+    }
+    assert!(shadow.snapshots().unwrap().is_empty(), "nothing recorded");
+    assert!(stored(&shadow) <= before, "nothing copied");
+    // The same holds for any shadow through `snapshot_files` (the repository case uses it for
+    // git-ignored files): a directory is refused, or with `SkipAll` recorded as skipped, unread.
+    assert!(shadow
+        .snapshot_files(&["Documents"], u64::MAX, Oversize::Skip, "dir")
+        .is_err());
+    let snap = shadow
+        .snapshot_files(&["Documents", "a.txt"], u64::MAX, Oversize::SkipAll, "skip")
+        .unwrap();
+    let entries = shadow.entries(&snap).unwrap();
+    assert!(entries.contains(&SnapshotEntry::Skipped {
+        path: "Documents".into()
+    }));
+    assert!(
+        stored(&shadow) < before + 1024 * 1024,
+        "the directory was not copied"
+    );
+    // Fingerprints do not expand a directory of a folder shadow either.
+    let prints = shadow.fingerprints(&["Documents"]).unwrap();
+    assert_eq!(prints.len(), 1, "{prints:?}");
+}
+
+/// The 64 MiB rule inside the shadow: a folder shadow records a larger file as skipped without
+/// storing it (`Refuse` fails instead), a restore of a skipped path refuses with the reason, and
+/// a comparison reports the file as modified, not deleted.
+#[test]
+fn files_over_the_limit_are_never_stored_by_a_folder_shadow() {
+    let fx = Fx::new();
+    fx.write("log.txt", "small\n");
+    let shadow = fx.shadow();
+    let small = shadow.snapshot_paths(&["log.txt"], "before").unwrap();
+    sparse(&fx.folder.join("log.txt"), FOLDER_MAX_FILE + 1);
+    let before = stored(&shadow);
+    let err = shadow
+        .snapshot_files(&["log.txt"], FOLDER_MAX_FILE, Oversize::Refuse, "x")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("64 MiB"), "{err}");
+    let big = shadow.snapshot_paths(&["log.txt"], "after").unwrap();
+    assert!(
+        stored(&shadow) < before + 1024 * 1024,
+        "the large file was stored"
+    );
+    assert_eq!(
+        shadow.entries(&big).unwrap(),
+        vec![SnapshotEntry::Skipped {
+            path: "log.txt".into()
+        }]
+    );
+    let changes = shadow.changes_between(&small, &big).unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, lector_git::ChangeKind::Modified);
+    let err = shadow
+        .restore_paths(&big, &["log.txt"])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not backed up"), "{err}");
+    assert_eq!(
+        fs::metadata(fx.folder.join("log.txt")).unwrap().len(),
+        FOLDER_MAX_FILE + 1,
+        "nothing written"
+    );
+    shadow.restore_paths(&small, &["log.txt"]).unwrap();
+    assert_eq!(fx.read("log.txt").unwrap(), b"small\n");
 }

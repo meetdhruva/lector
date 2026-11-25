@@ -29,9 +29,11 @@
 //! whole-worktree checkpoint; a file it does not cover (git-ignored, such as `.env`) is backed up
 //! on its first touch in the turn. In a folder without git every file is backed up on its first
 //! touch, path by path, into the folder's shadow repository, created at that first write (ADR
-//! 0011). The turn's undo restores every file it changed, covered either way. A write whose backup
-//! cannot be taken (the backup fails, or the file is over 64 MiB in a folder without git) is
-//! refused: every agent write stays undoable (ADR 0010, item 6). A write that got a backup of its
+//! 0011). The turn's undo restores every file it changed, covered either way. Only regular files
+//! are written (a directory or device target is refused before any backup). A write whose backup
+//! cannot be taken (the backup fails, the file or the new content is over 64 MiB in a folder
+//! without git, or the turn's backups would pass 1 GiB) is refused: every agent write stays
+//! undoable (ADR 0010, item 6). A write that got a backup of its
 //! own (first touch, or no turn) is also undoable on its own as its `agent.write_file` entry.
 
 use lector_process::{ChildHandle, ProcessCommand, ProcessKind, StdinMode, Supervisor};

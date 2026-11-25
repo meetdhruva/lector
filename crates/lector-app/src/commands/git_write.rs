@@ -99,16 +99,23 @@ fn open_shadow(core: &AppCore, repo: &Repo) -> Result<ShadowRepo, lector_git::Er
 pub(crate) fn trim_once(data_dir: &Path, shadow: &ShadowRepo) {
     static TRIMMED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
         std::sync::OnceLock::new();
-    static SWEPT: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
-        std::sync::OnceLock::new();
     let first = TRIMMED
         .get_or_init(Default::default)
         .lock()
         .insert(shadow.git_dir().to_path_buf());
     if first {
-        if let Err(err) = shadow.prune(BACKUP_RETENTION) {
-            tracing::warn!("cannot trim the shadow repository: {err}");
-        }
+        trim_now(data_dir, shadow);
+    }
+}
+
+/// Trims `shadow` now by the retention policy (an agent turn does before its first backup) and,
+/// the first time per process for `data_dir`, deletes expired shadows of deleted folders
+/// ([`trim_once`]). Best effort: failures are logged.
+pub(crate) fn trim_now(data_dir: &Path, shadow: &ShadowRepo) {
+    static SWEPT: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    if let Err(err) = shadow.prune(BACKUP_RETENTION) {
+        tracing::warn!("cannot trim the shadow repository: {err}");
     }
     let sweep = SWEPT
         .get_or_init(Default::default)

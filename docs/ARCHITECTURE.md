@@ -488,16 +488,24 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    before each attempt. `fs/read_text_file` serves the open document (unsaved edits
    included) or reads the file with `Confined::read`; `fs/write_text_file` goes through the open
    `DocHandle` (a confined save, `SaveRequest::confine`) or `Confined::write`. A write is refused
-   unless it can be undone (`AgentBackups::before_write`, after confinement): the turn checkpoint
+   unless it can be undone (`AgentBackups::before_write`, after confinement). Only a regular file
+   (or a path that does not exist) can be written: a directory, FIFO, socket or device is refused
+   before any backup, so nothing below it is ever read. Then the turn checkpoint
    covers the file, or the file was backed up earlier in the turn, or it is backed up now on its
-   first touch with `ShadowRepo::snapshot_paths`: a file the checkpoint leaves out (git-ignored,
+   first touch with `ShadowRepo::snapshot_files` (files only, never a directory walk): a file the checkpoint leaves out (git-ignored,
    such as `.env`) in a repository, every file in a folder without git. There the backup goes
    into the folder's shadow repository (`ShadowRepo::open_folder`, keyed by the folder's
    canonical path, created at that first backup, owner-only, never a `.git` in the folder); it is
    path-scoped: the folder is never listed, walked or staged, so a turn costs the same in a home
    directory as in an empty folder, and every git command names the shadow (`--git-dir`) so no
-   repository above the folder and none of the folder's settings or `.gitattributes` are read. A
-   failed backup, or a file over 64 MiB in a folder without git, refuses the write with the reason.
+   repository above the folder and none of the folder's settings or `.gitattributes` are read; a
+   folder shadow's `ShadowRepo::snapshot_paths` refuses directories too and never stores a file
+   over 64 MiB (`lector_git::shadow::FOLDER_MAX_FILE`). A failed backup, a write of a file
+   over 64 MiB in a folder without git (checked on every write, the existing file and the new
+   content), or a write that would take the turn's path-scoped backups past 1 GiB
+   (`TURN_BACKUP_BUDGET`: first-touch backups plus the content the turn will record at its end)
+   refuses the write with the reason. The shadow is trimmed by its retention policy before each
+   turn's first backup.
    Each write is journaled as `agent.write_file` with `Source::Agent` (undoable on its own when it
    took a backup of its own).
 4. `session/request_permission` becomes a `PermissionRequest` shown inline in the panel; the user
@@ -505,7 +513,10 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    `auto_allow_reads` answers reads inside the project. Cancel answers pending requests
    `cancelled`.
 5. When the turn ends (`AgentBackups::finish_turn`) its "after" state is recorded (the work tree
-   when there is a checkpoint, plus every first-touch path), its "before" state is the checkpoint
+   when there is a checkpoint, plus every first-touch path; a touched path that became a directory,
+   or a file that grew past 64 MiB in a folder by other means, is recorded as skipped without being
+   read into the shadow: its after-fingerprint is a hash, the undo still restores the state before
+   the turn and a redo of that file refuses), its "before" state is the checkpoint
    and the first-touch backups combined (`ShadowRepo::merge_snapshots`), and a turn that changed
    files appends one `agent.turn` journal entry whose undo (`RestoreFiles` over the changed paths,
    with their fingerprints at the end of the turn) restores exactly those files to their state
@@ -513,7 +524,10 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    `lector undo` → `Journal::undo`, which finds a folder's backups with
    `ShadowRepo::existing_folder`). The journal's check / force / redo apply unchanged. In a
    repository the turn's changes are a `lector_git::Changeset::Snapshots` reviewable in the normal
-   review tab; a folder without git has no review, status or history.
+   review tab; a folder without git has no review, status or history ("Review" says it needs a git
+   repository), but its workspace registers the Activity log, `workspace::UndoLastOperation`, Undo
+   toasts and the Activity tab's restoration (`lector_ui_git::init`, before the repository-only
+   views).
 
 **What each source can reach.** The agent itself gets no terminal (`terminal: false`), no MCP
 servers and none of Lector's commands: only confined file reads and writes inside the project,
@@ -539,7 +553,7 @@ Turning a UI-only capability into a command must not widen this
    The shadow repositories (`data_dir()/shadow/<hash of the canonical work tree>.git`, for
    repositories and for folders without git alike) and shell-integration scripts are files too.
    A shadow is trimmed (30 days, 1 GiB) the first time per process Lector backs something up into
-   it, and the first backup of a process also deletes the shadows whose folder or repository is
+   it and before every agent turn's first backup, and the first backup of a process also deletes the shadows whose folder or repository is
    gone (deleted or renamed) once their newest backup is older than 30 days
    (`ShadowRepo::prune_orphans`).
    Everything Lector creates in the data directory is owner-only (`lector_base::private`, see
