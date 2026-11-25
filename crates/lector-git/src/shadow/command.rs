@@ -36,6 +36,13 @@ impl ShadowRepo {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("LC_ALL", "C");
+        if self.folder {
+            // Belt and braces: every command names the shadow (`--git-dir`), which turns
+            // discovery off; should one ever not, it may not climb above the folder either.
+            if let Some(parent) = self.workdir.parent() {
+                cmd.env("GIT_CEILING_DIRECTORIES", parent);
+            }
+        }
         for var in [
             "GIT_DIR",
             "GIT_WORK_TREE",
@@ -59,6 +66,15 @@ impl ShadowRepo {
         }
     }
 
+    /// Refuses operations that run git in the user's work tree (whole-tree listings, the
+    /// index) for the shadow of a folder without git.
+    pub(super) fn needs_repository(&self) -> Result<()> {
+        if self.folder {
+            return Err(Error::NotARepository(self.workdir.clone()));
+        }
+        Ok(())
+    }
+
     pub(super) fn shadow_git(&self) -> Command {
         let mut cmd = self.base_command();
         cmd.arg("--git-dir").arg(&self.git_dir);
@@ -66,7 +82,8 @@ impl ShadowRepo {
     }
 
     /// Read-only `git` in the *user's* work tree: user config, `GIT_OPTIONAL_LOCKS=0`,
-    /// literal pathspecs.
+    /// literal pathspecs. Never used for the shadow of a folder without git (callers check
+    /// [`ShadowRepo::needs_repository`] first).
     pub(super) fn user_git(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         cmd.arg("-C")

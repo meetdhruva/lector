@@ -84,9 +84,29 @@ fn no_undo_reason(command: &str) -> String {
 }
 
 impl Journal {
-    fn shadow_for(&self, repo: &Path) -> Result<ShadowRepo, UndoError> {
-        let repo = Repo::discover(repo).map_err(|e| UndoError::Failed(e.to_string()))?;
-        ShadowRepo::open(self.data_dir(), &repo).map_err(|e| UndoError::BackupGone(e.to_string()))
+    /// The shadow repository of an entry's `repo` directory: the repository whose work tree it
+    /// is, else the backups of that folder without git (ADR 0011; found without creating
+    /// anything), else (an older entry naming a subfolder) the repository around it.
+    fn shadow_for(&self, dir: &Path) -> Result<ShadowRepo, UndoError> {
+        let repo = Repo::discover(dir).ok().filter(|r| !r.is_bare());
+        let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let open = |repo: &Repo| {
+            ShadowRepo::open(self.data_dir(), repo)
+                .map_err(|e| UndoError::BackupGone(e.to_string()))
+        };
+        match &repo {
+            Some(repo) if canonical(repo.workdir()) == canonical(dir) => open(repo),
+            _ => match ShadowRepo::existing_folder(self.data_dir(), dir) {
+                Some(shadow) => Ok(shadow),
+                None => match &repo {
+                    Some(repo) => open(repo),
+                    None => Err(UndoError::BackupGone(format!(
+                        "there are no backups for {}",
+                        dir.display()
+                    ))),
+                },
+            },
+        }
     }
 
     /// Whether `entry` can be undone now, with the reason when it cannot (already undone,
@@ -215,17 +235,16 @@ impl Journal {
     }
 
     /// Undoes the newest undoable operation ("Undo last operation") of the context's
-    /// repository (any, without a project).
+    /// repository, or of its folder when that is not a git repository (any, without a project).
     pub fn undo_last(
         &self,
         cx: &CommandContext,
         mode: UndoMode,
     ) -> Result<ActivityEntry, UndoError> {
-        let workdir = cx
-            .project
-            .as_ref()
-            .and_then(|p| p.repo())
-            .map(|r| r.workdir().to_path_buf());
+        let workdir = cx.project.as_ref().map(|p| match p.repo() {
+            Some(r) => r.workdir().to_path_buf(),
+            None => p.root().to_path_buf(),
+        });
         let entry = self
             .last_undoable(workdir.as_deref())
             .ok_or_else(|| UndoError::NotUndoable("Nothing to undo.".into()))?;

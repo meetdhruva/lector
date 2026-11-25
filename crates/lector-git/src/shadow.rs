@@ -25,6 +25,16 @@
 //! recorded index entries point at (keeps them reachable) and `manifest` = what the
 //! snapshot covers (absent paths, index entries). A path that is *absent* in the
 //! snapshot is restored by deleting it.
+//!
+//! **Folders without git** (ADR 0011) get a shadow repository too ([`ShadowRepo::open_folder`]),
+//! at the same place a repository of that folder would have it (keyed by the canonical path),
+//! created at the first backup and never by looking for one ([`ShadowRepo::existing_folder`]).
+//! It has no alternates and is *path-scoped*: only [`ShadowRepo::snapshot_paths`], restores and
+//! fingerprints of named paths work; whole-tree and index operations refuse
+//! ([`Error::NotARepository`]), so nothing ever lists or walks the folder (it may be a home
+//! directory) and no git command runs in it. Every command names the shadow explicitly
+//! (`--git-dir`, which turns repository discovery off) and the shadow is bare, so neither a
+//! repository above the folder nor the folder's `.gitattributes` is ever read.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -38,7 +48,9 @@ use crate::{ChangeKind, FileChange, Oid, Repo, Side};
 
 mod capture;
 mod command;
+mod folder;
 mod gc;
+mod merge;
 mod open;
 mod read;
 mod restore;
@@ -180,6 +192,8 @@ pub struct PruneReport {
 pub struct ShadowRepo {
     git_dir: PathBuf,
     workdir: PathBuf,
+    /// The shadow of a folder without git: path-scoped operations only.
+    folder: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -228,9 +242,13 @@ impl ShadowRepo {
             return Err(Error::Bare);
         }
         let git_dir = Self::path_for(data_dir, &workdir);
-        let shadow = ShadowRepo { git_dir, workdir };
+        let shadow = ShadowRepo {
+            git_dir,
+            workdir,
+            folder: false,
+        };
         let user_objects = objects_dir(repo);
-        shadow.ensure_initialized(&user_objects)?;
+        shadow.ensure_initialized(Some(&user_objects))?;
         remember_shadow(&shadow);
         Ok(shadow)
     }
@@ -288,6 +306,7 @@ impl ShadowRepo {
     /// without an entry are recorded as "not in the index". Restore with
     /// [`ShadowRepo::restore_index`].
     pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot> {
+        self.needs_repository()?;
         let mut plan = Plan::new(SnapshotKind::Index);
         let mut rels = Vec::new();
         for path in paths {
@@ -322,8 +341,10 @@ impl ShadowRepo {
 
     /// Records the whole working tree: tracked and untracked files, minus what
     /// `.gitignore` (and `info/exclude`, global ignores) exclude. Used for agent
-    /// checkpoints. Files over 256 MiB are skipped and recorded as such.
+    /// checkpoints. Files over 256 MiB are skipped and recorded as such. Refused for the shadow
+    /// of a folder without git (it never walks a folder).
     pub fn snapshot_worktree(&self, note: &str) -> Result<ShadowSnapshot> {
+        self.needs_repository()?;
         let mut plan = Plan::new(SnapshotKind::Worktree);
         let out = exec(
             self.user_git(&[
@@ -683,6 +704,7 @@ impl ShadowRepo {
     /// id, intent-to-add flag), `"absent"` for requested paths without an entry. Compare with
     /// a stored map before an index undo.
     pub fn index_fingerprints(&self, paths: &[&str]) -> Result<BTreeMap<String, String>> {
+        self.needs_repository()?;
         let mut rels = Vec::new();
         for path in paths {
             rels.push(check_rel(path)?);
@@ -809,6 +831,7 @@ impl ShadowRepo {
     /// already exist in the user's object database — they were staged there. **Writes the
     /// user's index — call it only from an explicit undo.**
     pub fn restore_index(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()> {
+        self.needs_repository()?;
         let manifest = self.manifest(snap)?;
         if manifest.kind != SnapshotKind::Index {
             return Err(Error::Parse(
@@ -983,8 +1006,12 @@ impl ShadowRepo {
     }
 
     /// Whether git ignores the work-tree path `rel` (`git check-ignore`), i.e. whether
-    /// [`ShadowRepo::snapshot_worktree`] leaves it out. Errors count as "not ignored".
+    /// [`ShadowRepo::snapshot_worktree`] leaves it out. Errors count as "not ignored", and so
+    /// does every path of a folder without git (no git runs there).
     pub fn is_ignored(&self, rel: &str) -> bool {
+        if self.folder {
+            return false;
+        }
         let Ok(rel) = check_rel(rel) else {
             return false;
         };
@@ -1114,6 +1141,8 @@ struct PlannedFile {
 struct Plan {
     kind: SnapshotKind,
     files: Vec<PlannedFile>,
+    /// Entries whose blob is already in the shadow: (path, mode, blob) ([`ShadowRepo::merge_snapshots`]).
+    recorded: Vec<(String, String, Oid)>,
     absent: Vec<String>,
     skipped: Vec<String>,
     /// Files that disappeared between stat and read (recorded absent).
@@ -1129,6 +1158,7 @@ impl Plan {
         Plan {
             kind,
             files: Vec::new(),
+            recorded: Vec::new(),
             absent: Vec::new(),
             skipped: Vec::new(),
             vanished: Vec::new(),

@@ -73,6 +73,7 @@ impl ShadowRepo {
     /// The paths among (or below) `rels` whose index entry is intent-to-add: the only entries
     /// the index-to-working-tree diff shows as added.
     pub(super) fn intent_to_add(&self, rels: &[String]) -> Result<BTreeSet<String>> {
+        self.needs_repository()?;
         let mut out = BTreeSet::new();
         for chunk in rels.chunks(500) {
             let mut args = vec![

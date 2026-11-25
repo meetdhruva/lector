@@ -627,26 +627,26 @@ fn links_into_git_are_refused_for_reads_and_writes() {
     s.stop();
 }
 
-/// ADR 0010, item 6: in a folder without git there is no shadow repository, so no backup and
-/// no undo; the write is refused and the file is unchanged. Reads still work.
+/// ADR 0011 item 5: the turn checkpoint leaves git-ignored files out, so an ignored file the agent
+/// overwrote (`.env`) is backed up on its first touch and undoing the *turn* restores it, together
+/// with the tracked files; the turn's changes list it.
 #[test]
-fn writes_in_a_folder_without_git_are_refused() {
-    let Some(fx) = Fx::with_git(false) else {
-        eprintln!("python3 not found: skipping");
-        return;
-    };
+fn ignored_files_are_restored_by_undoing_the_turn() {
+    let fx = fx!();
+    fs::write(fx.root.join(".gitignore"), ".env\n").unwrap();
+    fs::write(fx.root.join(".env"), "SECRET=keep\n").unwrap();
     let s = fx.start();
     let t = fx.run(
         &s,
-        "write a.txt agent\\n\nwrite new.txt agent\\n\nread a.txt",
+        "write .env SECRET=agent\\n\nwrite a.txt agent\\n\nwrite .env SECRET=again\\n\nwrite new.env created\\n",
     );
-    let answer = t.answer();
-    assert_eq!(answer.matches("WRITE-ERROR:").count(), 2, "{answer}");
-    assert!(answer.contains("not a git repository"), "{answer}");
-    assert!(answer.contains("READ:one"), "{answer}");
+    assert_eq!(fx.read(".env").unwrap(), "SECRET=again\n");
+    let paths: Vec<&str> = t.changed_files.iter().map(|c| c.path.as_str()).collect();
+    assert!(paths.contains(&".env") && paths.contains(&"a.txt"), "{paths:?}");
+    s.undo_turn(t.id, false, Source::Internal).unwrap();
+    assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
     assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
-    assert!(fx.read("new.txt").is_none());
-    assert!(t.written.is_empty());
+    assert!(fx.read("new.env").is_none());
     s.stop();
 }
 
