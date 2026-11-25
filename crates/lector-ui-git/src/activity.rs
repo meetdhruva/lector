@@ -196,9 +196,20 @@ fn ask_restore_anyway(
     });
 }
 
-/// `workspace::UndoLastOperation`: undoes the newest undoable operation in this repository.
+/// The directory whose entries the Activity log and "Undo last operation" show: the repository's
+/// work tree, or the open folder when it is not a git repository (agent turns there, ADR 0011).
+fn activity_dir(store: &Entity<GitStore>, cx: &App) -> Option<PathBuf> {
+    let store = store.read(cx);
+    match store.repo() {
+        Some(repo) => Some(repo.workdir().to_path_buf()),
+        None => store.project().map(|p| p.root().to_path_buf()),
+    }
+}
+
+/// `workspace::UndoLastOperation`: undoes the newest undoable operation in this repository (or
+/// folder).
 pub fn undo_last(store: &Entity<GitStore>, window: &mut Window, cx: &mut App) {
-    let repo = store.read(cx).repo().map(|r| r.workdir().to_path_buf());
+    let repo = activity_dir(store, cx);
     match journal(cx).last_undoable(repo.as_deref()) {
         Some(entry) => undo_entry(store, entry.id, UndoMode::Check, window, cx),
         None => toast(store, "Nothing to undo", cx),
@@ -323,10 +334,13 @@ impl ActivityView {
     }
 
     fn repo_path(&self, cx: &App) -> Option<PathBuf> {
-        self.store
-            .read(cx)
-            .repo()
-            .map(|r| r.workdir().to_path_buf())
+        activity_dir(&self.store, cx)
+    }
+
+    /// Ids of the entries the view shows (tests).
+    #[cfg(test)]
+    pub(crate) fn entry_ids(&self) -> Vec<u64> {
+        self.rows.iter().map(|r| r.entry.id).collect()
     }
 
     /// Re-reads the journal (and which backups still exist) in the background.
@@ -388,13 +402,24 @@ impl ActivityView {
         let data_dir = journal(cx).data_dir().to_path_buf();
         let key = view_key(JobKind::JournalPreview, cx.entity_id());
         let work = background(cx, key, Priority::Visible, move |_| {
-            let repo = Repo::discover(&repo_path).map_err(|e| e.to_string())?;
-            let current = std::fs::read(repo.workdir().join(&rel)).ok();
+            // The entry's repository, or the backups of a folder without git (ADR 0011).
+            let discovered = Repo::discover(&repo_path).ok().filter(|r| !r.is_bare());
+            let own = discovered
+                .as_ref()
+                .is_some_and(|r| r.workdir() == repo_path.as_path());
+            let (repo, shadow) = match ShadowRepo::existing_folder(&data_dir, &repo_path) {
+                Some(folder) if !own => (None, folder),
+                _ => {
+                    let repo = discovered.ok_or("The backups of this folder are gone")?;
+                    let shadow = ShadowRepo::open(&data_dir, &repo).map_err(|e| e.to_string())?;
+                    (Some(repo), shadow)
+                }
+            };
+            let current = std::fs::read(shadow.workdir().join(&rel)).ok();
             let snaps = record
                 .as_ref()
                 .map(UndoRecord::snapshots)
                 .unwrap_or_default();
-            let shadow = ShadowRepo::open(&data_dir, &repo).map_err(|e| e.to_string())?;
             let mut before = None;
             let mut index_now = None;
             for snap in &snaps {
@@ -406,7 +431,9 @@ impl ActivityView {
                             .and_then(|e| e.into_iter().find(|r| r.path == rel && r.stage <= 1))
                         {
                             before = shadow.load(&Side::Blob(rec.oid)).ok().flatten();
-                            index_now = repo.load(&Side::Index(rel.clone())).ok().flatten();
+                            index_now = repo
+                                .as_ref()
+                                .and_then(|r| r.load(&Side::Index(rel.clone())).ok().flatten());
                         }
                     }
                     Ok(_) => {

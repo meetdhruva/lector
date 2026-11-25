@@ -624,6 +624,15 @@ impl AgentPanel {
         }
     }
 
+    /// The file a turn's changed path names: changed paths are relative to the repository's
+    /// work tree, or to the folder itself when it is not a git repository (ADR 0011).
+    pub(crate) fn changed_file_abs(&self, path: &str) -> std::path::PathBuf {
+        match self.project.repo() {
+            Some(repo) => repo.workdir().join(path),
+            None => self.project.absolute_path(path),
+        }
+    }
+
     /// Undoes a turn of the current session (with `force` after the user confirmed
     /// overwriting newer edits).
     pub fn undo_turn(&mut self, id: TurnId, force: bool, cx: &mut Context<Self>) {
@@ -671,11 +680,33 @@ impl AgentPanel {
                     format!("turn {id} of an earlier agent session")
                 };
                 match result {
-                    Ok(_) => this.toast_level(
-                        format!("Undid {which}. Undo it again from the Activity Log."),
-                        ToastLevel::Success,
-                        cx,
-                    ),
+                    Ok(undo_id) => {
+                        // Files too large to back up are restored but cannot be redone (ADR 0011).
+                        let not_redoable: Vec<String> =
+                            lector_app::journal::Journal::of(session.core())
+                                .and_then(|j| j.get(undo_id))
+                                .and_then(|e| {
+                                    serde_json::from_value(e.args.get("not_redoable")?.clone())
+                                        .ok()
+                                })
+                                .unwrap_or_default();
+                        if not_redoable.is_empty() {
+                            this.toast_level(
+                                format!("Undid {which}. Undo it again from the Activity Log."),
+                                ToastLevel::Success,
+                                cx,
+                            )
+                        } else {
+                            this.toast_level(
+                                format!(
+                                    "Undid {which}. {} cannot be redone: too large for Lector to back up.",
+                                    not_redoable.join(", ")
+                                ),
+                                ToastLevel::Warning,
+                                cx,
+                            )
+                        }
+                    }
                     Err(AgentError::UndoConflict { paths }) if current => {
                         this.undo_conflict = Some(UndoConflict {
                             session: session.clone(),

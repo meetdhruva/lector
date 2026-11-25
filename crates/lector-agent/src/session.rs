@@ -23,11 +23,18 @@
 //! `fs/read_text_file` serves the open document or reads the file without following a link that
 //! appeared after the check. `fs/write_text_file` replaces the text of the open document and
 //! saves it (no hooks or cleanup; confined save; refused when the tab is locked read-only or the
-//! file changed on disk), or writes files that are not open with `lector_fs::Confined::write`;
-//! when the turn has no checkpoint, or the file is git-ignored (checkpoints leave those out),
-//! the file is backed up first so its `agent.write_file` entry is undoable on its own. A write
-//! whose backup cannot be taken (the backup fails, or the folder is not a git repository and has
-//! no shadow repository) is refused: every agent write stays undoable (ADR 0010, item 6).
+//! file changed on disk), or writes files that are not open with `lector_fs::Confined::write`.
+//!
+//! Backups ([`lector_app::commands::agent_backup`]): in a repository a turn starts with a
+//! whole-worktree checkpoint; a file it does not cover (git-ignored, such as `.env`) is backed up
+//! on its first touch in the turn. In a folder without git every file is backed up on its first
+//! touch, path by path, into the folder's shadow repository, created at that first write (ADR
+//! 0011). The turn's undo restores every file it changed, covered either way. Only regular files
+//! are written (a directory or device target is refused before any backup). A write whose backup
+//! cannot be taken (the backup fails, the file or the new content is over 64 MiB in a folder
+//! without git, or the turn's backups would pass 1 GiB) is refused: every agent write stays
+//! undoable (ADR 0010, item 6). A write that got a backup of its
+//! own (first touch, or no turn) is also undoable on its own as its `agent.write_file` entry.
 
 use lector_process::{ChildHandle, ProcessCommand, ProcessKind, StdinMode, Supervisor};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -38,6 +45,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use lector_app::commands::agent_backup::{AgentBackups, TurnBackup, TurnLedger};
 use lector_app::commands::Source;
 use lector_app::documents::{DocumentStore, SaveRequest};
 use lector_app::journal::{ActivityEntry, Journal, UndoError, UndoMode, UndoRecord};
@@ -187,7 +195,12 @@ struct Shared {
     stderr: Arc<Mutex<VecDeque<String>>>,
     /// Set when the current process's stderr reached EOF.
     stderr_eof: Arc<std::sync::atomic::AtomicBool>,
+    /// Read handle of the shadow repository (checkpoints, review, provenance).
     shadow: Mutex<Option<ShadowRepo>>,
+    /// Takes the backups that keep writes undoable.
+    backups: AgentBackups,
+    /// What the running turn backed up (checkpoint, first-touch backups).
+    ledger: Mutex<Option<(TurnId, TurnLedger)>>,
 }
 
 impl Shared {
@@ -276,6 +289,8 @@ impl AgentSession {
             stderr: Arc::new(Mutex::new(VecDeque::new())),
             stderr_eof: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             shadow: Mutex::new(None),
+            backups: AgentBackups::new(core, project),
+            ledger: Mutex::new(None),
         });
         let session = AgentSession { shared };
         session.launch()?;
@@ -307,7 +322,8 @@ impl AgentSession {
         &self.shared.options
     }
 
-    /// The shadow repository holding the turn checkpoints (`None` outside a git repository).
+    /// The shadow repository holding the turn checkpoints and backups (in a folder without git
+    /// `None` until the first write backed something up there).
     pub fn shadow_repo(&self) -> Option<ShadowRepo> {
         self.shared.shadow()
     }
@@ -512,7 +528,7 @@ impl AgentSession {
             ));
         }
         let entry = turn.journal_id.ok_or_else(|| {
-            AgentError::NotUndoable(if turn.before.is_none() {
+            AgentError::NotUndoable(if turn.before.is_none() && !turn.written.is_empty() {
                 "no checkpoint was taken for this turn".into()
             } else {
                 "the turn changed no files".into()
@@ -743,9 +759,14 @@ fn handshake(
 
 /// The turn thread.
 fn run_turn(shared: Arc<Shared>, id: TurnId, text: String, context: Vec<PromptContext>) {
-    // Checkpoint before the agent touches anything.
+    // Checkpoint before the agent touches anything (a folder without git backs up on first touch).
     let before = if shared.options.checkpoints {
-        shared.snapshot(&format!("Before agent turn {id}: {}", first_line(&text)))
+        let ledger = shared
+            .backups
+            .begin_turn(&format!("Before agent turn {id}: {}", first_line(&text)));
+        let before = ledger.checkpoint.clone();
+        *shared.ledger.lock() = Some((id, ledger));
+        before
     } else {
         None
     };
@@ -869,31 +890,26 @@ impl Shared {
         }
     }
 
+    /// The shadow repository to read checkpoints from. In a folder without git it is only found,
+    /// never created (it appears with the first backup).
     fn shadow(&self) -> Option<ShadowRepo> {
         let mut slot = self.shadow.lock();
         if slot.is_none() {
-            let repo = self.project.repo()?;
             let journal = Journal::of(&self.core)?;
-            match ShadowRepo::open(journal.data_dir(), repo) {
-                Ok(s) => *slot = Some(s),
-                Err(err) => {
-                    tracing::warn!("agent checkpoints unavailable: {err}");
-                    return None;
+            match self.project.repo() {
+                Some(repo) => match ShadowRepo::open(journal.data_dir(), repo) {
+                    Ok(s) => *slot = Some(s),
+                    Err(err) => {
+                        tracing::warn!("agent checkpoints unavailable: {err}");
+                        return None;
+                    }
+                },
+                None => {
+                    *slot = ShadowRepo::existing_folder(journal.data_dir(), self.project.root());
                 }
             }
         }
         slot.clone()
-    }
-
-    fn snapshot(&self, note: &str) -> Option<lector_git::ShadowSnapshot> {
-        let shadow = self.shadow()?;
-        match shadow.snapshot_worktree(note) {
-            Ok(s) => Some(s),
-            Err(err) => {
-                tracing::warn!("agent checkpoint failed: {err}");
-                None
-            }
-        }
     }
 
     fn cancel_permissions(&self) {
@@ -903,42 +919,49 @@ impl Shared {
         }
     }
 
-    /// Takes the "after" checkpoint, records the turn in the journal, marks it finished.
+    /// Takes the "after" state, records the turn in the journal, marks it finished.
     fn finish_turn(&self, id: TurnId, state: TurnState) {
         self.cancel_permissions();
-        let (before, prompt) = {
+        let (mut before, prompt) = {
             let st = self.state.lock();
             match st.turns.iter().find(|t| t.id == id) {
                 Some(t) => (t.before.clone(), t.prompt.clone()),
                 None => return,
             }
         };
+        let ledger = {
+            let mut slot = self.ledger.lock();
+            match slot.take() {
+                Some((turn, ledger)) if turn == id => Some(ledger),
+                other => {
+                    *slot = other;
+                    None
+                }
+            }
+        };
         let mut after = None;
         let mut changed = Vec::new();
         let mut journal_id = None;
-        if let Some(before) = &before {
-            after = self.snapshot(&format!("Agent turn {id}: {}", first_line(&prompt)));
-            if let (Some(after), Some(shadow)) = (&after, self.shadow()) {
-                match shadow.changes_between(before, after) {
-                    Ok(changes) => {
-                        changed = changes
-                            .iter()
-                            .map(|c| ChangedFile {
-                                path: c.path().to_string(),
-                                kind: c.kind,
-                            })
-                            .collect();
-                    }
-                    Err(err) => tracing::warn!("cannot compare agent checkpoints: {err}"),
-                }
-                if !changed.is_empty() {
-                    journal_id = self.journal_turn(id, &prompt, before, &shadow, &changed);
-                }
+        let note = format!("Agent turn {id}: {}", first_line(&prompt));
+        if let Some(backup) = ledger.and_then(|l| self.backups.finish_turn(&l, &note)) {
+            changed = backup
+                .changes
+                .iter()
+                .map(|c| ChangedFile {
+                    path: c.path().to_string(),
+                    kind: c.kind,
+                })
+                .collect();
+            if !changed.is_empty() {
+                journal_id = self.journal_turn(id, &prompt, &backup, &changed);
             }
+            before = Some(backup.before);
+            after = Some(backup.after);
         }
         {
             let mut st = self.state.lock();
             if let Some(turn) = st.turns.iter_mut().find(|t| t.id == id) {
+                turn.before = before;
                 turn.after = after;
                 turn.changed_files = changed;
                 turn.journal_id = journal_id;
@@ -973,15 +996,12 @@ impl Shared {
         &self,
         id: TurnId,
         prompt: &str,
-        before: &lector_git::ShadowSnapshot,
-        shadow: &ShadowRepo,
+        backup: &TurnBackup,
         changed: &[ChangedFile],
     ) -> Option<u64> {
         let journal = Journal::of(&self.core)?;
-        let rels: Vec<String> = changed.iter().map(|c| c.path.clone()).collect();
-        let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
-        let after = shadow.fingerprints(&refs).unwrap_or_default();
-        let n = rels.len();
+        let workdir = self.backups.workdir();
+        let n = changed.len();
         journal.append(ActivityEntry {
             id: 0,
             time: SystemTime::now(),
@@ -992,13 +1012,9 @@ impl Shared {
                 first_line(prompt),
                 if n == 1 { "" } else { "s" }
             ),
-            repo: Some(shadow.workdir().to_path_buf()),
-            paths: rels.iter().map(|r| shadow.workdir().join(r)).collect(),
-            undo: Some(UndoRecord::RestoreFiles {
-                shadow: before.clone(),
-                paths: rels.clone(),
-                after,
-            }),
+            repo: Some(workdir.to_path_buf()),
+            paths: changed.iter().map(|c| workdir.join(&c.path)).collect(),
+            undo: backup.undo.clone(),
             undone: false,
             args: json!({ "session": self.id.0, "turn": id.0, "prompt": prompt }),
             source: Source::Agent,
@@ -1070,41 +1086,36 @@ impl Shared {
             .map_err(|e| refused(e.to_string()))?;
         let abs = target.path();
         let rel = target.relative_slash();
-        let (turn, has_checkpoint) = {
-            let st = self.state.lock();
-            let turn = st.current;
-            let has = turn
-                .and_then(|id| st.turns.iter().find(|t| t.id == id))
-                .is_some_and(|t| t.before.is_some());
-            (turn, has)
+        let turn = self.state.lock().current;
+        // The write goes through the open document (its encoding, BOM and line endings kept) or
+        // writes the text as is; decided once, so the size checked is the size written.
+        let store = DocumentStore::for_core(&self.core);
+        let open = store.get(&abs);
+        let on_disk = match &open {
+            Some(handle) => handle
+                .encoded_len(content)
+                .map_err(|e| RpcError::remote(rpc::INTERNAL_ERROR, format!("{rel}: {e}")))?,
+            None => content.len() as u64,
         };
-        // A write that cannot be undone is refused (ADR 0010, item 6). The turn checkpoint
-        // covers the file unless it is ignored (`.env`, build output...: checkpoints leave those
-        // out); otherwise the file is backed up on its own first, and a failed backup, or a
-        // folder without git (no shadow repository), refuses the write.
-        let shadow = self.shadow();
-        let covered = has_checkpoint && shadow.as_ref().is_some_and(|s| !s.is_ignored(&rel));
-        let backup = if covered {
-            None
-        } else {
-            let shadow = shadow.ok_or_else(|| {
-                refused(format!(
-                    "{rel}: Lector cannot back this file up here (the folder is not a git repository), so the write could not be undone"
-                ))
-            })?;
-            Some(
-                shadow
-                    .snapshot_paths(&[rel.as_str()], "Before an agent write")
-                    .map_err(|e| {
-                        refused(format!(
-                            "{rel}: the backup that makes this write undoable failed ({e})"
-                        ))
-                    })?,
-            )
+        // A write that cannot be undone is refused (ADR 0010, item 6; ADR 0011): the turn's
+        // checkpoint covers the file, or it was backed up earlier in the turn, or it is backed up
+        // now (first touch); a backup that fails, or a file too large to back up in a folder
+        // without git, refuses the write. Backups of one turn are taken one at a time.
+        // The file's identity as the file system resolves it (ADR 0011): one file, one key,
+        // whatever the spelling. A per-write backup is keyed by it as it is before the write.
+        let backup_key = self.backups.file_key(&rel);
+        let backup = {
+            let mut slot = self.ledger.lock();
+            let ledger = match (slot.as_mut(), turn) {
+                (Some((id, ledger)), Some(current)) if *id == current => Some(ledger),
+                _ => None,
+            };
+            self.backups
+                .before_write(ledger, &rel, on_disk)
+                .map_err(refused)?
         };
         let err = |e: String| RpcError::remote(rpc::INTERNAL_ERROR, format!("{rel}: {e}"));
-        let store = DocumentStore::for_core(&self.core);
-        match store.get(&abs) {
+        match open {
             Some(handle) => {
                 if handle.is_read_only() {
                     return Err(err("the file is locked (read-only) in Lector".into()));
@@ -1127,38 +1138,51 @@ impl Shared {
                 .write(content.as_bytes(), CreateDirs::Yes)
                 .map_err(|e| err(e.to_string()))?,
         }
+        // A file the turn created has its on-disk name now: re-key its first touch to it.
+        {
+            let mut slot = self.ledger.lock();
+            if let (Some((id, ledger)), Some(current)) = (slot.as_mut(), turn) {
+                if *id == current {
+                    self.backups.after_write(ledger);
+                }
+            }
+        }
+        let key = self.backups.file_key(&rel);
         self.update_turn(|t| {
-            if !t.written.contains(&rel) {
-                t.written.push(rel.clone());
+            if !t.written.contains(&key) {
+                t.written.push(key.clone());
             }
         });
-        self.journal_write(&abs, &rel, turn, backup);
+        self.journal_write(
+            &self.project.absolute_path(&key),
+            &key,
+            &backup_key,
+            turn,
+            backup,
+        );
         if let Some(id) = turn {
             self.emit(AgentEvent::TurnUpdated(id));
         }
         Ok(json!({}))
     }
 
+    /// Journals one agent write of the file `rel` (its on-disk key now); its own undo, if it took
+    /// a backup, restores `backup_key` (the key that backup was recorded under).
     fn journal_write(
         &self,
         abs: &Path,
         rel: &str,
+        backup_key: &str,
         turn: Option<TurnId>,
         backup: Option<lector_git::ShadowSnapshot>,
     ) {
         let Some(journal) = Journal::of(&self.core) else {
             return;
         };
-        let undo = backup.map(|shadow| {
-            let after = self
-                .shadow()
-                .and_then(|s| s.fingerprints(&[rel]).ok())
-                .unwrap_or_default();
-            UndoRecord::RestoreFiles {
-                shadow,
-                paths: vec![rel.to_string()],
-                after,
-            }
+        let undo = backup.map(|shadow| UndoRecord::RestoreFiles {
+            shadow,
+            paths: vec![self.backups.shadow_path(backup_key)],
+            after: self.backups.fingerprints_now(backup_key),
         });
         let summary = match turn {
             Some(t) => format!("{} wrote {rel} (turn {t})", self.config.name),
@@ -1169,7 +1193,7 @@ impl Shared {
             time: SystemTime::now(),
             command: "agent.write_file".into(),
             summary,
-            repo: self.project.repo().map(|r| r.workdir().to_path_buf()),
+            repo: Some(self.backups.workdir().to_path_buf()),
             paths: vec![abs.to_path_buf()],
             undo,
             undone: false,

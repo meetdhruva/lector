@@ -28,5 +28,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+dunce.workspace = true
 proptest.workspace = true
 lector-config = { workspace = true, features = ["test-support"] }

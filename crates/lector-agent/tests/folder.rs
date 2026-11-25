@@ -1,0 +1,386 @@
+//! Agent turns in a folder that is not a git repository (ADR 0011): every write is backed up on
+//! its first touch into the folder's shadow repository (created at that first write, never in
+//! the folder), a turn that changed files is one undoable journal entry, and undo, its check,
+//! "restore anyway" and redo behave as in a repository.
+
+mod common;
+
+use std::fs;
+
+use common::Fx;
+use lector_agent::*;
+use lector_app::commands::Source;
+use lector_app::journal::UndoMode;
+use lector_app::CommandContext;
+use serde_json::json;
+
+#[test]
+fn a_folder_turn_is_backed_up_lazily_and_undone_and_redone_as_one_entry() {
+    let fx = need!(Fx::folder());
+    let shadow = fx.shadow_path(&fx.root);
+    let s = fx.start();
+    let t = fx.run(&s, "read a.txt");
+    assert!(t.answer().contains("READ:one"), "{}", t.answer());
+    assert!(
+        !shadow.exists() && !fx.data.join("shadow").exists(),
+        "opening the folder, starting the agent and reading create nothing"
+    );
+    assert!(t.journal_id.is_none());
+
+    let t = fx.run(
+        &s,
+        "write a.txt one\\nTWO\\nthree\\n\nwrite new/dir/x.txt created\\n\nwrite a.txt again\\n",
+    );
+    let answer = t.answer();
+    assert!(!answer.contains("WRITE-ERROR"), "{answer}");
+    assert_eq!(fx.read("a.txt").unwrap(), "again\n");
+    assert_eq!(fx.read("new/dir/x.txt").unwrap(), "created\n");
+    let paths: Vec<&str> = t.changed_files.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["a.txt", "new/dir/x.txt"]);
+    assert!(t.before.is_some() && t.after.is_some());
+    assert!(shadow.join("HEAD").is_file(), "created at the first write");
+    assert!(!fx.root.join(".git").exists(), "the folder gains no .git");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&shadow).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+    let turns = fx.entries("agent.turn");
+    assert_eq!(turns.len(), 1, "one journal entry for the turn");
+    assert!(turns[0].undo.is_some());
+    assert_eq!(turns[0].repo.as_deref(), Some(fx.root.as_path()));
+
+    let undo_id = s.undo_turn(t.id, false, Source::Internal).unwrap();
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+    assert!(
+        fx.read("new/dir/x.txt").is_none(),
+        "a created file is removed"
+    );
+    assert!(
+        !fx.root.join("new").exists(),
+        "directories the turn created are removed when empty"
+    );
+    assert!(s.turn(t.id).unwrap().undone);
+
+    let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
+    fx.journal().undo(undo_id, &cx, UndoMode::Check).unwrap();
+    assert_eq!(fx.read("a.txt").unwrap(), "again\n");
+    assert_eq!(fx.read("new/dir/x.txt").unwrap(), "created\n");
+    assert!(!s.turn(t.id).unwrap().undone);
+    assert!(!fx.root.join(".git").exists());
+    s.stop();
+}
+
+#[test]
+fn a_folder_undo_refuses_files_edited_since_and_force_backs_them_up() {
+    let fx = need!(Fx::folder());
+    let s = fx.start();
+    let t = fx.run(&s, "write a.txt agent\\n\nwrite b.txt new\\n");
+    fs::write(fx.root.join("a.txt"), "user edit\n").unwrap();
+    match s.undo_turn(t.id, false, Source::Internal) {
+        Err(AgentError::UndoConflict { paths }) => assert_eq!(paths, vec!["a.txt".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fx.read("a.txt").unwrap(), "user edit\n", "nothing written");
+    assert_eq!(fx.read("b.txt").unwrap(), "new\n");
+    let undo_id = s.undo_turn(t.id, true, Source::Internal).unwrap();
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+    assert!(fx.read("b.txt").is_none());
+    // "Restore anyway" backed up what it overwrote: undoing the undo brings the edit back.
+    let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
+    fx.journal().undo(undo_id, &cx, UndoMode::Check).unwrap();
+    assert_eq!(fx.read("a.txt").unwrap(), "user edit\n");
+    assert_eq!(fx.read("b.txt").unwrap(), "new\n");
+    s.stop();
+}
+
+#[test]
+fn a_folder_turn_is_undone_by_the_command_and_by_undo_last() {
+    let fx = need!(Fx::folder());
+    commands::register(&fx.core);
+    let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Cli);
+    let s = fx.start();
+    fx.run(&s, "write a.txt first\\n");
+    fx.core
+        .registry()
+        .invoke("agent.undo_turn", json!({}), &cx)
+        .unwrap();
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+
+    fx.run(&s, "write src/lib.rs second\\n");
+    let undone = fx.journal().undo_last(&cx, UndoMode::Check).unwrap();
+    assert_eq!(fx.read("src/lib.rs").unwrap(), "pub fn f() {}\n");
+    let entry = fx.journal().get(undone.undo_of.unwrap()).unwrap();
+    assert_eq!(entry.command, "agent.turn", "undo last picks the turn");
+    s.stop();
+}
+
+#[test]
+fn a_folder_undo_restores_the_executable_bit_and_nested_repositories_stay_confined() {
+    let fx = need!(Fx::build(
+        |base| {
+            let sub = base.join("proj/sub");
+            fs::create_dir_all(&sub).unwrap();
+            common::git(&sub, &["init", "-q", "-b", "main"]);
+            fs::write(base.join("proj/run.sh"), "#!/bin/sh\necho one\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(base.join("proj/run.sh"), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        },
+        "proj"
+    ));
+    assert!(fx.project.repo().is_none());
+    let config = fs::read(fx.root.join("sub/.git/config")).unwrap();
+    let s = fx.start();
+    let t = fx.run(
+        &s,
+        "write run.sh #!/bin/sh\\necho two\\n\nwrite sub/f.txt in a nested repository\\n\nwrite sub/.git/config evil\\n",
+    );
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 1, "{answer}");
+    assert_eq!(fs::read(fx.root.join("sub/.git/config")).unwrap(), config);
+    assert_eq!(fx.read("sub/f.txt").unwrap(), "in a nested repository\n");
+    s.undo_turn(t.id, false, Source::Internal).unwrap();
+    assert_eq!(fx.read("run.sh").unwrap(), "#!/bin/sh\necho one\n");
+    assert!(fx.read("sub/f.txt").is_none());
+    assert!(fx.root.join("sub/.git/config").is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(fx.root.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+    s.stop();
+}
+
+#[test]
+fn a_file_over_64_mib_is_refused_in_a_folder() {
+    let fx = need!(Fx::build(
+        |base| {
+            let big = vec![b'a'; 65 * 1024 * 1024];
+            fs::write(base.join("proj/big.txt"), big).unwrap();
+        },
+        "proj"
+    ));
+    let s = fx.start();
+    let t = fx.run(&s, "write big.txt small\\n\nwrite a.txt fine\\n");
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 1, "{answer}");
+    assert!(answer.contains("64 MiB"), "{answer}");
+    assert_eq!(
+        fs::metadata(fx.root.join("big.txt")).unwrap().len(),
+        65 * 1024 * 1024
+    );
+    assert_eq!(fx.read("a.txt").unwrap(), "fine\n");
+    assert_eq!(t.written, vec!["a.txt".to_string()]);
+    s.stop();
+}
+
+/// ADR 0010 item 6 holds in a folder too: the shadow location is blocked (a file where the
+/// shadow directory belongs), so no backup can be taken and every write is refused.
+#[test]
+fn folder_writes_whose_backup_fails_are_refused() {
+    let fx = need!(Fx::folder());
+    fs::create_dir_all(&fx.data).unwrap();
+    fs::write(fx.data.join("shadow"), "not a directory").unwrap();
+    let s = fx.start();
+    let t = fx.run(
+        &s,
+        "write a.txt agent\\n\nwrite new.txt agent\\n\nread a.txt",
+    );
+    let answer = t.answer();
+    assert_eq!(answer.matches("WRITE-ERROR:").count(), 2, "{answer}");
+    assert!(answer.contains("backup"), "{answer}");
+    assert!(answer.contains("READ:one"), "{answer}");
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+    assert!(fx.read("new.txt").is_none());
+    assert!(t.written.is_empty());
+    assert!(fx.entries("agent.turn").is_empty());
+    s.stop();
+}
+
+/// A folder inside another repository's work tree is a repository path: the project's repository
+/// is the outer one, the turn checkpoint covers it, and no folder-keyed shadow is created.
+#[test]
+fn a_subfolder_of_a_repository_follows_the_repository_rule() {
+    let fx = need!(Fx::build(
+        |base| {
+            // Lector's data directory of the fixture lies in the outer work tree: ignored.
+            fs::write(base.join(".gitignore"), "data/\n").unwrap();
+            common::git(base, &["init", "-q", "-b", "main"]);
+            common::git(base, &["add", "proj"]);
+            common::git(base, &["commit", "-q", "-m", "init"]);
+        },
+        "proj"
+    ));
+    let outer = fx
+        .project
+        .repo()
+        .expect("the outer repository")
+        .workdir()
+        .to_path_buf();
+    assert_ne!(outer, fx.root);
+    let s = fx.start();
+    let t = fx.run(&s, "write a.txt agent\\n");
+    assert!(t.before.is_some());
+    let paths: Vec<&str> = t.changed_files.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["proj/a.txt"],
+        "repository-relative, as in any repository"
+    );
+    let turns = fx.entries("agent.turn");
+    assert_eq!(turns[0].repo.as_deref(), Some(outer.as_path()));
+    assert!(!fx.shadow_path(&fx.root).exists(), "no folder-keyed shadow");
+    assert!(fx.shadow_path(&outer).exists());
+    s.undo_turn(t.id, false, Source::Internal).unwrap();
+    assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
+    s.stop();
+}
+
+fn sparse(path: &std::path::Path, len: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
+/// An agent naming a directory (`Documents`) as the file to write is refused before any backup:
+/// nothing below it is walked or copied, and in a folder no shadow is even created.
+#[test]
+fn a_write_to_a_directory_is_refused_before_any_backup() {
+    let fx = need!(Fx::build(
+        |base| sparse(&base.join("proj/Documents/big.iso"), 65 * 1024 * 1024),
+        "proj"
+    ));
+    let s = fx.start();
+    let t = fx.run(&s, "write Documents oops\\n");
+    let answer = t.answer();
+    assert!(answer.contains("not a regular file"), "{answer}");
+    assert!(!fx.data.join("shadow").exists(), "no backup was attempted");
+    assert!(fx.root.join("Documents/big.iso").is_file());
+    assert!(t.written.is_empty() && t.journal_id.is_none());
+    s.stop();
+}
+
+/// The same in a repository for a git-ignored directory (`node_modules`): the checkpoint leaves
+/// it out, and the first-touch backup of ignored files never walks it.
+#[test]
+fn a_write_to_an_ignored_directory_in_a_repository_is_refused_before_any_backup() {
+    let fx = need!(Fx::build(
+        |base| {
+            let root = base.join("proj");
+            fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+            sparse(&root.join("node_modules/pkg/blob.bin"), 65 * 1024 * 1024);
+            common::git(&root, &["init", "-q", "-b", "main"]);
+            common::git(&root, &["add", "-A"]);
+            common::git(&root, &["commit", "-q", "-m", "init"]);
+        },
+        "proj"
+    ));
+    let s = fx.start();
+    let shadow = lector_git::ShadowRepo::open(&fx.data, fx.project.repo().unwrap()).unwrap();
+    let before = shadow.snapshots().unwrap().len();
+    let t = fx.run(&s, "write node_modules oops\\n");
+    let answer = t.answer();
+    assert!(answer.contains("not a regular file"), "{answer}");
+    assert_eq!(
+        shadow.snapshots().unwrap().len(),
+        before + 2,
+        "only the turn's two checkpoints, no backup of the directory"
+    );
+    s.stop();
+}
+
+/// Codex finding: the agent creates `big.log`, another program grows it past 64 MiB before the
+/// turn ends. The turn still lists it (added) and, with it as the only touched file, is undoable:
+/// undo removes it (the before-state, "did not exist") and says it cannot be redone.
+#[test]
+fn a_created_file_grown_past_the_limit_by_another_writer_is_removed_by_undo() {
+    let fx = need!(Fx::folder());
+    let s = fx.start();
+    let id = s
+        .prompt("write big.log started\\n\nask keep going".into(), vec![])
+        .unwrap();
+    // While the agent waits for an answer, another program appends to the file.
+    let mut pending = Vec::new();
+    for _ in 0..600 {
+        pending = s.pending_permissions();
+        if !pending.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let request = pending.first().expect("the agent asks").id;
+    sparse(&fx.root.join("big.log"), 65 * 1024 * 1024);
+    s.answer_permission(request, PermissionChoice::AllowOnce);
+    let t = s.wait_turn(id, common::WAIT).expect("turn finished");
+    let changed: Vec<(&str, lector_git::ChangeKind)> = t
+        .changed_files
+        .iter()
+        .map(|c| (c.path.as_str(), c.kind))
+        .collect();
+    assert_eq!(changed, [("big.log", lector_git::ChangeKind::Added)]);
+    assert!(t.journal_id.is_some(), "the turn is undoable");
+    let undo_id = s.undo_turn(t.id, false, Source::Internal).unwrap();
+    assert!(
+        !fx.root.join("big.log").exists(),
+        "undo restored the absence"
+    );
+    let undo = fx.journal().get(undo_id).unwrap();
+    assert!(
+        undo.summary.contains("cannot be redone"),
+        "{}",
+        undo.summary
+    );
+    s.stop();
+}
+
+/// Codex finding: an agent write to an open UTF-16 document is held to the limit by the bytes the
+/// save will write, not by the UTF-8 text it sent: 40 MiB of ASCII is 80 MiB on disk and is
+/// refused; a small write is accepted and the turn's after-state stores it (redo stays possible).
+#[test]
+fn an_open_utf16_document_is_checked_by_the_bytes_it_will_have() {
+    let fx = need!(Fx::build(
+        |base| {
+            let utf16: Vec<u8> = [0xFF, 0xFE]
+                .into_iter()
+                .chain("hi\r\n".encode_utf16().flat_map(|u| u.to_le_bytes()))
+                .collect();
+            fs::write(base.join("proj/u16.txt"), utf16).unwrap();
+        },
+        "proj"
+    ));
+    let store = lector_app::documents::DocumentStore::for_core(&fx.core);
+    let _handle = store.open(&fx.root.join("u16.txt"), &fx.project).unwrap();
+    let before = fs::read(fx.root.join("u16.txt")).unwrap();
+    let s = fx.start();
+    let t = fx.run(&s, &format!("writegen u16.txt {} a", 40 * 1024 * 1024));
+    let answer = t.answer();
+    assert!(
+        answer.contains("64 MiB"),
+        "{:?} size {:?} {}",
+        t.state,
+        fs::metadata(fx.root.join("u16.txt")).map(|m| m.len()),
+        &answer[..answer.len().min(300)]
+    );
+    assert_eq!(
+        fs::read(fx.root.join("u16.txt")).unwrap(),
+        before,
+        "unchanged"
+    );
+
+    let t = fx.run(&s, "writegen u16.txt 1000 b");
+    assert!(!t.answer().contains("WRITE-ERROR"), "{}", t.answer());
+    assert_eq!(
+        fs::metadata(fx.root.join("u16.txt")).unwrap().len(),
+        2 + 2 * 1000
+    );
+    assert_eq!(t.changed_files.len(), 1);
+    s.stop();
+}

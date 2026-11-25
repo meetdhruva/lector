@@ -25,6 +25,16 @@
 //! recorded index entries point at (keeps them reachable) and `manifest` = what the
 //! snapshot covers (absent paths, index entries). A path that is *absent* in the
 //! snapshot is restored by deleting it.
+//!
+//! **Folders without git** (ADR 0011) get a shadow repository too ([`ShadowRepo::open_folder`]),
+//! at the same place a repository of that folder would have it (keyed by the canonical path),
+//! created at the first backup and never by looking for one ([`ShadowRepo::existing_folder`]).
+//! It has no alternates and is *path-scoped*: only [`ShadowRepo::snapshot_paths`], restores and
+//! fingerprints of named paths work; whole-tree and index operations refuse
+//! ([`Error::NotARepository`]), so nothing ever lists or walks the folder (it may be a home
+//! directory) and no git command runs in it. Every command names the shadow explicitly
+//! (`--git-dir`, which turns repository discovery off) and the shadow is bare, so neither a
+//! repository above the folder nor the folder's `.gitattributes` is ever read.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -38,7 +48,10 @@ use crate::{ChangeKind, FileChange, Oid, Repo, Side};
 
 mod capture;
 mod command;
+mod files;
+mod folder;
 mod gc;
+mod merge;
 mod open;
 mod read;
 mod restore;
@@ -51,9 +64,31 @@ use util::{check_rel, dir_size, is_within, parse_ls_files_stage, ref_time};
 
 /// Default size cap of one shadow repository for [`ShadowRepo::prune`].
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// Snapshots younger than this are never removed to meet the size cap by
+/// [`ShadowRepo::prune`] (the trim every backup path runs).
+pub const SIZE_TRIM_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+/// The largest file the shadow of a folder without git stores (ADR 0011): larger ones are
+/// recorded as skipped ([`ShadowRepo::snapshot_paths`]) or refused ([`Oversize::Refuse`]).
+pub const FOLDER_MAX_FILE: u64 = 64 * 1024 * 1024;
+
+/// What [`ShadowRepo::snapshot_files`] does with a path it will not store: a file over the
+/// size limit, a directory, or a FIFO, socket or device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Oversize {
+    /// Fail the whole snapshot (nothing is recorded): for a backup a write depends on.
+    Refuse,
+    /// Record a file over the limit as skipped without reading it (a restore of that path then
+    /// refuses); still fail for a directory, FIFO, socket or device.
+    Skip,
+    /// Record every such path as skipped without reading it, and also a path now reached through
+    /// a symlinked parent: for recording the state at the end of an agent turn, which must not
+    /// fail (and so lose the turn's undo) because a file was replaced by a directory or a parent
+    /// by a link. A restore of a skipped path refuses, naming it.
+    SkipAll,
+}
 /// Files larger than this are skipped (and recorded as skipped) by
 /// [`ShadowRepo::snapshot_worktree`]; explicit [`ShadowRepo::snapshot_paths`] never skips.
-const WORKTREE_MAX_FILE: u64 = 256 * 1024 * 1024;
+pub const WORKTREE_MAX_FILE: u64 = 256 * 1024 * 1024;
 /// Files up to this size are buffered; larger ones are streamed to `fast-import`.
 const BUFFER_LIMIT: u64 = 64 * 1024 * 1024;
 const REF_PREFIX: &str = "refs/lector/snapshots/";
@@ -164,6 +199,14 @@ pub struct PruneOptions {
     pub max_bytes: Option<u64>,
 }
 
+/// What [`ShadowRepo::restore_paths_reporting`] restored only in part.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Restored files whose directory entry keeps another spelling than the recorded one,
+    /// because renaming it failed: (spelling on disk, recorded path).
+    pub unrenamed: Vec<(String, String)>,
+}
+
 /// Outcome of [`ShadowRepo::prune_with`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PruneReport {
@@ -180,6 +223,8 @@ pub struct PruneReport {
 pub struct ShadowRepo {
     git_dir: PathBuf,
     workdir: PathBuf,
+    /// The shadow of a folder without git: path-scoped operations only.
+    folder: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -228,9 +273,13 @@ impl ShadowRepo {
             return Err(Error::Bare);
         }
         let git_dir = Self::path_for(data_dir, &workdir);
-        let shadow = ShadowRepo { git_dir, workdir };
+        let shadow = ShadowRepo {
+            git_dir,
+            workdir,
+            folder: false,
+        };
         let user_objects = objects_dir(repo);
-        shadow.ensure_initialized(&user_objects)?;
+        shadow.ensure_initialized(Some(&user_objects))?;
         remember_shadow(&shadow);
         Ok(shadow)
     }
@@ -274,7 +323,15 @@ impl ShadowRepo {
     /// Records the working-tree contents of `paths` (files, symlinks; directories are
     /// recorded recursively, `.git` skipped). Paths that do not exist are recorded as
     /// absent, so restoring them deletes whatever is there later. Contents are exact bytes.
+    ///
+    /// For the shadow of a folder without git this is path-scoped: it is
+    /// [`ShadowRepo::snapshot_files`] with [`FOLDER_MAX_FILE`] and [`Oversize::Skip`], so a
+    /// directory is never walked (it is refused, as are FIFOs, sockets and devices) and a larger
+    /// file is never stored (it is recorded as skipped).
     pub fn snapshot_paths(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot> {
+        if self.folder {
+            return self.snapshot_files(paths, FOLDER_MAX_FILE, Oversize::Skip, note);
+        }
         let mut plan = Plan::new(SnapshotKind::Paths);
         for path in paths {
             let rel = check_rel(path)?;
@@ -288,6 +345,7 @@ impl ShadowRepo {
     /// without an entry are recorded as "not in the index". Restore with
     /// [`ShadowRepo::restore_index`].
     pub fn snapshot_index(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot> {
+        self.needs_repository()?;
         let mut plan = Plan::new(SnapshotKind::Index);
         let mut rels = Vec::new();
         for path in paths {
@@ -322,8 +380,10 @@ impl ShadowRepo {
 
     /// Records the whole working tree: tracked and untracked files, minus what
     /// `.gitignore` (and `info/exclude`, global ignores) exclude. Used for agent
-    /// checkpoints. Files over 256 MiB are skipped and recorded as such.
+    /// checkpoints. Files over 256 MiB are skipped and recorded as such. Refused for the shadow
+    /// of a folder without git (it never walks a folder).
     pub fn snapshot_worktree(&self, note: &str) -> Result<ShadowSnapshot> {
+        self.needs_repository()?;
         let mut plan = Plan::new(SnapshotKind::Worktree);
         let out = exec(
             self.user_git(&[
@@ -483,7 +543,35 @@ impl ShadowRepo {
     /// snapshots), sorted by path. Only paths covered by both snapshots are compared,
     /// so a narrower snapshot never reports the rest as deleted. Sides are
     /// [`Side::Blob`]s living in the shadow repository: load them with
-    /// [`ShadowRepo::file_at`] or [`ShadowRepo::load`].
+    /// [`ShadowRepo::file_at`] or [`ShadowRepo::load`]. A side the snapshot did not store
+    /// (skipped) is [`Side::Workdir`] (the file now) for `b` and [`Side::None`] for `a`.
+    ///
+    /// Each covered path is in one of three states per snapshot: *absent*, *stored* (a file or
+    /// link with its blob) or *skipped* (not stored: a file over the size limit, or not a regular
+    /// file; the manifest does not say which, so both behave alike here). For an agent turn in a
+    /// folder without git (ADR 0011), `a` is the before-state (first-touch backups, which are
+    /// never skipped: a write whose backup would be is refused) and `b` the state at turn end;
+    /// the turn's undo restores `a` for every reported path through the journal, which first
+    /// backs the present state up (folder shadow: [`ShadowRepo::snapshot_paths`]: files over
+    /// 64 MiB skipped, directories refused) and keeps that backup for redo:
+    ///
+    /// | before (`a`) | after (`b`) | reported | undo (check / force) | redo |
+    /// |---|---|---|---|---|
+    /// | absent | absent | nothing | – | – |
+    /// | absent | file | Added | deletes the file | restores the file |
+    /// | absent | large | Added | deletes it; check passes only when it is unchanged since turn end (hash, not stored); force refuses if it changed since (no backup possible); the undo says the file cannot be redone | refuses: not backed up |
+    /// | absent | not a file | Added | refuses: a directory is never backed up or removed | – |
+    /// | file | absent | Deleted | recreates the file | deletes it again |
+    /// | file | file | Modified (if different) | restores the bytes | restores the turn's bytes |
+    /// | file | large | Modified | restores the bytes; check / force as for absent → large | refuses: not backed up |
+    /// | file | not a file | Modified | refuses (the path is now a directory) | – |
+    /// | large or not a file | absent | Deleted | refuses: not backed up | – |
+    /// | large or not a file | file | Modified | refuses: not backed up | – |
+    /// | large or not a file | large or not a file | nothing (neither side stored) | – | – |
+    ///
+    /// An undo restores all of its paths or none (a refusal for one path writes nothing). Whole
+    /// work-tree snapshots treat an unrecorded path as absent; their skipped files (over
+    /// 256 MiB) follow the same rows.
     pub fn changes_between(
         &self,
         a: &ShadowSnapshot,
@@ -498,14 +586,28 @@ impl ShadowRepo {
         let (fa, fb) = (self.tree_files(a)?, self.tree_files(b)?);
         let covered_a = ma.covers_fn(&fa);
         let covered_b = mb.covers_fn(&fb);
+        // Every path either snapshot says something about: stored, absent or skipped.
         let mut paths: BTreeSet<&String> = fa.keys().collect();
         paths.extend(fb.keys());
+        paths.extend(ma.absent.iter().chain(&ma.skipped));
+        paths.extend(mb.absent.iter().chain(&mb.skipped));
+        let skipped = |m: &Manifest, path: &String| m.skipped.iter().any(|s| s == path);
         let mut changes = Vec::new();
         for path in paths {
             if !covered_a(path) || !covered_b(path) {
                 continue;
             }
-            let change = match (fa.get(path), fb.get(path)) {
+            let (skip_a, skip_b) = (skipped(&ma, path), skipped(&mb, path));
+            let change = |kind, old: Side, new: Side| FileChange {
+                old_path: (kind != ChangeKind::Added).then(|| path.clone()),
+                new_path: (kind != ChangeKind::Deleted).then(|| path.clone()),
+                kind,
+                old,
+                new,
+                binary: None,
+            };
+            let now = || Side::Workdir(path.clone());
+            let found = match (fa.get(path), fb.get(path)) {
                 (Some((ma_, oa)), Some((mb_, ob))) => {
                     if oa == ob && ma_ == mb_ {
                         continue;
@@ -515,34 +617,26 @@ impl ShadowRepo {
                     } else {
                         ChangeKind::Modified
                     };
-                    FileChange {
-                        old_path: Some(path.clone()),
-                        new_path: Some(path.clone()),
-                        kind,
-                        old: Side::Blob(*oa),
-                        new: Side::Blob(*ob),
-                        binary: None,
-                    }
+                    change(kind, Side::Blob(*oa), Side::Blob(*ob))
                 }
-                (Some((_, oa)), None) => FileChange {
-                    old_path: Some(path.clone()),
-                    new_path: None,
-                    kind: ChangeKind::Deleted,
-                    old: Side::Blob(*oa),
-                    new: Side::None,
-                    binary: None,
+                // Not stored by `b`: still there, changed.
+                (Some((_, oa)), None) if skip_b => {
+                    change(ChangeKind::Modified, Side::Blob(*oa), now())
+                }
+                (Some((_, oa)), None) => change(ChangeKind::Deleted, Side::Blob(*oa), Side::None),
+                (None, Some((_, ob))) if skip_a => {
+                    change(ChangeKind::Modified, Side::None, Side::Blob(*ob))
+                }
+                (None, Some((_, ob))) => change(ChangeKind::Added, Side::None, Side::Blob(*ob)),
+                // Neither stored: absent -> skipped is a creation (it grew past the limit or is
+                // not a file), skipped -> absent a deletion, skipped -> skipped not comparable.
+                (None, None) => match (skip_a, skip_b) {
+                    (false, true) => change(ChangeKind::Added, Side::None, now()),
+                    (true, false) => change(ChangeKind::Deleted, Side::None, Side::None),
+                    _ => continue,
                 },
-                (None, Some((_, ob))) => FileChange {
-                    old_path: None,
-                    new_path: Some(path.clone()),
-                    kind: ChangeKind::Added,
-                    old: Side::None,
-                    new: Side::Blob(*ob),
-                    binary: None,
-                },
-                (None, None) => continue,
             };
-            changes.push(change);
+            changes.push(found);
         }
         Ok(changes)
     }
@@ -643,11 +737,20 @@ impl ShadowRepo {
     /// files changed in the meantime. Nothing is written.
     pub fn fingerprints(&self, paths: &[&str]) -> Result<BTreeMap<String, String>> {
         let mut rels: BTreeSet<String> = BTreeSet::new();
+        let mut special: BTreeSet<String> = BTreeSet::new();
         for path in paths {
             let rel = check_rel(path)?;
             self.no_symlink_parents(&rel)?;
             let abs = self.workdir.join(&rel);
-            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+            let meta = fs::symlink_metadata(&abs).ok();
+            if self.folder
+                && meta
+                    .as_ref()
+                    .is_some_and(|m| !m.is_file() && !m.is_symlink())
+            {
+                // Path-scoped: a directory (or FIFO, device) is one opaque entry, never walked.
+                special.insert(rel);
+            } else if meta.is_some_and(|m| m.is_dir()) {
                 let mut plan = Plan::new(SnapshotKind::Paths);
                 self.collect(&rel, &mut plan, true, u64::MAX)?;
                 rels.extend(plan.files.into_iter().map(|f| f.rel));
@@ -658,7 +761,7 @@ impl ShadowRepo {
         let rels: Vec<String> = rels.into_iter().collect();
         let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
         let state = self.worktree_state(&refs)?;
-        Ok(rels
+        let mut out: BTreeMap<String, String> = rels
             .into_iter()
             .zip(state)
             .map(|(rel, st)| {
@@ -668,7 +771,13 @@ impl ShadowRepo {
                 };
                 (rel, value)
             })
-            .collect())
+            .collect();
+        out.extend(
+            special
+                .into_iter()
+                .map(|rel| (rel, "not a file".to_owned())),
+        );
+        Ok(out)
     }
 
     /// One stable fingerprint for [`ShadowRepo::fingerprints`] of `paths`.
@@ -683,6 +792,7 @@ impl ShadowRepo {
     /// id, intent-to-add flag), `"absent"` for requested paths without an entry. Compare with
     /// a stored map before an index undo.
     pub fn index_fingerprints(&self, paths: &[&str]) -> Result<BTreeMap<String, String>> {
+        self.needs_repository()?;
         let mut rels = Vec::new();
         for path in paths {
             rels.push(check_rel(path)?);
@@ -729,79 +839,42 @@ impl ShadowRepo {
     /// recreated or deleted as recorded, executable bit and symlinks kept. Directories
     /// restore every file recorded below them. **Writes user files — call it only from
     /// an explicit undo.** Never writes inside `.git` or through symlinked directories.
+    ///
+    /// **All or nothing.** It restores every requested path to the snapshot's recorded state,
+    /// or fails as a whole, naming the paths it cannot restore, before writing anything. A path
+    /// cannot be restored when the snapshot does not cover it, when the snapshot recorded it (or
+    /// a file below it) as *skipped* (not stored: too large, or not a regular file; for every
+    /// snapshot kind, so an unavailable backup is never a successful no-op), when it is now a
+    /// folder, FIFO, socket or device (never replaced or removed), or when a parent is now a file
+    /// or a link. The files are then staged next to their destinations and renamed into place,
+    /// so a failure while reading or writing data changes nothing; only a failing rename or
+    /// delete (the last step) can leave the restore partly done, and the error says so.
+    ///
+    /// **Spelling.** A restored file gets its recorded name, also on a case-insensitive or
+    /// normalising file system where the destination already exists under another spelling
+    /// (`A.txt` on disk, `a.txt` recorded; NFD on disk, NFC recorded): APFS keeps the existing
+    /// entry's spelling when a file is renamed onto it, so after the staged file is in place
+    /// (the content is restored, never missing) the entry is renamed to the recorded spelling,
+    /// a metadata-only change. When the file system will not store that spelling (HFS+ stores
+    /// every name in NFD) the entry still resolves to the restored file and that is accepted. If
+    /// that rename fails, the content is restored but the name is not: this function then fails
+    /// naming both spellings, and [`ShadowRepo::restore_paths_reporting`] returns it in its
+    /// report instead. Only the final component is re-spelled; parent directories keep the
+    /// spelling they have on disk.
     pub fn restore_paths(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()> {
-        let manifest = self.manifest(snap)?;
-        if manifest.kind == SnapshotKind::Index {
-            return Err(Error::Parse(
-                "this snapshot recorded the index, not files; use restore_index".into(),
-            ));
+        let report = self.restore_paths_reporting(snap, paths)?;
+        if report.unrenamed.is_empty() {
+            return Ok(());
         }
-        let files = self.tree_files(snap)?;
-        let full = manifest.kind == SnapshotKind::Worktree;
-
-        // Plan first: nothing is written when any requested path is unusable.
-        let mut writes: Vec<(String, String, Oid)> = Vec::new(); // (rel, mode, oid)
-        let mut deletes: Vec<String> = Vec::new();
-        for path in paths {
-            let rel = check_rel(path)?;
-            self.no_symlink_parents(&rel)?;
-            let mut found = false;
-            for (name, (mode, oid)) in &files {
-                if is_within(name, &rel) {
-                    found = true;
-                    writes.push((name.clone(), mode.clone(), *oid));
-                }
-            }
-            if manifest.skipped.iter().any(|s| is_within(s, &rel)) {
-                found = true;
-            }
-            if manifest.absent.iter().any(|a| a == &rel) || (!found && full) {
-                found = true;
-                deletes.push(rel.clone());
-            }
-            if !found {
-                return Err(Error::Parse(format!(
-                    "{rel:?} is not part of this snapshot"
-                )));
-            }
-        }
-        // A path restored from a file and deleted at the same time can't be both.
-        writes.sort();
-        writes.dedup();
-        deletes.sort();
-        deletes.dedup();
-        for (rel, ..) in &writes {
-            self.no_symlink_parents(rel)?;
-            let abs = self.workdir.join(rel);
-            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
-                return Err(Error::Io(io::Error::other(format!(
-                    "{rel} is now a directory; move it away to restore the file"
-                ))));
-            }
-        }
-        for rel in &deletes {
-            let abs = self.workdir.join(rel);
-            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
-                return Err(Error::Io(io::Error::other(format!(
-                    "{rel} is now a directory; it was absent when the snapshot was taken"
-                ))));
-            }
-        }
-
-        let oids: Vec<Oid> = writes.iter().map(|(_, _, o)| *o).collect();
-        self.cat_blobs(&oids, |i, reader, size| {
-            let (rel, mode, _) = &writes[i];
-            self.write_restored(rel, mode, reader, size)
-        })?;
-        for rel in &deletes {
-            let abs = self.workdir.join(rel);
-            match fs::remove_file(&abs) {
-                Ok(()) => self.remove_empty_parents(&abs),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
-        Ok(())
+        let names: Vec<String> = report
+            .unrenamed
+            .iter()
+            .map(|(now, recorded)| format!("{now} (recorded as {recorded})"))
+            .collect();
+        Err(Error::Io(io::Error::other(format!(
+            "the files were restored, but the name of {} could not be changed back",
+            names.join(", ")
+        ))))
     }
 
     /// Puts the recorded index entries of `paths` back (`git update-index --index-info`
@@ -809,6 +882,7 @@ impl ShadowRepo {
     /// already exist in the user's object database — they were staged there. **Writes the
     /// user's index — call it only from an explicit undo.**
     pub fn restore_index(&self, snap: &ShadowSnapshot, paths: &[&str]) -> Result<()> {
+        self.needs_repository()?;
         let manifest = self.manifest(snap)?;
         if manifest.kind != SnapshotKind::Index {
             return Err(Error::Parse(
@@ -983,8 +1057,12 @@ impl ShadowRepo {
     }
 
     /// Whether git ignores the work-tree path `rel` (`git check-ignore`), i.e. whether
-    /// [`ShadowRepo::snapshot_worktree`] leaves it out. Errors count as "not ignored".
+    /// [`ShadowRepo::snapshot_worktree`] leaves it out. Errors count as "not ignored", and so
+    /// does every path of a folder without git (no git runs there).
     pub fn is_ignored(&self, rel: &str) -> bool {
+        if self.folder {
+            return false;
+        }
         let Ok(rel) = check_rel(rel) else {
             return false;
         };
@@ -1042,10 +1120,21 @@ impl ShadowRepo {
 
     /// Deletes snapshots older than `keep` and trims to [`DEFAULT_MAX_BYTES`].
     pub fn prune(&self, keep: Duration) -> Result<()> {
-        self.prune_with(PruneOptions {
-            keep,
-            max_bytes: Some(DEFAULT_MAX_BYTES),
-        })
+        self.prune_capped(keep, DEFAULT_MAX_BYTES)
+    }
+
+    /// [`ShadowRepo::prune`] with another size cap. Trimming for size never removes a snapshot
+    /// taken in the last [`SIZE_TRIM_GRACE`]: another session's running agent turn (or one that
+    /// just ended) keeps its backups even while the shadow is over the cap, so its undo stays
+    /// possible; age-based pruning (`keep`) is not affected.
+    pub fn prune_capped(&self, keep: Duration, max_bytes: u64) -> Result<()> {
+        self.prune_impl(
+            PruneOptions {
+                keep,
+                max_bytes: Some(max_bytes),
+            },
+            now_secs() - SIZE_TRIM_GRACE.as_secs() as i64,
+        )
         .map(drop)
     }
 
@@ -1053,6 +1142,12 @@ impl ShadowRepo {
     /// objects fit in `opts.max_bytes` (the newest snapshot always stays), then
     /// repacks and drops unreachable objects. Only the shadow repository is touched.
     pub fn prune_with(&self, opts: PruneOptions) -> Result<PruneReport> {
+        self.prune_impl(opts, i64::MAX)
+    }
+
+    /// [`ShadowRepo::prune_with`]; size trimming only removes snapshots taken at or before
+    /// `trimmable_until` (Unix seconds).
+    fn prune_impl(&self, opts: PruneOptions, trimmable_until: i64) -> Result<PruneReport> {
         let _lock = self.lock()?;
         let mut snaps = self.snapshots()?;
         let cutoff = now_secs() - opts.keep.as_secs() as i64;
@@ -1076,8 +1171,13 @@ impl ShadowRepo {
                 self.gc()?;
                 bytes = dir_size(&self.git_dir.join("objects"));
             }
-            while bytes > cap && snaps.len() > 1 {
-                let batch = (snaps.len() / 4).max(1).min(snaps.len() - 1);
+            loop {
+                let trimmable = snaps.iter().filter(|s| s.time <= trimmable_until).count();
+                if bytes <= cap || snaps.len() <= 1 || trimmable == 0 {
+                    break;
+                }
+                // The trimmable snapshots are the oldest: at the back.
+                let batch = (trimmable / 4).max(1).min(trimmable).min(snaps.len() - 1);
                 let victims: Vec<ShadowSnapshot> = snaps.split_off(snaps.len() - batch);
                 removed += self.delete_snapshots(&victims)?;
                 self.gc()?;
@@ -1114,10 +1214,15 @@ struct PlannedFile {
 struct Plan {
     kind: SnapshotKind,
     files: Vec<PlannedFile>,
+    /// Entries whose blob is already in the shadow: (path, mode, blob) ([`ShadowRepo::merge_snapshots`]).
+    recorded: Vec<(String, String, Oid)>,
     absent: Vec<String>,
     skipped: Vec<String>,
     /// Files that disappeared between stat and read (recorded absent).
     vanished: Vec<String>,
+    /// Files larger than this when opened are not stored ([`Plan::oversize`] says what then).
+    max_file: u64,
+    oversize: Oversize,
     index: Vec<IndexRecord>,
     no_index: Vec<String>,
     /// Index entries that are intent-to-add (`git add -N`), a flag `ls-files -s` does not show.
@@ -1129,9 +1234,12 @@ impl Plan {
         Plan {
             kind,
             files: Vec::new(),
+            recorded: Vec::new(),
             absent: Vec::new(),
             skipped: Vec::new(),
             vanished: Vec::new(),
+            max_file: u64::MAX,
+            oversize: Oversize::Skip,
             index: Vec::new(),
             no_index: Vec::new(),
             intent_to_add: Vec::new(),

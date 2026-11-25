@@ -80,22 +80,54 @@ pub fn backup_available(core: &AppCore, repo: &Repo) -> Result<(), String> {
 /// "the backup was cleaned up").
 const BACKUP_RETENTION: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Opens the shadow repository of `repo`; the first time per process it also trims it
-/// ([`BACKUP_RETENTION`], [`lector_git::shadow::DEFAULT_MAX_BYTES`]) so backups never grow without bound.
+/// Opens the shadow repository of `repo` and trims it the first time per process
+/// ([`trim_once`]).
 fn open_shadow(core: &AppCore, repo: &Repo) -> Result<ShadowRepo, lector_git::Error> {
+    let data = data_dir(core);
+    let shadow = ShadowRepo::open(&data, repo)?;
+    trim_once(&data, &shadow);
+    Ok(shadow)
+}
+
+/// The retention policy of every shadow repository, applied when Lector backs something up into
+/// one: the first time per process a shadow is used it is trimmed ([`BACKUP_RETENTION`],
+/// [`lector_git::shadow::DEFAULT_MAX_BYTES`]) so backups never grow without bound, and the first
+/// time per process any shadow is used, shadows whose folder or repository is gone are deleted
+/// once their newest backup is older than [`BACKUP_RETENTION`]
+/// ([`ShadowRepo::prune_orphans`]). Shadows of repositories and of folders without git
+/// (ADR 0011) are treated alike. Best effort: failures are logged.
+pub(crate) fn trim_once(data_dir: &Path, shadow: &ShadowRepo) {
     static TRIMMED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
         std::sync::OnceLock::new();
-    let shadow = ShadowRepo::open(&data_dir(core), repo)?;
     let first = TRIMMED
         .get_or_init(Default::default)
         .lock()
         .insert(shadow.git_dir().to_path_buf());
     if first {
-        if let Err(err) = shadow.prune(BACKUP_RETENTION) {
-            tracing::warn!("cannot trim the shadow repository: {err}");
+        trim_now(data_dir, shadow);
+    }
+}
+
+/// Trims `shadow` now by the retention policy (an agent turn does before its first backup) and,
+/// the first time per process for `data_dir`, deletes expired shadows of deleted folders
+/// ([`trim_once`]). Best effort: failures are logged.
+pub(crate) fn trim_now(data_dir: &Path, shadow: &ShadowRepo) {
+    static SWEPT: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    if let Err(err) = shadow.prune(BACKUP_RETENTION) {
+        tracing::warn!("cannot trim the shadow repository: {err}");
+    }
+    let sweep = SWEPT
+        .get_or_init(Default::default)
+        .lock()
+        .insert(data_dir.to_path_buf());
+    if sweep {
+        match ShadowRepo::prune_orphans(data_dir, BACKUP_RETENTION) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("removed {n} expired backup store(s) of deleted folders"),
+            Err(err) => tracing::warn!("cannot remove expired backup stores: {err}"),
         }
     }
-    Ok(shadow)
 }
 
 fn data_dir(core: &AppCore) -> PathBuf {

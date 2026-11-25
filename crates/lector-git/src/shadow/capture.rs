@@ -14,8 +14,27 @@ use crate::Oid;
 use super::command::{exec, spawn_error};
 use super::util::{is_executable, path_bytes, quote_path, sanitize_note};
 use super::{
-    now_secs, FileKind, Plan, PlannedFile, ShadowRepo, ShadowSnapshot, BUFFER_LIMIT, REF_PREFIX,
+    now_secs, FileKind, Oversize, Plan, PlannedFile, ShadowRepo, ShadowSnapshot, BUFFER_LIMIT,
+    REF_PREFIX,
 };
+
+/// What [`ShadowRepo::stream_file`] did with one planned file.
+enum Streamed {
+    Stored,
+    Vanished,
+    TooLarge,
+}
+
+/// The error of [`Oversize::Refuse`] for a file over `max` bytes.
+pub(super) fn too_large(rel: &str, max: u64) -> Error {
+    Error::Io(io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!(
+            "{rel} is larger than {} MiB, the most Lector backs up here",
+            max / (1024 * 1024)
+        ),
+    ))
+}
 
 impl ShadowRepo {
     /// Stats `rel` and adds it (or, for directories when `expand`, everything below) to `plan`.
@@ -127,11 +146,19 @@ impl ShadowRepo {
 
             let mut present: Vec<&PlannedFile> = Vec::new();
             for file in &plan.files {
-                if self.stream_file(&mut w, file)? {
-                    present.push(file);
-                } else {
-                    plan.vanished.push(file.rel.clone());
+                match self.stream_file(&mut w, file, plan.max_file)? {
+                    Streamed::Stored => present.push(file),
+                    Streamed::Vanished => plan.vanished.push(file.rel.clone()),
+                    // Grew past the limit after it was planned: never stored.
+                    Streamed::TooLarge => match plan.oversize {
+                        Oversize::Skip | Oversize::SkipAll => plan.skipped.push(file.rel.clone()),
+                        Oversize::Refuse => return Err(too_large(&file.rel, plan.max_file)),
+                    },
                 }
+            }
+            // Entries carried over from other snapshots: their blobs are already here.
+            for (rel, mode, oid) in &plan.recorded {
+                writeln!(w, "M {mode} {oid} {}", quote_path(&format!("files/{rel}")))?;
             }
             let mut blobs = BTreeSet::new();
             for entry in &plan.index {
@@ -190,15 +217,23 @@ impl ShadowRepo {
         Ok(snapshot)
     }
 
-    /// Writes `M <mode> inline files/<rel>` + data. `Ok(false)` if the file vanished.
-    fn stream_file(&self, w: &mut impl Write, file: &PlannedFile) -> Result<bool> {
+    /// Writes `M <mode> inline files/<rel>` + data, unless the file vanished or is larger than
+    /// `max_file` when opened (then nothing is written for it).
+    fn stream_file(
+        &self,
+        w: &mut impl Write,
+        file: &PlannedFile,
+        max_file: u64,
+    ) -> Result<Streamed> {
         let abs = self.workdir.join(&file.rel);
         let tree_path = quote_path(&format!("files/{}", file.rel));
         match file.kind {
             FileKind::Link => {
                 let target = match fs::read_link(&abs) {
                     Ok(t) => t,
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        return Ok(Streamed::Vanished)
+                    }
                     Err(err) => return Err(err.into()),
                 };
                 let bytes = path_bytes(&target);
@@ -206,16 +241,21 @@ impl ShadowRepo {
                 writeln!(w, "data {}", bytes.len())?;
                 w.write_all(&bytes)?;
                 writeln!(w)?;
-                Ok(true)
+                Ok(Streamed::Stored)
             }
             FileKind::File { executable } => {
                 let mut handle = match fs::File::open(&abs) {
                     Ok(f) => f,
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        return Ok(Streamed::Vanished)
+                    }
                     Err(err) => return Err(err.into()),
                 };
                 let mode = if executable { "100755" } else { "100644" };
                 let len = handle.metadata()?.len();
+                if len > max_file {
+                    return Ok(Streamed::TooLarge);
+                }
                 writeln!(w, "M {mode} inline {tree_path}")?;
                 if len <= BUFFER_LIMIT {
                     let mut data = Vec::with_capacity(len as usize);
@@ -233,7 +273,7 @@ impl ShadowRepo {
                     }
                 }
                 writeln!(w)?;
-                Ok(true)
+                Ok(Streamed::Stored)
             }
         }
     }

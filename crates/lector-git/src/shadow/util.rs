@@ -203,3 +203,57 @@ pub(super) fn apply_permissions(
     }
     Ok(())
 }
+
+/// Whether two existing paths are the same directory entry (case-insensitive or normalising
+/// file systems give one file several spellings). `false` when either does not exist.
+#[cfg(unix)]
+pub(super) fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::symlink_metadata(a), fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Whether two existing paths are the same directory entry (see the Unix version): compared by
+/// their canonical paths, which Windows returns in the stored spelling.
+#[cfg(not(unix))]
+pub(super) fn same_entry(a: &Path, b: &Path) -> bool {
+    match (dunce::canonicalize(a), dunce::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// The name, as stored in `dir`, of the entry that `name` reaches there (`None` when it reaches
+/// nothing): `name` itself when `dir` lists it, else the one entry with the same inode (a case or
+/// normalisation variant). With several such entries (hard links) `name` is returned: no other
+/// link's name is ever taken for it.
+#[cfg(unix)]
+pub(super) fn stored_name(dir: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    use std::os::unix::fs::{DirEntryExt, MetadataExt};
+    let ino = fs::symlink_metadata(dir.join(name)).ok()?.ino();
+    let mut same = Vec::new();
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        if entry.file_name() == name {
+            return Some(entry.file_name());
+        }
+        if entry.ino() == ino {
+            same.push(entry.file_name());
+        }
+    }
+    match same.len() {
+        1 => same.pop(),
+        _ => Some(name.to_os_string()),
+    }
+}
+
+/// The stored name of the entry `name` reaches in `dir` (see the Unix version): the canonical
+/// path's file name, which Windows returns as stored.
+#[cfg(not(unix))]
+pub(super) fn stored_name(dir: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    dunce::canonicalize(dir.join(name))
+        .ok()?
+        .file_name()
+        .map(|n| n.to_os_string())
+}

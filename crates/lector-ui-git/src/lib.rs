@@ -30,6 +30,8 @@ pub mod sync_support;
 pub mod util;
 
 #[cfg(test)]
+mod activity_tests;
+#[cfg(test)]
 mod sync_tests;
 
 use lector_ui::background::{background, view_key, JobKind, Priority};
@@ -82,6 +84,20 @@ struct StoresByWorkspace(std::collections::HashMap<gpui::EntityId, gpui::WeakEnt
 
 impl gpui::Global for StoresByWorkspace {}
 
+/// The store of every workspace window with a folder, repository or not: the Activity log, "Undo
+/// last operation" and Undo toasts work in a folder without git too (agent turns, ADR 0011).
+#[derive(Default)]
+struct ActivityStores(std::collections::HashMap<gpui::EntityId, gpui::WeakEntity<GitStore>>);
+
+impl gpui::Global for ActivityStores {}
+
+fn activity_store_for(workspace: gpui::EntityId, cx: &App) -> Option<Entity<GitStore>> {
+    cx.try_global::<ActivityStores>()?
+        .0
+        .get(&workspace)?
+        .upgrade()
+}
+
 /// The git store of a workspace window, if it is in a repository.
 pub fn store_for(workspace: gpui::EntityId, cx: &App) -> Option<Entity<GitStore>> {
     cx.try_global::<StoresByWorkspace>()?
@@ -111,13 +127,14 @@ fn active_changeset(ws: &Workspace, cx: &App) -> Option<lector_git::Changeset> {
 /// changeset, and `UiRequest::OpenChangeset` opens a review / commit tab.
 fn init_command_hooks(cx: &mut App) {
     cx.set_global(StoresByWorkspace::default());
+    cx.set_global(ActivityStores::default());
     lector_ui::commands_bridge::register_focus_provider(cx, |ws, focus, cx| {
         if focus.changeset.is_none() {
             focus.changeset = active_changeset(ws, cx);
         }
     });
     lector_ui::commands_bridge::set_undo_offer(cx, |ws, entry, summary, level, _window, cx| {
-        match store_for(cx.entity_id(), cx) {
+        match activity_store_for(cx.entity_id(), cx) {
             Some(store) => activity::offer_undo(ws, &store, entry, summary, level, cx),
             None => ws.show_toast_level(summary, level, cx),
         }
@@ -157,10 +174,23 @@ pub fn init(cx: &mut App) {
         let workspace = cx.entity();
         let project = ws.project().clone();
         let store = cx.new(|cx| GitStore::new(&workspace, Some(project), window, cx));
+        let ws_id = workspace.entity_id();
+        // The activity journal is not git's alone: a folder without git has agent turns to undo
+        // (ADR 0011). The Activity log, "Undo last operation", Undo toasts and the Activity tab's
+        // restoration are registered for every folder; everything below the guard needs git.
+        cx.default_global::<ActivityStores>()
+            .0
+            .insert(ws_id, store.downgrade());
+        activity::register(ws, &store);
         if store.read(cx).repo().is_none() {
+            let s = store.clone();
+            ws.register_tab_restorer(move |kind, _window, cx| activity::restore_item(&s, kind, cx));
+            let s = store.clone();
+            restore_tabs(ws, window, cx, move |kind, cx| {
+                activity::restore_item(&s, kind, cx)
+            });
             return;
         }
-        let ws_id = workspace.entity_id();
         cx.default_global::<StoresByWorkspace>()
             .0
             .insert(ws_id, store.downgrade());
@@ -242,12 +272,12 @@ pub fn init(cx: &mut App) {
         )
         .detach();
 
-        activity::register(ws, &store);
         let s = store.clone();
         ws.register_tab_restorer(move |kind, _window, cx| restore_tab(&s, kind, cx));
         // The workspace restores its session before extensions are
         // registered, so git tabs from the session are reopened here.
-        restore_git_tabs(ws, &store, window, cx);
+        let s = store.clone();
+        restore_tabs(ws, window, cx, move |kind, cx| restore_tab(&s, kind, cx));
         // v0.6: pull requests and review comments.
         ws.register_action(
             |ws, _: &lector_ui::actions::review::ShowPullRequests, window, cx| {
@@ -453,11 +483,15 @@ fn restore_tab(
         .or_else(|| activity::restore_item(store, kind, cx))
 }
 
-fn restore_git_tabs(
+/// Reopens the tabs of the session that `restore` recognizes (git tabs, the Activity log).
+fn restore_tabs(
     ws: &mut Workspace,
-    store: &Entity<GitStore>,
     window: &mut Window,
     cx: &mut gpui::Context<Workspace>,
+    restore: impl Fn(
+        &lector_app::store::TabKind,
+        &mut App,
+    ) -> Option<Box<dyn lector_ui::views::pane::PaneItem>>,
 ) {
     if !lector_ui::settings::AppSettings::get(cx).session.restore {
         return;
@@ -472,7 +506,7 @@ fn restore_git_tabs(
         if matches!(tab.kind, lector_app::store::TabKind::File { .. }) {
             continue;
         }
-        let Some(item) = restore_tab(store, &tab.kind, cx) else {
+        let Some(item) = restore(&tab.kind, cx) else {
             continue;
         };
         let key = item.item_key(cx);

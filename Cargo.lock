@@ -4506,6 +4506,7 @@ name = "lector-agent"
 version = "0.7.2"
 dependencies = [
  "anyhow",
+ "dunce",
  "lector-app",
  "lector-base",
  "lector-buffer",
@@ -4662,6 +4663,7 @@ dependencies = [
  "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.21",
+ "unicode-normalization",
 ]
 
 [[package]]

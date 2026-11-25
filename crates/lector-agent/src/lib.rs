@@ -7,9 +7,11 @@
 //!   `fs/read_text_file` (open documents, unsaved text included), `fs/write_text_file`
 //!   (through the document store, journaled, only inside the project) and
 //!   `session/request_permission` (surfaced to the user).
-//! * Every turn is bracketed by working-tree checkpoints in the shadow repository; its
-//!   changes are a [`lector_git::Changeset::Snapshots`]; "Undo turn" restores the
-//!   checkpoint through the activity journal.
+//! * Every turn's writes are backed up in the shadow repository first
+//!   ([`lector_app::commands::agent_backup`]): a work-tree checkpoint in a repository, first-touch
+//!   backups of each file in a folder without git (ADR 0011) and of git-ignored files; its
+//!   changes are a [`lector_git::Changeset::Snapshots`]; "Undo turn" restores the files it
+//!   touched through the activity journal.
 //! * [`AgentManager`] keeps the sessions of a process and provides line provenance.
 //! * [`commands::register`] adds the `agent.*` commands.
 //!

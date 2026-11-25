@@ -15,12 +15,14 @@
 //! discard), [`review`] (queue order, reviewed hunks survive a new commit), [`comments`]
 //! (comments stay anchored through unrelated edits and new commits), [`cli`] (the same journey
 //! through the `lector-cli` binary with the stable `--json` schemas), [`sync`] (commit, push,
-//! fetch and pull between two clones of a bare remote; rejected push; rebase pull conflicts).
+//! fetch and pull between two clones of a bare remote; rejected push; rebase pull conflicts),
+//! [`folder`] (`lector undo` of an agent turn in a folder without git).
 
 mod cli;
 mod comments;
 mod documents;
 mod fixture;
+mod folder;
 mod project_flow;
 mod review;
 mod sync;

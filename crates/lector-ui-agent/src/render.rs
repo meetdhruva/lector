@@ -488,7 +488,7 @@ impl AgentPanel {
                                     lector_git::ChangeKind::Deleted => ("D", "Deleted"),
                                     _ => ("M", "Modified"),
                                 };
-                                let abs = self.project.repo().map(|r| r.workdir().join(&path));
+                                let abs = Some(self.changed_file_abs(&path));
                                 let row_key = (id, ix);
                                 let bounds = self.row_bounds.clone();
                                 let (menu_path, menu_abs) = (path.clone(), abs.clone());

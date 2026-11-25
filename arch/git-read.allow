@@ -64,9 +64,13 @@ Repo::stash_apply_paths   # computes the paths a stash apply would touch; applie
 # files. Everything that changes the user's files (restore_*) or the shadow store's contents
 # (snapshot_*, fetch*, prune*) stays a write.
 ShadowRepo::open
+# ADR 0011: the same for a folder without git: creates only Lector's own shadow store.
+ShadowRepo::open_folder
 
 # ShadowRepo reads (nothing is written; fingerprints hash the worktree only)
 ShadowRepo::path_for   # computes a path, touches nothing
+ShadowRepo::is_folder   # ADR 0011: a getter, touches nothing
+ShadowRepo::existing_folder   # ADR 0011: finds a folder's existing shadow (stats its HEAD); never creates or writes anything
 ShadowRepo::note_of
 ShadowRepo::known_note
 ShadowRepo::known_for

@@ -65,6 +65,51 @@ pub enum UndoError {
     Failed(String),
 }
 
+/// What an undo completed only in part, carried into the undo's own entry (summary and args).
+#[derive(Default)]
+struct UndoNotes {
+    /// Files restored whose present state could not be backed up first: no redo for them.
+    not_redoable: Vec<String>,
+    /// Files restored whose name keeps another spelling than the recorded one (the rename to it
+    /// failed): (spelling on disk, recorded path).
+    unrenamed: Vec<(String, String)>,
+}
+
+impl UndoNotes {
+    fn summary(&self, of: &str) -> String {
+        let mut out = format!("Undid: {of}");
+        if !self.not_redoable.is_empty() {
+            out.push_str(&format!(
+                " ({} cannot be redone: too large for Lector to back up)",
+                describe_paths(&self.not_redoable)
+            ));
+        }
+        if !self.unrenamed.is_empty() {
+            let names: Vec<String> = self
+                .unrenamed
+                .iter()
+                .map(|(now, recorded)| format!("{now} should be {recorded}"))
+                .collect();
+            out.push_str(&format!(
+                " (restored, but the name could not be changed back: {})",
+                names.join(", ")
+            ));
+        }
+        out
+    }
+
+    fn args(&self, id: u64) -> serde_json::Value {
+        let mut args = serde_json::json!({ "entry": id });
+        if !self.not_redoable.is_empty() {
+            args["not_redoable"] = serde_json::json!(self.not_redoable);
+        }
+        if !self.unrenamed.is_empty() {
+            args["unrenamed"] = serde_json::json!(self.unrenamed);
+        }
+        args
+    }
+}
+
 fn describe_paths(paths: &[String]) -> String {
     match paths {
         [] => "Files".to_owned(),
@@ -84,9 +129,29 @@ fn no_undo_reason(command: &str) -> String {
 }
 
 impl Journal {
-    fn shadow_for(&self, repo: &Path) -> Result<ShadowRepo, UndoError> {
-        let repo = Repo::discover(repo).map_err(|e| UndoError::Failed(e.to_string()))?;
-        ShadowRepo::open(self.data_dir(), &repo).map_err(|e| UndoError::BackupGone(e.to_string()))
+    /// The shadow repository of an entry's `repo` directory: the repository whose work tree it
+    /// is, else the backups of that folder without git (ADR 0011; found without creating
+    /// anything), else (an older entry naming a subfolder) the repository around it.
+    fn shadow_for(&self, dir: &Path) -> Result<ShadowRepo, UndoError> {
+        let repo = Repo::discover(dir).ok().filter(|r| !r.is_bare());
+        let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let open = |repo: &Repo| {
+            ShadowRepo::open(self.data_dir(), repo)
+                .map_err(|e| UndoError::BackupGone(e.to_string()))
+        };
+        match &repo {
+            Some(repo) if canonical(repo.workdir()) == canonical(dir) => open(repo),
+            _ => match ShadowRepo::existing_folder(self.data_dir(), dir) {
+                Some(shadow) => Ok(shadow),
+                None => match &repo {
+                    Some(repo) => open(repo),
+                    None => Err(UndoError::BackupGone(format!(
+                        "there are no backups for {}",
+                        dir.display()
+                    ))),
+                },
+            },
+        }
     }
 
     /// Whether `entry` can be undone now, with the reason when it cannot (already undone,
@@ -147,6 +212,7 @@ impl Journal {
         }
         let mut redo: Vec<UndoRecord> = Vec::new();
         let mut invoked: Vec<u64> = Vec::new();
+        let mut notes = UndoNotes::default();
         self.apply(
             &entry,
             &record,
@@ -154,6 +220,7 @@ impl Journal {
             cx,
             &mut redo,
             &mut invoked,
+            &mut notes,
         )?;
 
         // The entry for the undo itself: the inverse command's own entry when the record was a
@@ -184,12 +251,12 @@ impl Journal {
                     id: 0,
                     time: SystemTime::now(),
                     command: "journal.undo".into(),
-                    summary: format!("Undid: {}", entry.summary),
+                    summary: notes.summary(&entry.summary),
                     repo: entry.repo.clone(),
                     paths: entry.paths.clone(),
                     undo,
                     undone: false,
-                    args: serde_json::json!({ "entry": id }),
+                    args: notes.args(id),
                     source: cx.source,
                     undo_of: Some(id),
                     undone_by: None,
@@ -215,17 +282,16 @@ impl Journal {
     }
 
     /// Undoes the newest undoable operation ("Undo last operation") of the context's
-    /// repository (any, without a project).
+    /// repository, or of its folder when that is not a git repository (any, without a project).
     pub fn undo_last(
         &self,
         cx: &CommandContext,
         mode: UndoMode,
     ) -> Result<ActivityEntry, UndoError> {
-        let workdir = cx
-            .project
-            .as_ref()
-            .and_then(|p| p.repo())
-            .map(|r| r.workdir().to_path_buf());
+        let workdir = cx.project.as_ref().map(|p| match p.repo() {
+            Some(r) => r.workdir().to_path_buf(),
+            None => p.root().to_path_buf(),
+        });
         let entry = self
             .last_undoable(workdir.as_deref())
             .ok_or_else(|| UndoError::NotUndoable("Nothing to undo.".into()))?;
@@ -296,7 +362,17 @@ impl Journal {
         Ok(())
     }
 
-    /// Runs the record's writes (last first for `Multi`), collecting redo records.
+    /// Runs the record's writes (last first for `Multi`), collecting redo records and the paths
+    /// whose present state could not be backed up first (`not_redoable`).
+    ///
+    /// The shadow of a folder without git does not store files over 64 MiB (ADR 0011). Undoing
+    /// over such a file (overwriting or deleting it) is allowed only while it is exactly as the
+    /// operation left it (its fingerprint, a hash taken without storing, matches the record's
+    /// `after`), in [`UndoMode::Check`] and [`UndoMode::Force`] alike: then nothing anyone made
+    /// since is lost, the undo restores the before-state, and the redo of that file is not
+    /// possible (the undo's summary and `args.not_redoable` say so). If it changed since, the
+    /// undo refuses with the reason and writes nothing, because the change could not be backed up.
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         &self,
         entry: &ActivityEntry,
@@ -305,14 +381,21 @@ impl Journal {
         cx: &CommandContext,
         redo: &mut Vec<UndoRecord>,
         invoked: &mut Vec<u64>,
+        not_redoable: &mut UndoNotes,
     ) -> Result<(), UndoError> {
         let fail = |e: lector_git::Error| UndoError::Failed(e.to_string());
         match record {
             UndoRecord::RestoreFiles {
                 shadow: snap,
                 paths,
-                ..
+                after: left,
             } => {
+                // An undo that restores nothing is not an undo: never a successful no-op.
+                if paths.is_empty() {
+                    return Err(UndoError::NotUndoable(
+                        "this operation recorded no files to restore".into(),
+                    ));
+                }
                 let shadow = self.shadow_for(repo.unwrap_or(Path::new("")))?;
                 let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                 // Back up what the restore is about to overwrite: this is what makes
@@ -320,7 +403,27 @@ impl Journal {
                 let backup = shadow
                     .snapshot_paths(&refs, &format!("Before undoing: {}", entry.summary))
                     .map_err(fail)?;
-                shadow.restore_paths(snap, &refs).map_err(fail)?;
+                let unsaved = unsaved_paths(&shadow, &backup).map_err(fail)?;
+                if !unsaved.is_empty() {
+                    let keys: Vec<&str> = unsaved.iter().map(String::as_str).collect();
+                    let now = shadow.fingerprints(&keys).map_err(fail)?;
+                    let changed: Vec<String> = unsaved
+                        .iter()
+                        .filter(|p| left.get(*p).is_none() || left.get(*p) != now.get(*p))
+                        .cloned()
+                        .collect();
+                    if !changed.is_empty() {
+                        return Err(UndoError::Failed(format!(
+                            "{} changed since this operation and is too large for Lector to back up, so undoing would destroy that change with no way back; nothing was restored",
+                            describe_paths(&changed)
+                        )));
+                    }
+                    not_redoable.not_redoable.extend(unsaved);
+                }
+                // The contents are restored when this succeeds; a name the file system kept in
+                // another spelling is reported with the undo, not hidden.
+                let report = shadow.restore_paths_reporting(snap, &refs).map_err(fail)?;
+                not_redoable.unrenamed.extend(report.unrenamed);
                 let after = shadow.fingerprints(&refs).map_err(fail)?;
                 redo.push(UndoRecord::RestoreFiles {
                     shadow: backup,
@@ -333,6 +436,11 @@ impl Journal {
                 paths,
                 ..
             } => {
+                if paths.is_empty() {
+                    return Err(UndoError::NotUndoable(
+                        "this operation recorded no index entries to restore".into(),
+                    ));
+                }
                 let shadow = self.shadow_for(repo.unwrap_or(Path::new("")))?;
                 let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                 let backup = shadow
@@ -375,12 +483,31 @@ impl Journal {
                 // a `Multi` of those redos (undone last first again) then repeats the
                 // original parts first to last.
                 for r in records.iter().rev() {
-                    self.apply(entry, r, repo, cx, redo, invoked)?;
+                    self.apply(entry, r, repo, cx, redo, invoked, not_redoable)?;
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Paths a backup did not store (the shadow of a folder without git skips files over 64 MiB);
+/// whole-repository shadows never skip in a path backup, so they are not asked.
+fn unsaved_paths(
+    shadow: &ShadowRepo,
+    backup: &lector_git::ShadowSnapshot,
+) -> Result<Vec<String>, lector_git::Error> {
+    if !shadow.is_folder() {
+        return Ok(Vec::new());
+    }
+    Ok(shadow
+        .entries(backup)?
+        .into_iter()
+        .filter_map(|e| match e {
+            lector_git::shadow::SnapshotEntry::Skipped { path } => Some(path),
+            _ => None,
+        })
+        .collect())
 }
 
 fn diff_maps(

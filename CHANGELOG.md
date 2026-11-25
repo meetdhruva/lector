@@ -84,8 +84,28 @@ Security:
   the network or your credentials, or start or steer an agent, now run only from Lector's window or
   `lector run`; answering a permission request only from the window.
 - **An agent write that cannot be undone is refused.** If the backup that makes it undoable fails,
-  or the folder is not a git repository (where Lector has nowhere to keep the backup), the write is
-  refused instead of happening without an undo.
+  the write is refused instead of happening without an undo.
+- **Agents work in folders that are not git repositories, with undo.** Each file an agent writes
+  there is backed up on its first touch in the turn into Lector's own data folder (never a `.git`
+  in your folder; nothing is created until the first write), and Undo turn (the Agent panel, the
+  Activity log, `lector undo`) restores exactly the files the turn touched, including removing the
+  ones it created. Only those files are read: a turn costs the same in your home folder as in an
+  empty one. Agents can only write files: naming a folder (or a device) as the file to write is
+  refused before anything is read. A file over 64 MiB is not backed up there, so a write to it, or
+  of more than that, is refused with the reason, and one turn backs up at most 1 GiB (further
+  writes are refused until the next turn). A file that grew past 64 MiB through another program
+  during the turn is still part of the turn: Undo restores the state before it (removing it if
+  the turn created it) and says it cannot be redone; Undo never overwrites such a file if it
+  changed after the turn, because that change could not be backed up. An undo that cannot
+  restore every file says which and changes nothing (also in a repository, for a file over
+  256 MiB the turn deleted). Writes to an open UTF-16 document count the bytes it will have on
+  disk. On macOS and Windows, writes to `README.md` and `readme.md` (or two Unicode forms of one
+  name) in one turn are recognised as one file, so Undo restores the original and never renames
+  it. The Activity log and Undo Last Operation work in such folders too. In 0.7.1 such writes had no undo.
+- **Undoing an agent turn restores git-ignored files it overwrote** (such as `.env`), not only
+  tracked and untracked ones; the turn's changes list them too.
+- **Backups of deleted or renamed folders are cleaned up** once they are 30 days old, like every
+  other backup.
 - **Lector's data folder is private.** The backups Lector keeps (which can include git-ignored
   files such as `.env`), logs, crash reports and session records were created readable by other
   users of the machine under the usual umask. Everything Lector creates there is now owner-only,
