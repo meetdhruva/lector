@@ -1,8 +1,11 @@
 # Files outside lector-git that may call the lector-git write API (arch-check writes, ADR 0002,
 # ADR 0010 item 8). Everything else above lector-git is checked, in every crate.
 #
-# lector-app command modules: every function there is registered in the command registry (ADR
+# lector-app command modules: the functions there are registered in the command registry (ADR
 # 0002), which is where sources (UI, CLI, MCP, agents), permission, journal and undo are decided.
+# One module is not a registry command: commands/agent_backup.rs, the backup service agent writes
+# go through (ADR 0011). It only snapshots into Lector's own shadow store and journals; it lives
+# here so that lector-agent itself calls no git write API.
 # A glob, not a file list: a new command module belongs here by definition. A write called from
 # any other lector-app file, from lector-agent, lector-mcp, lector-cli, lector-review or a UI
 # crate is reported.

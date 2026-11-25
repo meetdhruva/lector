@@ -288,10 +288,13 @@ pub struct Turn {
     pub prompt: String,
     /// Labels of the attached context.
     pub context: Vec<String>,
-    /// Working-tree checkpoint taken before the prompt (`None`: checkpoints off, no
-    /// repository, or the snapshot failed).
+    /// The state before the turn, in the shadow repository. In a repository the work-tree
+    /// checkpoint taken before the prompt, combined when the turn ends with the first-touch
+    /// backups of files it leaves out (git-ignored); in a folder without git set when the turn
+    /// ends, from the first-touch backups of the files the turn wrote (ADR 0011). `None`:
+    /// checkpoints off, nothing backed up, or the snapshot failed.
     pub before: Option<ShadowSnapshot>,
-    /// Checkpoint taken after the turn finished.
+    /// The state after the turn finished, with the same coverage as `before`.
     pub after: Option<ShadowSnapshot>,
     /// Messages.
     pub messages: Vec<AgentMessage>,
@@ -342,7 +345,8 @@ impl Turn {
         }
     }
 
-    /// The turn's changes as a reviewable changeset (both checkpoints present).
+    /// The turn's changes as a changeset (both states present); the review views can load it
+    /// in a repository only.
     pub fn changeset(&self) -> Option<lector_git::Changeset> {
         Some(lector_git::Changeset::Snapshots {
             from: self.before.as_ref()?.commit,

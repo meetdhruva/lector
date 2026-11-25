@@ -84,7 +84,10 @@ fn folder_backups_cost_the_same_in_a_folder_with_20000_files() {
 
     let (empty, _) = run_scenario(0, wrapper.path());
     let (many, root) = run_scenario(20_000, wrapper.path());
-    assert!(!empty.is_empty(), "the wrapper logged nothing: is it on PATH?");
+    assert!(
+        !empty.is_empty(),
+        "the wrapper logged nothing: is it on PATH?"
+    );
     assert_eq!(
         empty.len(),
         many.len(),
@@ -97,14 +100,23 @@ fn folder_backups_cost_the_same_in_a_folder_with_20000_files() {
         // may run in the folder, where `hash-object --stdin-paths` resolves the relative paths),
         // or `init --bare <shadow>` creating it, which runs outside the folder.
         if args.contains(" init --bare ") {
-            assert!(!Path::new(cwd).starts_with(&root), "git init ran in the folder");
+            assert!(
+                !Path::new(cwd).starts_with(&root),
+                "git init ran in the folder"
+            );
         } else {
             assert!(
                 args.contains("--git-dir"),
                 "a git command without the shadow named explicitly (cwd {cwd}): {args}"
             );
         }
-        for walk in ["ls-files", "status", " add ", "check-ignore", "rev-parse --show-object-format"] {
+        for walk in [
+            "ls-files",
+            "status",
+            " add ",
+            "check-ignore",
+            "rev-parse --show-object-format",
+        ] {
             assert!(!format!(" {args} ").contains(walk), "{walk:?} ran: {args}");
         }
     }

@@ -53,7 +53,10 @@ fn a_folder_turn_is_backed_up_lazily_and_undone_and_redone_as_one_entry() {
 
     let undo_id = s.undo_turn(t.id, false, Source::Internal).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
-    assert!(fx.read("new/dir/x.txt").is_none(), "a created file is removed");
+    assert!(
+        fx.read("new/dir/x.txt").is_none(),
+        "a created file is removed"
+    );
     assert!(
         !fx.root.join("new").exists(),
         "directories the turn created are removed when empty"
@@ -188,7 +191,10 @@ fn folder_writes_whose_backup_fails_are_refused() {
     fs::create_dir_all(&fx.data).unwrap();
     fs::write(fx.data.join("shadow"), "not a directory").unwrap();
     let s = fx.start();
-    let t = fx.run(&s, "write a.txt agent\\n\nwrite new.txt agent\\n\nread a.txt");
+    let t = fx.run(
+        &s,
+        "write a.txt agent\\n\nwrite new.txt agent\\n\nread a.txt",
+    );
     let answer = t.answer();
     assert_eq!(answer.matches("WRITE-ERROR:").count(), 2, "{answer}");
     assert!(answer.contains("backup"), "{answer}");
@@ -214,13 +220,22 @@ fn a_subfolder_of_a_repository_follows_the_repository_rule() {
         },
         "proj"
     ));
-    let outer = fx.project.repo().expect("the outer repository").workdir().to_path_buf();
+    let outer = fx
+        .project
+        .repo()
+        .expect("the outer repository")
+        .workdir()
+        .to_path_buf();
     assert_ne!(outer, fx.root);
     let s = fx.start();
     let t = fx.run(&s, "write a.txt agent\\n");
     assert!(t.before.is_some());
     let paths: Vec<&str> = t.changed_files.iter().map(|c| c.path.as_str()).collect();
-    assert_eq!(paths, ["proj/a.txt"], "repository-relative, as in any repository");
+    assert_eq!(
+        paths,
+        ["proj/a.txt"],
+        "repository-relative, as in any repository"
+    );
     let turns = fx.entries("agent.turn");
     assert_eq!(turns[0].repo.as_deref(), Some(outer.as_path()));
     assert!(!fx.shadow_path(&fx.root).exists(), "no folder-keyed shadow");

@@ -7,7 +7,7 @@
 [deps]
 
 [writes]
-"crates/lector-agent/src/session.rs" = 4
+"crates/lector-agent/src/session.rs" = 2
 "crates/lector-app/src/git_service.rs" = 1
 "crates/lector-app/src/journal/undo.rs" = 5
 "crates/lector-app/src/project.rs" = 1

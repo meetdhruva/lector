@@ -91,14 +91,13 @@ fn a_folder_shadow_appears_at_first_use_private_and_outside_the_folder() {
         "nothing new in the folder"
     );
     assert!(
-        !shadow
-            .git_dir()
-            .join("objects/info/alternates")
-            .exists(),
+        !shadow.git_dir().join("objects/info/alternates").exists(),
         "no alternates: there is no user repository"
     );
     let config = fs::read_to_string(shadow.git_dir().join("config")).unwrap();
-    assert!(config.contains("sharedRepository = 0600") || config.contains("sharedrepository = 0600"));
+    assert!(
+        config.contains("sharedRepository = 0600") || config.contains("sharedrepository = 0600")
+    );
     #[cfg(unix)]
     {
         assert_eq!(mode(shadow.git_dir()), 0o700);
@@ -143,7 +142,10 @@ fn folder_snapshots_restore_bytes_modes_links_and_absence() {
     assert_eq!(fx.read("a.txt").unwrap(), b"one\r\ntwo\n");
     assert_eq!(fx.read("bin.dat").unwrap(), [0u8, 1, 2, 255, 13, 10]);
     assert!(fx.read("new/dir/x.txt").is_none(), "absent -> removed");
-    assert!(!fx.folder.join("new").exists(), "emptied directories go too");
+    assert!(
+        !fx.folder.join("new").exists(),
+        "emptied directories go too"
+    );
     #[cfg(unix)]
     {
         assert_eq!(mode(&fx.folder.join("run.sh")) & 0o111, 0o111);
@@ -164,7 +166,10 @@ fn folder_shadows_refuse_whole_tree_and_index_operations() {
     assert!(shadow.snapshot_worktree("all").is_err());
     assert!(shadow.snapshot_index(&["a.txt"], "index").is_err());
     assert!(shadow.index_fingerprints(&["a.txt"]).is_err());
-    assert!(!shadow.is_ignored("a.txt"), "nothing is ignored without git");
+    assert!(
+        !shadow.is_ignored("a.txt"),
+        "nothing is ignored without git"
+    );
     // Nothing was recorded by the refused calls.
     assert!(shadow.snapshots().unwrap().is_empty());
 }
@@ -178,7 +183,11 @@ fn folder_shadow_commands_never_discover_a_repository_above_the_folder() {
     fs::create_dir_all(outer.join(".git/objects")).unwrap();
     fs::create_dir_all(outer.join(".git/refs")).unwrap();
     fs::write(outer.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-    fs::write(outer.join(".git/config"), "[core\n this is not a config file\n").unwrap();
+    fs::write(
+        outer.join(".git/config"),
+        "[core\n this is not a config file\n",
+    )
+    .unwrap();
     fx.write("a.txt", "mine");
     let shadow = fx.shadow();
     let snap = shadow.snapshot_paths(&["a.txt", "b.txt"], "s").unwrap();
@@ -202,10 +211,7 @@ fn folder_shadow_commands_never_discover_a_repository_above_the_folder() {
 fn folder_attributes_cannot_run_filters_or_convert_line_endings() {
     let fx = Fx::new();
     let marker = fx.folder.parent().unwrap().join("ran");
-    fx.write(
-        ".gitattributes",
-        "* filter=evil diff=evil text eol=crlf\n",
-    );
+    fx.write(".gitattributes", "* filter=evil diff=evil text eol=crlf\n");
     fx.write("a.txt", "lf\nonly\n");
     let shadow = fx.shadow();
     let cmd = format!("sh -c 'touch {}; cat'", marker.display());
@@ -229,7 +235,10 @@ fn folder_attributes_cannot_run_filters_or_convert_line_endings() {
     shadow.changes_between(&snap, &after).unwrap();
     shadow.restore_paths(&snap, &["a.txt"]).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), b"lf\nonly\n");
-    assert_eq!(shadow.file_at(&snap, "a.txt").unwrap().unwrap(), b"lf\nonly\n");
+    assert_eq!(
+        shadow.file_at(&snap, "a.txt").unwrap().unwrap(),
+        b"lf\nonly\n"
+    );
     assert!(!marker.exists(), "a filter or textconv driver ran");
 }
 
@@ -241,7 +250,9 @@ fn merged_snapshots_keep_the_first_record_of_each_path() {
     let first = shadow.snapshot_paths(&["a.txt"], "a").unwrap();
     fx.write("a.txt", "a2");
     fx.write("b.txt", "b1");
-    let second = shadow.snapshot_paths(&["a.txt", "b.txt", "c.txt"], "b").unwrap();
+    let second = shadow
+        .snapshot_paths(&["a.txt", "b.txt", "c.txt"], "b")
+        .unwrap();
     let merged = shadow
         .merge_snapshots(&[&first, &second], "Before the turn")
         .unwrap();
@@ -270,7 +281,10 @@ fn orphaned_shadows_are_pruned_by_age_and_live_ones_are_kept() {
     live_shadow.snapshot_paths(&["b.txt"], "s").unwrap();
 
     // The folder still exists: nothing is removed, whatever the age.
-    assert_eq!(ShadowRepo::prune_orphans(&fx.data, Duration::ZERO).unwrap(), 0);
+    assert_eq!(
+        ShadowRepo::prune_orphans(&fx.data, Duration::ZERO).unwrap(),
+        0
+    );
     fs::remove_dir_all(&fx.folder).unwrap();
     // Deleted (or renamed) folder: kept while its newest backup is younger than the policy...
     assert_eq!(
@@ -279,7 +293,10 @@ fn orphaned_shadows_are_pruned_by_age_and_live_ones_are_kept() {
     );
     assert!(shadow.git_dir().exists());
     // ...and removed once it is older.
-    assert_eq!(ShadowRepo::prune_orphans(&fx.data, Duration::ZERO).unwrap(), 1);
+    assert_eq!(
+        ShadowRepo::prune_orphans(&fx.data, Duration::ZERO).unwrap(),
+        1
+    );
     assert!(!shadow.git_dir().exists());
     assert!(live_shadow.git_dir().exists());
     assert!(ShadowRepo::prune_orphans(&fx.data.join("missing"), Duration::ZERO).is_ok());

@@ -642,7 +642,10 @@ fn ignored_files_are_restored_by_undoing_the_turn() {
     );
     assert_eq!(fx.read(".env").unwrap(), "SECRET=again\n");
     let paths: Vec<&str> = t.changed_files.iter().map(|c| c.path.as_str()).collect();
-    assert!(paths.contains(&".env") && paths.contains(&"a.txt"), "{paths:?}");
+    assert!(
+        paths.contains(&".env") && paths.contains(&"a.txt"),
+        "{paths:?}"
+    );
     s.undo_turn(t.id, false, Source::Internal).unwrap();
     assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
     assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
