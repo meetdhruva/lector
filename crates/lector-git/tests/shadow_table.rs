@@ -94,6 +94,12 @@ fn state_of(root: &Path, rel: &str, limit: u64) -> (St, Option<Vec<u8>>) {
     }
 }
 
+/// Cells this platform cannot set up: a repository's "not a regular file" is a FIFO, and Windows
+/// has none (a directory there is its files, other paths). They are skipped and listed.
+fn unavailable(kind: Kind, b: St, a: St) -> bool {
+    kind == Kind::Worktree && !cfg!(unix) && (b == St::Special || a == St::Special)
+}
+
 fn name(b: St, a: St) -> String {
     format!("{b:?}_{a:?}").to_lowercase()
 }
@@ -114,7 +120,9 @@ fn run_table(kind: Kind) {
     let refs: Vec<&str> = all.iter().map(String::as_str).collect();
     for b in STATES {
         for a in STATES {
-            put(kind, &root, &name(b, a), b, "before\n", limit);
+            if !unavailable(kind, b, a) {
+                put(kind, &root, &name(b, a), b, "before\n", limit);
+            }
         }
     }
     let shadow = match kind {
@@ -141,7 +149,9 @@ fn run_table(kind: Kind) {
     let before = take("before");
     for b in STATES {
         for a in STATES {
-            put(kind, &root, &name(b, a), a, "after\n", limit);
+            if !unavailable(kind, b, a) {
+                put(kind, &root, &name(b, a), a, "after\n", limit);
+            }
         }
     }
     let after = take("after");
@@ -149,9 +159,14 @@ fn run_table(kind: Kind) {
     let reported =
         |p: &str| -> Option<ChangeKind> { changes.iter().find(|c| c.path() == p).map(|c| c.kind) };
 
+    let mut skipped: Vec<String> = Vec::new();
     for b in STATES {
         for a in STATES {
             let p = name(b, a);
+            if unavailable(kind, b, a) {
+                skipped.push(p);
+                continue;
+            }
             let (sb, sa) = (kind.seen(b), kind.seen(a));
             let expected = match (sb, sa) {
                 (St::Absent, St::Absent) => None,
@@ -223,6 +238,10 @@ fn run_table(kind: Kind) {
             }
         }
     }
+    println!(
+        "{kind:?}: {} of 16 cells proven; skipped (no FIFO on this platform): {skipped:?}",
+        16 - skipped.len()
+    );
 }
 
 #[test]
@@ -230,7 +249,6 @@ fn the_state_table_holds_for_folder_first_touch_snapshots() {
     run_table(Kind::Folder);
 }
 
-#[cfg(unix)]
 #[test]
 fn the_state_table_holds_for_a_repository_worktree_checkpoint() {
     run_table(Kind::Worktree);
@@ -382,6 +400,7 @@ fn a_case_rename_between_checkpoints_restores_the_original_file() {
     let insensitive = root.join("PROBE").exists();
     fs::remove_file(root.join("probe")).unwrap();
     println!("case-insensitive file system: {insensitive}");
+    require_ci_folding(&root, insensitive, None);
     let ok = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&root)
@@ -413,11 +432,74 @@ fn a_case_rename_between_checkpoints_restores_the_original_file() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n != ".git")
         .collect();
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(names[0].eq_ignore_ascii_case("a.txt"), "{names:?}");
-    println!("restored as {:?}", names[0]);
+    // Expected everywhere: exactly `a.txt` (the restore renames its temp file to the recorded
+    // spelling, and the same-entry guard keeps the delete of `A.txt` from removing it).
+    assert_eq!(
+        names,
+        ["a.txt"],
+        "on {} the restore left {names:?} (case-insensitive: {insensitive})",
+        std::env::consts::OS
+    );
     assert_eq!(
         fs::read_to_string(root.join("a.txt")).unwrap(),
         "original\n"
     );
+}
+
+/// Hard links are other files' names, not spellings of one name: a restore that writes `b.txt`
+/// and deletes `a.txt` (recorded absent) deletes it even when `a.txt` is a hard link of `b.txt`.
+/// The restored `b.txt` is a new file put in place by a rename, so the same-entry guard (which
+/// protects a file restored under one spelling from deleting it under another) never sees the
+/// old link as the restored file.
+#[test]
+fn a_hard_link_recorded_absent_is_deleted_by_a_restore() {
+    std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    let tmp = tempfile::tempdir().unwrap();
+    let base = dunce::canonicalize(tmp.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("b.txt"), "before\n").unwrap();
+    let shadow = ShadowRepo::open_folder(&base.join("data"), &root).unwrap();
+    let before = shadow
+        .snapshot_files(
+            &["b.txt", "a.txt"],
+            FOLDER_MAX_FILE,
+            Oversize::Refuse,
+            "before",
+        )
+        .unwrap();
+    fs::write(root.join("b.txt"), "agent\n").unwrap();
+    fs::hard_link(root.join("b.txt"), root.join("a.txt")).unwrap();
+    shadow.restore_paths(&before, &["a.txt", "b.txt"]).unwrap();
+    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "before\n");
+    assert!(
+        !root.join("a.txt").exists(),
+        "the link recorded absent is removed"
+    );
+}
+
+/// On CI for macOS and Windows the temp directory must be case-insensitive (and on macOS,
+/// APFS, insensitive to Unicode normalisation on lookup): if a runner's is not, this fails
+/// loudly instead of silently running the case-sensitive branch.
+fn require_ci_folding(dir: &Path, case: bool, normalising: Option<bool>) {
+    if std::env::var_os("CI").is_none() {
+        return;
+    }
+    let os = std::env::consts::OS;
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(
+            case,
+            "CI on {os}: {} is case-sensitive, so the case-insensitive branch would not run",
+            dir.display()
+        );
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(normalising) = normalising {
+            assert!(
+                normalising,
+                "CI on macOS: {} does not fold Unicode normalisation (APFS does)",
+                dir.display()
+            );
+        }
+    }
 }
