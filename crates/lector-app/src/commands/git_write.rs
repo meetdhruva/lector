@@ -39,6 +39,8 @@ use super::{
 use crate::core::AppCore;
 use crate::journal::UndoRecord;
 
+mod hunk_apply;
+
 /// The backup that makes a destructive command undoable could not be taken. Downcast the
 /// command's error to it: ask the user to confirm, then retry with
 /// `allow_without_backup: true`.
@@ -830,7 +832,7 @@ fn apply_hunk(cx: &CommandContext, args: &Value, action: HunkAction) -> anyhow::
         )?,
         _ => backup_index(cx, repo, &rels, &format!("Before: {summary}")),
     };
-    let applied = crate::review_service::apply::apply_hunk_action_if_unchanged(
+    let applied = hunk_apply::apply_hunk_action_if_unchanged(
         repo,
         &changeset,
         &change,

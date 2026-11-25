@@ -1,6 +1,7 @@
 //! Journey: edit a file through the document store, save it, see it in the status, discard the
 //! change, undo the discard.
 
+use lector_app::commands::journal_undo::invoke_undo;
 use lector_app::journal::UndoMode;
 use serde_json::json;
 
@@ -91,10 +92,7 @@ fn edit_save_status_discard_undo() {
     assert_eq!(counts(&s.status()), (0, 0, 0));
 
     // --- undo the discard: the saved text comes back byte for byte
-    let undone = s
-        .journal
-        .undo(discard_id, &s.cx, UndoMode::Check)
-        .expect("undo the discard");
+    let undone = invoke_undo(&s.cx, discard_id, UndoMode::Check).expect("undo the discard");
     assert_eq!(undone.undo_of, Some(discard_id));
     assert_eq!(repo.read("a.txt"), "one\nTWO\nthree\n");
     assert_eq!(counts(&s.status()), (0, 1, 0), "modified again");

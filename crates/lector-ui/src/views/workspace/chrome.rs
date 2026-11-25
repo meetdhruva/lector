@@ -27,20 +27,10 @@ use crate::views::recent::RecentProjectsDelegate;
 use crate::views::welcome::{logo, WelcomeEvent, WelcomeItem, WelcomeView, WELCOME_ITEM_KEY};
 use crate::views::window_controls::{self, caption_style, CaptionStyle};
 
-/// Root folder of the placeholder project used by a window with no folder
-/// open (Lector's own data dir; empty, never scanned or watched).
-pub fn no_folder_root() -> PathBuf {
-    let dir = lector_config::paths::data_dir().join("no-folder");
-    match lector_base::private::create_dir_all(&dir) {
-        Ok(()) => dir,
-        Err(err) => {
-            tracing::warn!("cannot create {}: {err}", dir.display());
-            let tmp = std::env::temp_dir().join("lector-no-folder");
-            let _ = std::fs::create_dir_all(&tmp);
-            tmp
-        }
-    }
-}
+/// Root folder of the placeholder project used by a window with no folder open (Lector's own data
+/// dir; empty, never scanned or watched). Created by `lector-app`: UI code creates no files
+/// (ADR 0012).
+pub use lector_app::user_files::no_folder_root;
 
 /// Opens the placeholder project for a no-folder window.
 pub fn no_folder_project(cx: &App) -> anyhow::Result<Project> {

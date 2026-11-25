@@ -1,17 +1,38 @@
-//! Partial staging round trips (`review_service::apply::apply_hunk_action`, the patch from
-//! `lector_review::review::hunk_patch`) on fixture repositories:
-//! stage / unstage / discard one hunk or a line selection, checked with git itself.
+//! Partial staging round trips (the patch from `lector_review::review::hunk_patch`, applied by
+//! this module) on fixture repositories: stage / unstage / discard one hunk or a line selection,
+//! checked with git itself.
 #![allow(clippy::single_range_in_vec_init)]
 
 use std::path::Path;
 use std::process::Command;
 use std::sync::Once;
 
-use lector_app::review_service::apply;
 use lector_diff::{Algorithm, DiffOptions};
 use lector_git::{Changeset, FileChange, Repo};
 use lector_review::review::{self, FileDiff, HunkAction, LineSelection};
 use lector_syntax::LanguageRegistry;
+
+/// The functions under test, by the names the round trips use.
+mod apply {
+    pub(super) use super::super::apply_hunk_action_if_unchanged;
+    use super::super::apply_patch;
+    use lector_diff::Algorithm;
+    use lector_git::{Changeset, FileChange, Repo};
+    use lector_review::review::{self, HunkAction, LineSelection};
+
+    /// The patch of `selection` applied without the content-id check.
+    pub(super) fn apply_hunk_action(
+        repo: &Repo,
+        changeset: &Changeset,
+        change: &FileChange,
+        action: HunkAction,
+        selection: &LineSelection,
+        algorithm: Algorithm,
+    ) -> lector_review::Result<bool> {
+        let patch = review::hunk_patch(repo, changeset, change, action, selection, algorithm)?;
+        apply_patch(repo, patch)
+    }
+}
 
 fn hermetic() {
     static ONCE: Once = Once::new();

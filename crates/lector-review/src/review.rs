@@ -24,7 +24,7 @@
 //!   Discard build the reverse patch against the content being patched, so context always
 //!   comes from it. [`hunk_patch_if_unchanged`] first checks that both sides still match the
 //!   diff the rows were selected in, so rows of a stale diff never touch other lines.
-//!   Applying is `lector_app::review_service::apply`, called by the `git.*_hunk` commands.
+//!   Applying is `lector-app`'s, private to the `git.*_hunk` commands (ADR 0012).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -655,7 +655,7 @@ pub struct FileDiff {
 
 impl FileDiff {
     /// Identity of the contents (both sides) this diff was computed from. Pass it to
-    /// [`apply_hunk_action_if_unchanged`] so a hunk is never applied to content that
+    /// the hunk commands of `lector-app` (`git.*_hunk`, `content_id` argument) so a hunk is never applied to content that
     /// changed since the diff was shown.
     pub fn content_id(&self) -> &str {
         &self.content_id

@@ -103,6 +103,15 @@ Security:
   files such as `.env`), logs, crash reports and session records were created readable by other
   users of the machine under the usual umask. Everything Lector creates there is now owner-only,
   and an existing data folder that others could read is narrowed when Lector starts.
+- **Undo is a command like every other write.** `journal.undo` (one activity entry, `check` or
+  `force`) and `journal.undo_last` are in the command list, so `lector run` and MCP clients started
+  with `lector mcp --allow-writes` can undo too; an MCP client can only undo entries of the project
+  it was given, never another project's. The Undo toast, the Activity log (with "Restore anyway"
+  and Redo), Undo last operation, `lector undo` (same output and `--json`) and Undo turn work as
+  before.
+- **A new `settings.toml` or `keymap.toml` is created private.** When Open Settings or Open Keymap
+  creates the file, it is now readable only by you (and its folder too, if it is new); an existing
+  file is never rewritten and keeps its permissions.
 
 ## 0.7.2 — 2026-11-25
 

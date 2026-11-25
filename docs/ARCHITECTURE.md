@@ -29,8 +29,12 @@ These are the rules that actually constrain code. Each names what enforces it.
    *Enforced by* `arch-check purity`.
 4. **Every write is a registry command.** Changes to the user's files, index, refs, stashes,
    remotes or config go through `lector_app::CommandRegistry::invoke`, which journals them and
-   declares their undo ([ADR 0002](adr/0002-one-write-path.md)). *Enforced by*
-   `arch-check writes`, `crates/lector-app/tests/undo_roundtrip.rs` and
+   declares their undo ([ADR 0002](adr/0002-one-write-path.md)); undoing one is a registry command
+   too (`journal.undo`, `journal.undo_last`, [ADR 0012](adr/0012-write-debt.md)), and UI code
+   creates no files. Saving a document and an agent's file writes are the known paths beside the
+   registry, with their own backup and journal logic (ADR 0010). *Enforced by*
+   `arch-check writes` (at zero, with the reviewed handle accessors in `arch/git-handles.allow`),
+   `crates/lector-app/tests/undo_roundtrip.rs` and
    `crates/lector-agent/tests/undo_declarations.rs`.
 5. **Reads never write.** Opening, browsing, refreshing, diffing, blame and history leave the
    repository byte- and mtime-identical. *Enforced by* `crates/lector-app/tests/read_only.rs`
@@ -276,14 +280,17 @@ The headless core and the only stateful layer. **Owns** the `AppCore` (scheduler
 compute, blocking, serial and guaranteed lanes, command
 registry, journal, state store, git service, document store), the open project, documents,
 commands, undo, the content cache, review data, provenance, comments, crash log and session
-health, and the quit sequence. **Must not** depend on GPUI or tokio, or on `lector-forge`.
+health, the files Lector creates for the user in its own directories (`lector_app::user_files`:
+`settings.toml` / `keymap.toml` on Open Settings / Open Keymap, the no-folder placeholder), and the
+quit sequence. **Must not** depend on GPUI or tokio, or on `lector-forge`.
 **Start at** `lector_app::AppCore`, `lector_app::CommandRegistry`, `lector_app::Scheduler`,
 `lector_app::store::Store`, `lector_app::documents::DocumentStore`, `lector_app::journal::Journal`.
 
 ### lector-agent (client)
 Coding agents over the Agent Client Protocol (newline-delimited JSON-RPC on the agent's stdio).
 **Owns** sessions and turns, permission requests, agent file reads and writes through the document
-store, turns' backups (taken through `lector_app::commands::agent_backup`), undo of a turn, the agent provenance provider,
+store, turns' backups (taken through `lector_app::commands::agent_backup`), undo of a turn (by invoking
+`journal.undo`; it calls no `lector-git` write API and hands out no shadow repository), the agent provenance provider,
 inline-edit state and turn summaries. **Must not** decide path confinement itself (agent paths go
 through `lector_fs::confine`), let an agent read or write outside the project or in `.git`, write
 anything it cannot undo, or give it a terminal or Lector's tools. **Start at** `lector_agent::AgentSession`,
@@ -319,7 +326,7 @@ Git views: Changes panel, diff and review tabs, history with graph, branches, bl
 editor, sync control and dialogs, credential prompts, pull requests and review comments.
 **Owns** the per-window `GitStore` over the shared `RepoState`, and the UI flows that front git
 commands (confirmations, progress, Undo toasts). **Must not** write except by invoking registry
-commands (`staging::run_op`, `sync::SyncController`). **Start at** `lector_ui_git::init`,
+commands (`staging::run_op`, `sync::SyncController`, `activity::undo_entry` for `journal.undo`). **Start at** `lector_ui_git::init`,
 `lector_ui_git::store::GitStore`, `lector_ui_git::staging::run_op`,
 `lector_ui_git::diff_view::DiffView`, `lector_ui_git::review_tab::ReviewView`.
 
@@ -373,10 +380,22 @@ and the quit hook that runs `lector_app::shutdown::shutdown` last. Logging goes 
 6. Back on the UI thread, `commands_bridge::apply_outcome` applies `UiRequest`s and the git
    views refresh (`RepoState::refresh_and_notify`); an outcome with an undo record is toasted as
    "… · Undo" (`commands_bridge::set_undo_offer`).
-7. Undo (the toast, `workspace::UndoLastOperation`, the Activity log, `lector undo`) calls
-   `Journal::undo` with `UndoMode::Check`: it refuses with `UndoError::Changed` if the files changed
-   since; `UndoMode::Force` ("Restore anyway") backs up the present state first, so every undo is
-   itself undoable.
+7. Undo is a write like the others: the toast, `workspace::UndoLastOperation`, the Activity log,
+   `lector undo`, `agent.undo_turn` and MCP clients invoke the registry commands `journal.undo`
+   (`{ entry, mode }`) and `journal.undo_last` (`{ scope, mode }`)
+   (`lector_app::commands::journal_undo`; typed helpers `invoke_undo` / `invoke_undo_last`). Their
+   implementation is the journal's undo engine (`lector_app::journal`, crate-private). With
+   `mode: "check"` it refuses with `UndoError::Changed` if the files changed since; `"force"`
+   ("Restore anyway") backs up the present state first, so every undo is itself undoable: the
+   undo is recorded as an entry that carries the redo (the commands record themselves,
+   `CommandSpec::records_itself`, so `invoke` adds no second entry), and undoing that entry makes
+   the original operation current again. Sandboxed callers (MCP, agents) may only undo entries of
+   their own project: the entry's directory (the repository's work tree, or for a folder without
+   git the folder, as agent turns there record it, see [An agent turn](#an-agent-turn)) must be
+   the context's and every path it wrote or restores must pass the project's confinement. From the
+   GUI the undo runs on the repository's serial `GitWrite` lane (keyed by the view in a folder
+   without git), and an agent turn's undo from the Agent panel on `AgentUndo`; all are local writes,
+   drained at quit.
 
 Saving a file is the other write: `DocHandle::save` (see [Opening and editing a document](#opening-and-editing-a-document)) encodes the buffer and calls
 `lector_fs::write_atomic`. Discards and other overwrites are backed up and undoable instead of
@@ -518,16 +537,21 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    read into the shadow: its after-fingerprint is a hash, the undo still restores the state before
    the turn and a redo of that file refuses), its "before" state is the checkpoint
    and the first-touch backups combined (`ShadowRepo::merge_snapshots`), and a turn that changed
-   files appends one `agent.turn` journal entry whose undo (`RestoreFiles` over the changed paths,
-   with their fingerprints at the end of the turn) restores exactly those files to their state
-   before the turn, including "did not exist" (`AgentSession::undo_turn`, the Activity log or
-   `lector undo` → `Journal::undo`, which finds a folder's backups with
-   `ShadowRepo::existing_folder`). The journal's check / force / redo apply unchanged. In a
-   repository the turn's changes are a `lector_git::Changeset::Snapshots` reviewable in the normal
-   review tab; a folder without git has no review, status or history ("Review" says it needs a git
-   repository), but its workspace registers the Activity log, `workspace::UndoLastOperation`, Undo
-   toasts and the Activity tab's restoration (`lector_ui_git::init`, before the repository-only
-   views).
+   files appends one `agent.turn` journal entry (its directory, `ActivityEntry::repo`, is the
+   repository's work tree, or the folder itself without git) whose undo (`RestoreFiles` over the
+   changed paths, with their fingerprints at the end of the turn) restores exactly those files to
+   their state before the turn, including "did not exist". Every way of undoing it is step 7 of
+   [A write](#a-write-to-the-users-files-or-repository): `agent.undo_turn` /
+   `AgentSession::undo_turn` (the Agent panel, on `AgentUndo`), the Activity log, the Undo toast,
+   `workspace::UndoLastOperation`, `lector undo` and MCP clients all invoke `journal.undo` /
+   `journal.undo_last`, whose engine finds a folder's backups with `ShadowRepo::existing_folder`;
+   check / force / redo and the confinement of sandboxed callers (a folder project's directory
+   is the folder) apply unchanged. In a repository the turn's changes are a
+   `lector_git::Changeset::Snapshots` reviewable in the normal review tab; a folder without git
+   has no review, status or history ("Review" says it needs a git repository), but its workspace
+   registers the Activity log, `workspace::UndoLastOperation`, Undo toasts (through the
+   `ActivityStores` global) and the Activity tab's restoration (`lector_ui_git::init`, before the
+   repository-only views), which undo through the same commands.
 
 **What each source can reach.** The agent itself gets no terminal (`terminal: false`), no MCP
 servers and none of Lector's commands: only confined file reads and writes inside the project,
@@ -557,7 +581,8 @@ Turning a UI-only capability into a command must not widen this
    gone (deleted or renamed) once their newest backup is older than 30 days
    (`ShadowRepo::prune_orphans`).
    Everything Lector creates in the data directory is owner-only (`lector_base::private`, see
-   [File permissions](#file-permissions)); config files keep the user's own modes.
+   [File permissions](#file-permissions)); config files Lector creates for the user
+   (`lector_app::user_files`) start owner-only and otherwise keep the user's own modes.
 2. **Everything else** lives in `data_dir()/lector.redb` behind `lector_app::store::Store`: one
    table per concern (recent projects, window and terminal sessions, review marks, notices,
    update state), each with a schema version in `store_meta`, plus the comments, journal, `kv` and
@@ -694,7 +719,9 @@ directory in it, that is wider is narrowed to `0700` when an `AppCore` opens, wi
 (`lector_app::AppCore::open`). On Windows nothing is changed: the user profile's ACL
 already keeps other users out. A damaged `lector.redb` is made `0600` before it is moved aside.
 The askpass socket and helper shim are owner-only. Files the user edits (`settings.toml`,
-`keymap.toml`, themes) keep the user's modes. `write_atomic` and `Confined::write` keep the
+`keymap.toml`, themes) keep the user's modes; when Lector creates a missing `settings.toml` or
+`keymap.toml` (Open Settings / Open Keymap, `lector_app::user_files`) it creates it `0600` in a
+`0700` directory and never rewrites an existing one. `write_atomic` and `Confined::write` keep the
 target's permissions and refuse a read-only target.
 
 ### Untrusted input
@@ -776,11 +803,11 @@ design: [ADR 0008](adr/0008-guardrails.md).
 | Rule | What it enforces | Allow file |
 |---|---|---|
 | `deps` | Layering, forbidden edges and crates, GUI/tokio closures | `arch/layers.toml` (an ADR, not an allowance) |
-| `writes` | No call of the `lector-git` write API outside `lector-app` commands | `arch/git-read.allow`, `arch/git-ambiguous.allow` |
+| `writes` | No call of the `lector-git` write API outside `lector-app` commands (and the undo engine), no process or file write from UI code, no unlisted accessor handing out a repository handle | `arch/git-read.allow`, `arch/git-ambiguous.allow`, `arch/git-callers.allow`, `arch/fs-writers.allow`, `arch/git-handles.allow` |
 | `threads` | Threads only through `lector_base::thread`; closed `spawn_named` kinds | `arch/threads.allow` |
 | `background` | GPUI executors only in the UI bridge | `arch/background.allow` |
 | `state` | No state files built under the data/config dirs outside the store | `arch/state.allow` |
-| `dupes` | One `CancelToken`, one fuzzy matcher | none |
+| `dupes` | One `CancelToken`, one fuzzy matcher, one path confinement, one credential redaction, one debounce | `arch/one-impl.toml` (reviewed `delegate`s and `exception`s) |
 | `size` | Hand-written files at most 1,500 lines | `arch/generated.allow` |
 | `purity` | `lector-review` keeps no state, starts no threads, writes nothing | `arch/review-statics.allow`, `arch/store-ambiguous.allow` |
 | `hygiene` | `forbid(unsafe_code)`, `// SAFETY:` comments, `unwrap`/`expect` ratchet | `arch/unsafe.allow` |

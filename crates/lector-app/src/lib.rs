@@ -22,6 +22,7 @@ pub mod review_service; // review data for views, the CLI and agents; the viewed
 pub mod scheduler; // Agent APP
 pub mod shutdown; // orderly stop of child processes and the scheduler at quit (ADR 0003)
 pub mod store; // every piece of Lector's own state, versioned, in one database (ADR 0004)
+pub mod user_files; // settings/keymap/no-folder files Lector creates in its own dirs for the UI (ADR 0012)
 
 pub use crate::commands::{
     ActivitySink, Availability, Command, CommandContext, CommandRegistry, CommandSpec, Outcome,

@@ -48,7 +48,7 @@ pub enum WatchEvent {
 
 /// A running watcher; dropping it stops watching.
 pub struct Watcher {
-    // Owns the channel sender; dropping it ends the debounce thread.
+    // Owns the channel sender; dropping it ends the coalescing thread.
     _watcher: RecommendedWatcher,
 }
 
@@ -93,15 +93,20 @@ pub fn watch(
     spawn_named(
         ThreadKind::FileWatcher,
         root.display().to_string(),
-        move || debounce_loop(&rx, debounce, &roots, &sink),
+        move || coalesce_events(&rx, debounce, &roots, &sink),
     )?;
     Ok(Watcher { _watcher: watcher })
 }
 
-/// Collects events until the stream has been quiet for `debounce` (or a batch has
-/// been open for `max_latency`, so a steady stream of writes still gets delivered),
-/// then hands the converted batch to `sink`. Returns when the watcher is dropped.
-fn debounce_loop(
+/// The watcher's owner thread: coalesces the backend's raw events into batches, collecting
+/// until the stream has been quiet for `debounce` (or a batch has been open for `max_latency`, so
+/// a steady stream of writes still gets delivered), then hands the converted batch to `sink`.
+/// Returns when the watcher is dropped.
+///
+/// Not a second debounce of the scheduler's (ADR 0003): it runs below `lector-app`, inside the
+/// one thread that owns the watcher, before anything is scheduled (reviewed exception in
+/// `arch/one-impl.toml`, ADR 0012 item 6).
+fn coalesce_events(
     rx: &mpsc::Receiver<notify::Result<Event>>,
     debounce: Duration,
     roots: &[PathBuf],
