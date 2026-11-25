@@ -48,6 +48,7 @@ use crate::{ChangeKind, FileChange, Oid, Repo, Side};
 
 mod capture;
 mod command;
+mod files;
 mod folder;
 mod gc;
 mod merge;
@@ -63,6 +64,23 @@ use util::{check_rel, dir_size, is_within, parse_ls_files_stage, ref_time};
 
 /// Default size cap of one shadow repository for [`ShadowRepo::prune`].
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// The largest file the shadow of a folder without git stores (ADR 0011): larger ones are
+/// recorded as skipped ([`ShadowRepo::snapshot_paths`]) or refused ([`Oversize::Refuse`]).
+pub const FOLDER_MAX_FILE: u64 = 64 * 1024 * 1024;
+
+/// What [`ShadowRepo::snapshot_files`] does with a path it will not store: a file over the
+/// size limit, a directory, or a FIFO, socket or device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Oversize {
+    /// Fail the whole snapshot (nothing is recorded): for a backup a write depends on.
+    Refuse,
+    /// Record a file over the limit as skipped without reading it (a restore of that path then
+    /// refuses); still fail for a directory, FIFO, socket or device.
+    Skip,
+    /// Record every such path as skipped without reading it: for recording the state at the end
+    /// of an agent turn, which must not fail because a file was replaced by a directory.
+    SkipAll,
+}
 /// Files larger than this are skipped (and recorded as skipped) by
 /// [`ShadowRepo::snapshot_worktree`]; explicit [`ShadowRepo::snapshot_paths`] never skips.
 const WORKTREE_MAX_FILE: u64 = 256 * 1024 * 1024;
@@ -292,7 +310,15 @@ impl ShadowRepo {
     /// Records the working-tree contents of `paths` (files, symlinks; directories are
     /// recorded recursively, `.git` skipped). Paths that do not exist are recorded as
     /// absent, so restoring them deletes whatever is there later. Contents are exact bytes.
+    ///
+    /// For the shadow of a folder without git this is path-scoped: it is
+    /// [`ShadowRepo::snapshot_files`] with [`FOLDER_MAX_FILE`] and [`Oversize::Skip`], so a
+    /// directory is never walked (it is refused, as are FIFOs, sockets and devices) and a larger
+    /// file is never stored (it is recorded as skipped).
     pub fn snapshot_paths(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot> {
+        if self.folder {
+            return self.snapshot_files(paths, FOLDER_MAX_FILE, Oversize::Skip, note);
+        }
         let mut plan = Plan::new(SnapshotKind::Paths);
         for path in paths {
             let rel = check_rel(path)?;
@@ -545,6 +571,15 @@ impl ShadowRepo {
                         binary: None,
                     }
                 }
+                // Not stored by `b` (too large): still there, changed.
+                (Some((_, oa)), None) if mb.skipped.iter().any(|s| s == path) => FileChange {
+                    old_path: Some(path.clone()),
+                    new_path: Some(path.clone()),
+                    kind: ChangeKind::Modified,
+                    old: Side::Blob(*oa),
+                    new: Side::Workdir(path.clone()),
+                    binary: None,
+                },
                 (Some((_, oa)), None) => FileChange {
                     old_path: Some(path.clone()),
                     new_path: None,
@@ -664,11 +699,20 @@ impl ShadowRepo {
     /// files changed in the meantime. Nothing is written.
     pub fn fingerprints(&self, paths: &[&str]) -> Result<BTreeMap<String, String>> {
         let mut rels: BTreeSet<String> = BTreeSet::new();
+        let mut special: BTreeSet<String> = BTreeSet::new();
         for path in paths {
             let rel = check_rel(path)?;
             self.no_symlink_parents(&rel)?;
             let abs = self.workdir.join(&rel);
-            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+            let meta = fs::symlink_metadata(&abs).ok();
+            if self.folder
+                && meta
+                    .as_ref()
+                    .is_some_and(|m| !m.is_file() && !m.is_symlink())
+            {
+                // Path-scoped: a directory (or FIFO, device) is one opaque entry, never walked.
+                special.insert(rel);
+            } else if meta.is_some_and(|m| m.is_dir()) {
                 let mut plan = Plan::new(SnapshotKind::Paths);
                 self.collect(&rel, &mut plan, true, u64::MAX)?;
                 rels.extend(plan.files.into_iter().map(|f| f.rel));
@@ -679,7 +723,7 @@ impl ShadowRepo {
         let rels: Vec<String> = rels.into_iter().collect();
         let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
         let state = self.worktree_state(&refs)?;
-        Ok(rels
+        let mut out: BTreeMap<String, String> = rels
             .into_iter()
             .zip(state)
             .map(|(rel, st)| {
@@ -689,7 +733,13 @@ impl ShadowRepo {
                 };
                 (rel, value)
             })
-            .collect())
+            .collect();
+        out.extend(
+            special
+                .into_iter()
+                .map(|rel| (rel, "not a file".to_owned())),
+        );
+        Ok(out)
     }
 
     /// One stable fingerprint for [`ShadowRepo::fingerprints`] of `paths`.
@@ -775,6 +825,11 @@ impl ShadowRepo {
                 }
             }
             if manifest.skipped.iter().any(|s| is_within(s, &rel)) {
+                if manifest.kind == SnapshotKind::Paths {
+                    return Err(Error::Io(io::Error::other(format!(
+                        "{rel} was not backed up (too large, or not a regular file), so it cannot be restored from this backup"
+                    ))));
+                }
                 found = true;
             }
             if manifest.absent.iter().any(|a| a == &rel) || (!found && full) {
@@ -1147,6 +1202,9 @@ struct Plan {
     skipped: Vec<String>,
     /// Files that disappeared between stat and read (recorded absent).
     vanished: Vec<String>,
+    /// Files larger than this when opened are not stored ([`Plan::oversize`] says what then).
+    max_file: u64,
+    oversize: Oversize,
     index: Vec<IndexRecord>,
     no_index: Vec<String>,
     /// Index entries that are intent-to-add (`git add -N`), a flag `ls-files -s` does not show.
@@ -1162,6 +1220,8 @@ impl Plan {
             absent: Vec::new(),
             skipped: Vec::new(),
             vanished: Vec::new(),
+            max_file: u64::MAX,
+            oversize: Oversize::Skip,
             index: Vec::new(),
             no_index: Vec::new(),
             intent_to_add: Vec::new(),

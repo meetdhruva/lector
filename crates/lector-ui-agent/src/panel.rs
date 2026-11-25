@@ -624,6 +624,15 @@ impl AgentPanel {
         }
     }
 
+    /// The file a turn's changed path names: changed paths are relative to the repository's
+    /// work tree, or to the folder itself when it is not a git repository (ADR 0011).
+    pub(crate) fn changed_file_abs(&self, path: &str) -> std::path::PathBuf {
+        match self.project.repo() {
+            Some(repo) => repo.workdir().join(path),
+            None => self.project.absolute_path(path),
+        }
+    }
+
     /// Undoes a turn of the current session (with `force` after the user confirmed
     /// overwriting newer edits).
     pub fn undo_turn(&mut self, id: TurnId, force: bool, cx: &mut Context<Self>) {

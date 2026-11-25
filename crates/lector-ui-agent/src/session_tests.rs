@@ -472,3 +472,109 @@ fn background_work_of_views_runs_on_the_test_executor(cx: &mut gpui::TestAppCont
     cx.run_until_parked();
     assert_eq!(cx.executor().block_test(task), Ok(test_thread));
 }
+
+/// ADR 0011, reachability: in a workspace opened on a folder without git (both `init`s, as the
+/// app does), the Agent panel is registered, a turn's write lands and is listed, "Review" says
+/// it needs a git repository, a changed file opens from its row's path, and
+/// `agent::UndoLastTurn` restores the file.
+#[gpui::test]
+fn the_agent_panel_works_end_to_end_in_a_folder_without_git(cx: &mut TestAppContext) {
+    let Some(py) = ["python3", "python"].into_iter().find(|p| {
+        std::process::Command::new(p)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }) else {
+        eprintln!("python not found: skipping");
+        return;
+    };
+    cx.executor().allow_parking();
+    hermetic_git();
+    let work = tempfile::tempdir().expect("tempdir");
+    let data = tempfile::tempdir().expect("tempdir");
+    let root = work.path().join("notes");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    std::fs::write(root.join("a.txt"), ORIGINAL_A).expect("write");
+    let core = AppCore::open(CoreOptions {
+        data_dir: Some(data.path().to_path_buf()),
+        ..CoreOptions::for_tests()
+    });
+    let mut settings = lector_config::Settings::default();
+    settings.lsp.enabled = false;
+    settings.session.restore = false;
+    let for_ui = settings.clone();
+    let ui_core = core.clone();
+    cx.update(move |cx: &mut App| {
+        ThemeState::init(cx, ThemeRegistry::new(), ThemeMode::Dark, Appearance::Dark);
+        cx.set_global(lector_ui::code_view::EditorSettings::default());
+        cx.set_global(lector_ui::settings::AppSettings {
+            settings: Arc::new(for_ui),
+            warnings: Default::default(),
+        });
+        cx.set_global(CoreGlobal(ui_core));
+        lector_ui_git::init(cx);
+        crate::init(cx);
+    });
+    let project = Project::open(&root, settings).expect("project");
+    assert!(project.repo().is_none());
+    let root = project.root().to_path_buf();
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(project.clone(), window, cx));
+    cx.run_until_parked();
+    let panel = cx
+        .update(|_, cx| crate::panel_for(ws.entity_id(), cx))
+        .expect("the Agent panel is registered for a folder without git");
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lector-agent/tests/fake_acp_agent.py");
+    let cfg = AgentConfig::new("Fake", py, &[script.to_str().expect("utf-8 path")]);
+    let session = AgentManager::of(&core)
+        .start_with(
+            &core,
+            &project,
+            &cfg,
+            SessionOptions {
+                request_timeout: Duration::from_secs(20),
+                cancel_grace: Duration::from_secs(5),
+                ..Default::default()
+            },
+        )
+        .expect("session");
+    let id = session
+        .prompt("write a.txt agent\\n".into(), Vec::new())
+        .expect("prompt");
+    let turn = session.wait_turn(id, WAIT).expect("turn finished");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).expect("read"),
+        "agent\n"
+    );
+    assert!(turn.journal_id.is_some(), "the turn is undoable");
+    wait_for(cx, "the panel to show the turn", |cx| {
+        panel.read_with(cx, |p, _| p.last_turn().is_some())
+    });
+    assert_eq!(
+        panel.read_with(cx, |p, _| p.changed_file_abs("a.txt")),
+        root.join("a.txt"),
+        "a changed file's row opens the folder's file"
+    );
+
+    // Review: the toast says why there is no review.
+    let s2 = session.clone();
+    cx.update(|window, cx| panel.update(cx, |p, cx| p.review_turn_in(s2, id, None, window, cx)));
+    cx.run_until_parked();
+    let toast = ws.read_with(cx, |ws, _| ws.toast_message());
+    assert_eq!(
+        toast.as_ref().map(|t| t.as_ref()),
+        Some("Reviewing turns needs a git repository.")
+    );
+
+    // `agent::UndoLastTurn`, dispatched like the menu and the palette do.
+    cx.update(|window, cx| window.focus(&gpui::Focusable::focus_handle(ws.read(cx), cx)));
+    cx.run_until_parked();
+    cx.dispatch_action(lector_ui::actions::agent::UndoLastTurn);
+    wait_for(cx, "the undo of the turn", |_| {
+        std::fs::read_to_string(root.join("a.txt")).ok().as_deref() == Some(ORIGINAL_A)
+    });
+    assert!(session.turn(id).is_some_and(|t| t.undone));
+    assert!(!root.join(".git").exists());
+    session.stop();
+}

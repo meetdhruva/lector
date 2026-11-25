@@ -245,3 +245,55 @@ fn a_subfolder_of_a_repository_follows_the_repository_rule() {
     assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
     s.stop();
 }
+
+fn sparse(path: &std::path::Path, len: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
+/// An agent naming a directory (`Documents`) as the file to write is refused before any backup:
+/// nothing below it is walked or copied, and in a folder no shadow is even created.
+#[test]
+fn a_write_to_a_directory_is_refused_before_any_backup() {
+    let fx = need!(Fx::build(
+        |base| sparse(&base.join("proj/Documents/big.iso"), 65 * 1024 * 1024),
+        "proj"
+    ));
+    let s = fx.start();
+    let t = fx.run(&s, "write Documents oops\\n");
+    let answer = t.answer();
+    assert!(answer.contains("not a regular file"), "{answer}");
+    assert!(!fx.data.join("shadow").exists(), "no backup was attempted");
+    assert!(fx.root.join("Documents/big.iso").is_file());
+    assert!(t.written.is_empty() && t.journal_id.is_none());
+    s.stop();
+}
+
+/// The same in a repository for a git-ignored directory (`node_modules`): the checkpoint leaves
+/// it out, and the first-touch backup of ignored files never walks it.
+#[test]
+fn a_write_to_an_ignored_directory_in_a_repository_is_refused_before_any_backup() {
+    let fx = need!(Fx::build(
+        |base| {
+            let root = base.join("proj");
+            fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+            sparse(&root.join("node_modules/pkg/blob.bin"), 65 * 1024 * 1024);
+            common::git(&root, &["init", "-q", "-b", "main"]);
+            common::git(&root, &["add", "-A"]);
+            common::git(&root, &["commit", "-q", "-m", "init"]);
+        },
+        "proj"
+    ));
+    let s = fx.start();
+    let shadow = lector_git::ShadowRepo::open(&fx.data, fx.project.repo().unwrap()).unwrap();
+    let before = shadow.snapshots().unwrap().len();
+    let t = fx.run(&s, "write node_modules oops\\n");
+    let answer = t.answer();
+    assert!(answer.contains("not a regular file"), "{answer}");
+    assert_eq!(
+        shadow.snapshots().unwrap().len(),
+        before + 2,
+        "only the turn's two checkpoints, no backup of the directory"
+    );
+    s.stop();
+}

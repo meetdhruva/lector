@@ -360,6 +360,12 @@ impl ActivityView {
         activity_dir(&self.store, cx)
     }
 
+    /// Ids of the entries the view shows (tests).
+    #[cfg(test)]
+    pub(crate) fn entry_ids(&self) -> Vec<u64> {
+        self.rows.iter().map(|r| r.entry.id).collect()
+    }
+
     /// Re-reads the journal (and which backups still exist) in the background.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let journal = journal(cx);

@@ -900,3 +900,107 @@ fn journal_undo_with_allow_writes_stays_in_the_project() {
     );
     assert_eq!(undone["_meta"]["lector"]["journalId"], json!(newest.id));
 }
+
+/// A folder without git with `a.txt`, opened as a project of `core`.
+fn folder_project(dir: &Path) -> Project {
+    std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+    std::fs::write(dir.join("a.txt"), "one\n").expect("write");
+    std::fs::write(dir.join("sub/b.txt"), "bee\n").expect("write");
+    let mut settings = lector_config::Settings::default();
+    settings.lsp.enabled = false;
+    Project::open(dir, settings).expect("project")
+}
+
+/// One agent turn in a folder without git (ADR 0011): back up `rel` on first touch, write it,
+/// finish the turn and journal it as `agent.turn` the way the session does. Returns the entry id.
+fn folder_turn(core: &AppCore, project: &Project, rel: &str, text: &str) -> u64 {
+    use lector_app::commands::agent_backup::AgentBackups;
+    let backups = AgentBackups::new(core, project);
+    assert!(backups.in_folder());
+    let mut ledger = backups.begin_turn("Before agent turn 1");
+    backups
+        .before_write(Some(&mut ledger), rel, text.len())
+        .expect("backed up");
+    std::fs::write(project.root().join(rel), text).expect("write");
+    let backup = backups
+        .finish_turn(&ledger, "Agent turn 1")
+        .expect("turn backup");
+    let workdir = backups.workdir().to_path_buf();
+    Journal::of(core)
+        .expect("journal")
+        .append(lector_app::journal::ActivityEntry {
+            id: 0,
+            time: std::time::SystemTime::now(),
+            command: "agent.turn".into(),
+            summary: format!("turn writing {rel}"),
+            repo: Some(workdir.clone()),
+            paths: backup
+                .changes
+                .iter()
+                .map(|c| workdir.join(c.path()))
+                .collect(),
+            undo: backup.undo,
+            undone: false,
+            args: json!({}),
+            source: lector_app::commands::Source::Agent,
+            undo_of: None,
+            undone_by: None,
+        })
+        .expect("journaled")
+}
+
+/// ADR 0011 + ADR 0012: in a folder without git the context's directory is the folder itself. An
+/// MCP client given that folder undoes a turn of it, and cannot undo a turn of another folder or
+/// of the enclosing folder when it was given only a subfolder.
+#[test]
+fn journal_undo_of_folder_turns_stays_in_the_folder_project() {
+    let fx = fixture();
+    let base = fx.repo.parent().expect("parent").to_path_buf();
+    let mine = folder_project(&base.join("mine"));
+    let theirs = folder_project(&base.join("theirs"));
+    let own = folder_turn(&fx.core, &mine, "a.txt", "agent\n");
+    let foreign = folder_turn(&fx.core, &theirs, "a.txt", "agent\n");
+    let read = |p: &Project| std::fs::read_to_string(p.root().join("a.txt")).expect("read");
+
+    let server = |project: &Project| {
+        McpServer::new(
+            fx.core.clone(),
+            Some(project.clone()),
+            ServerOptions {
+                allow_writes: true,
+                ..Default::default()
+            },
+        )
+    };
+    // Outside: another folder's turn, and the enclosing folder's turn seen from a subfolder.
+    let sub = {
+        let mut settings = lector_config::Settings::default();
+        settings.lsp.enabled = false;
+        Project::open(&mine.root().join("sub"), settings).expect("project")
+    };
+    let mut msgs = handshake();
+    msgs.push(call(2, "journal_undo", json!({ "entry": foreign })));
+    let out = converse(&server(&mine), &msgs);
+    assert_eq!(response(&out, 2)["result"]["isError"], true, "{out:?}");
+    let mut msgs = handshake();
+    msgs.extend([
+        call(2, "journal_undo", json!({ "entry": own })),
+        call(3, "journal_undo_last", json!({})),
+    ]);
+    let out = converse(&server(&sub), &msgs);
+    assert_eq!(response(&out, 2)["result"]["isError"], true, "{out:?}");
+    assert_eq!(response(&out, 3)["result"]["isError"], true, "{out:?}");
+    assert_eq!(read(&theirs), "agent\n", "the other folder is untouched");
+    assert_eq!(read(&mine), "agent\n", "nothing undone from the subfolder");
+
+    // Inside: the folder's own turn.
+    let mut msgs = handshake();
+    msgs.push(call(2, "journal_undo", json!({ "entry": own })));
+    let out = converse(&server(&mine), &msgs);
+    assert_eq!(response(&out, 2)["result"]["isError"], false, "{out:?}");
+    assert_eq!(read(&mine), "one\n", "the turn is undone");
+    assert_eq!(read(&theirs), "agent\n");
+    let journal = Journal::of(&fx.core).expect("journal");
+    assert!(journal.get(own).expect("entry").undone);
+    assert!(!journal.get(foreign).expect("entry").undone);
+}
