@@ -56,6 +56,10 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.2" date="2026-11-25">
+      <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.7.2</url>
+      <description><p>Security fixes: an agent can no longer write into .git through a symlink in the project, and GitHub or GitLab tokens are no longer sent to look-alike hosts.</p></description>
+    </release>
     <release version="0.7.1" date="2026-11-19">
       <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.7.1</url>
       <description><p>Fixes: Undo turn acts on the right agent session, inline edit refinements after a new session, terminal links outside the project stay read-only, completions accepted while typing, saved terminal tabs of several windows, and four stash and pull undo problems.</p></description>
