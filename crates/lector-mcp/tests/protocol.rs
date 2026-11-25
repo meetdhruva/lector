@@ -919,7 +919,7 @@ fn folder_turn(core: &AppCore, project: &Project, rel: &str, text: &str) -> u64 
     assert!(backups.in_folder());
     let mut ledger = backups.begin_turn("Before agent turn 1");
     backups
-        .before_write(Some(&mut ledger), rel, text.len())
+        .before_write(Some(&mut ledger), rel, text.len() as u64)
         .expect("backed up");
     std::fs::write(project.root().join(rel), text).expect("write");
     let backup = backups

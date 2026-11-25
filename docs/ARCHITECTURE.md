@@ -551,7 +551,13 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    is the folder) apply unchanged, with one rule for content the shadow could not store: an undo
    overwrites or removes such a file only while it is exactly as the turn left it (in check and
    force mode alike; otherwise it refuses and writes nothing), and the undo then says the file
-   cannot be redone (`args.not_redoable`). In a repository the turn's changes are a
+   cannot be redone (`args.not_redoable`). A restore (`ShadowRepo::restore_paths`) restores
+   every requested path or fails as a whole, naming what it cannot restore, before writing
+   anything. Sizes are checked as the bytes a save will write (`DocHandle::encoded_len`), and
+   everything a turn records is keyed by the file as the file system resolves it
+   (`AgentBackups::file_key`), so two spellings of one name on macOS or Windows are one file.
+   The state table and the limits are in the rustdoc of `ShadowRepo::changes_between` and
+   `lector_app::commands::agent_backup`. In a repository the turn's changes are a
    `lector_git::Changeset::Snapshots` reviewable in the normal review tab; a folder without git
    has no review, status or history ("Review" says it needs a git repository), but its workspace
    registers the Activity log, `workspace::UndoLastOperation`, Undo toasts (through the

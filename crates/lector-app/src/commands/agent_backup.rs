@@ -27,6 +27,9 @@
 use std::path::{Path, PathBuf};
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use lector_fs::{on_disk_relative, EntryNames, FileSystemNames};
 
 use lector_git::shadow::Oversize;
 use lector_git::{FileChange, Repo, ShadowRepo, ShadowSnapshot};
@@ -62,6 +65,9 @@ pub struct TurnLedger {
     sizes: BTreeMap<String, (u64, u64)>,
     /// The shadow was trimmed for this turn (before its first backup).
     trimmed: bool,
+    /// Project-relative keys of first-touched paths that did not exist (re-keyed to their
+    /// on-disk name once created, [`AgentBackups::after_write`]).
+    created: Vec<String>,
 }
 
 impl TurnLedger {
@@ -108,6 +114,7 @@ pub struct AgentBackups {
     project: Project,
     repo: Option<Repo>,
     shadow: Mutex<Option<ShadowRepo>>,
+    names: Arc<dyn EntryNames + Send + Sync>,
 }
 
 impl std::fmt::Debug for AgentBackups {
@@ -128,6 +135,57 @@ impl AgentBackups {
             project: project.clone(),
             repo: project.repo().filter(|r| !r.is_bare()).cloned(),
             shadow: Mutex::new(None),
+            names: Arc::new(FileSystemNames),
+        }
+    }
+
+    /// Uses `names` to find the on-disk spelling of paths instead of the real file system's
+    /// ([`lector_fs::FileSystemNames`]): for tests of case-insensitive or normalising file
+    /// systems on a platform that has none.
+    pub fn with_entry_names(mut self, names: Arc<dyn EntryNames + Send + Sync>) -> Self {
+        self.names = names;
+        self
+    }
+
+    /// The identity of the project-relative `rel` as the file system resolves it: every
+    /// existing component in its on-disk spelling (so `README.md`, `readme.md` and the NFC and
+    /// NFD forms of a name key one file on macOS and Windows, and a restore never renames
+    /// `Readme.md`), the missing rest as requested. Everything a turn records is keyed by it:
+    /// first touches, the budget, the before and after records, the journal's paths.
+    pub fn file_key(&self, rel: &str) -> String {
+        on_disk_relative(self.project.root(), rel, self.names.as_ref())
+    }
+
+    /// After a write: a file the turn created has an on-disk name now, which can differ from the
+    /// spelling requested (a case variant created meanwhile, HFS+ storing names in NFD). Its
+    /// first-touch record ("did not exist") is re-keyed to that name, so later writes in any
+    /// spelling find it. Call with the ledger after every successful write of a turn.
+    pub fn after_write(&self, ledger: &mut TurnLedger) {
+        for i in 0..ledger.created.len() {
+            let requested = ledger.created[i].clone();
+            let stored = self.file_key(&requested);
+            if stored == requested {
+                continue;
+            }
+            let (old, new) = (self.shadow_path(&requested), self.shadow_path(&stored));
+            if ledger.has(&new) {
+                continue;
+            }
+            let snap = self
+                .store()
+                .and_then(|s| s.record_absent(&[new.as_str()], "Before an agent write"));
+            match snap {
+                Ok(snap) => {
+                    if let Some(entry) = ledger.first_touch.iter_mut().find(|(p, _)| *p == old) {
+                        *entry = (new.clone(), snap);
+                    }
+                    if let Some(size) = ledger.sizes.remove(&old) {
+                        ledger.sizes.insert(new, size);
+                    }
+                    ledger.created[i] = stored;
+                }
+                Err(err) => tracing::warn!("cannot re-key the backup of {requested}: {err}"),
+            }
         }
     }
 
@@ -200,7 +258,9 @@ impl AgentBackups {
         ledger
     }
 
-    /// Makes the write of `new_len` bytes to the project-relative `rel` (already confined)
+    /// Makes the write of `new_len` bytes (the size the file will have on disk: for an open
+    /// document `DocHandle::encoded_len`, which applies its encoding, BOM and line endings) to the
+    /// project-relative `rel` (already confined)
     /// undoable before it happens. Only a regular file (or a path that does not exist) can be
     /// written: anything else is refused before any backup, so nothing below a directory is ever
     /// read. In a folder without git every write is held to [`MAX_FOLDER_BACKUP`]. Within a turn
@@ -214,11 +274,10 @@ impl AgentBackups {
         &self,
         mut ledger: Option<&mut TurnLedger>,
         rel: &str,
-        new_len: usize,
+        new_len: u64,
     ) -> Result<Option<ShadowSnapshot>, String> {
-        let shadow_rel = self.shadow_path(rel);
-        let new_len = new_len as u64;
-        let current = match std::fs::symlink_metadata(self.project.absolute_path(rel)) {
+        let key = self.file_key(rel);
+        let current = match std::fs::symlink_metadata(self.project.absolute_path(&key)) {
             Ok(meta) if meta.is_file() => meta.len(),
             Ok(_) => {
                 return Err(format!(
@@ -228,6 +287,7 @@ impl AgentBackups {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
             Err(err) => return Err(format!("{rel}: {err}")),
         };
+        let exists = self.project.absolute_path(&key).exists();
         let max_file = if self.repo.is_none() {
             if current > MAX_FOLDER_BACKUP || new_len > MAX_FOLDER_BACKUP {
                 return Err(format!(
@@ -239,6 +299,16 @@ impl AgentBackups {
         } else {
             u64::MAX
         };
+        // The ledger entry this file already has: under its key, or a file the turn created
+        // whose entry is still under the requested spelling (re-keyed after its write).
+        let mut shadow_rel = self.shadow_path(&key);
+        if let Some(ledger) = ledger.as_deref() {
+            if !ledger.has(&shadow_rel) {
+                if let Some(created) = ledger.created.iter().find(|c| self.file_key(c) == key) {
+                    shadow_rel = self.shadow_path(created);
+                }
+            }
+        }
         if let Some(ledger) = ledger.as_deref_mut() {
             let covered = ledger.has(&shadow_rel)
                 || (ledger.checkpoint.is_some()
@@ -279,6 +349,9 @@ impl AgentBackups {
         if let Some(ledger) = ledger {
             ledger.sizes.insert(shadow_rel.clone(), (current, new_len));
             ledger.first_touch.push((shadow_rel, snap.clone()));
+            if !exists {
+                ledger.created.push(key);
+            }
         }
         Ok(Some(snap))
     }
@@ -362,8 +435,7 @@ impl AgentBackups {
             .unwrap_or_default();
         let undo = (!changes.is_empty()).then(|| {
             let paths: Vec<String> = changes.iter().map(|c| c.path().to_owned()).collect();
-            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-            let after = shadow.fingerprints(&refs).unwrap_or_default();
+            let after = fingerprints_or_unreadable(&shadow, &paths);
             UndoRecord::RestoreFiles {
                 shadow: before.clone(),
                 paths,
@@ -376,5 +448,26 @@ impl AgentBackups {
             changes,
             undo,
         })
+    }
+}
+
+/// The after-state of a turn's undo: the fingerprint of every path, so the undo check covers them
+/// all. A path that cannot be fingerprinted now (reached through a link, unreadable) gets a value
+/// no later fingerprint equals, so the check reports it instead of an empty map turning it off.
+fn fingerprints_or_unreadable(shadow: &ShadowRepo, paths: &[String]) -> BTreeMap<String, String> {
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    match shadow.fingerprints(&refs) {
+        Ok(map) => map,
+        Err(_) => paths
+            .iter()
+            .map(|p| {
+                let value = shadow
+                    .fingerprints(&[p.as_str()])
+                    .ok()
+                    .and_then(|m| m.get(p).cloned())
+                    .unwrap_or_else(|| "unreadable at the end of the turn".to_owned());
+                (p.clone(), value)
+            })
+            .collect(),
     }
 }

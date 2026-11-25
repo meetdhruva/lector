@@ -43,7 +43,7 @@ fn lector_undo_restores_an_agent_turn_in_a_folder_without_git() {
         let mut ledger = backups.begin_turn("Before agent turn 1: shopping");
         for (rel, text) in [("todo.txt", "milk\neggs\n"), ("lists/new.txt", "bread\n")] {
             backups
-                .before_write(Some(&mut ledger), rel, text.len())
+                .before_write(Some(&mut ledger), rel, text.len() as u64)
                 .expect("backed up");
             let path = root.join(rel);
             fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");

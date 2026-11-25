@@ -31,7 +31,17 @@ impl ShadowRepo {
         plan.oversize = oversize;
         for path in paths {
             let rel = check_rel(path)?;
-            self.no_symlink_parents(&rel)?;
+            if let Err(err) = self.no_symlink_parents(&rel) {
+                // Reached through a link now: never followed. Recording the end of a turn must
+                // not fail on it (that would drop the whole turn's undo): it is skipped, unread.
+                match oversize {
+                    Oversize::SkipAll => {
+                        plan.skipped.push(rel);
+                        continue;
+                    }
+                    Oversize::Refuse | Oversize::Skip => return Err(err),
+                }
+            }
             let meta = match fs::symlink_metadata(self.workdir.join(&rel)) {
                 Ok(meta) => meta,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -67,6 +77,18 @@ impl ShadowRepo {
                     }
                 }
             }
+        }
+        self.write_snapshot(plan, note)
+    }
+
+    /// Records `paths` as absent without looking at the work tree: for a file an agent turn
+    /// created, whose name the file system stored differently from the spelling requested
+    /// (case, Unicode normalisation), so the turn's "did not exist" is keyed by the stored name.
+    /// Writes only to the shadow.
+    pub fn record_absent(&self, paths: &[&str], note: &str) -> Result<ShadowSnapshot> {
+        let mut plan = Plan::new(SnapshotKind::Paths);
+        for path in paths {
+            plan.absent.push(check_rel(path)?);
         }
         self.write_snapshot(plan, note)
     }

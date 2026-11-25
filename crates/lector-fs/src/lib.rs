@@ -28,6 +28,7 @@ pub mod confine;
 mod decode;
 mod kind;
 mod load;
+pub mod spelling;
 mod watch;
 mod write;
 
@@ -35,6 +36,7 @@ pub use confine::{Access, ConfineError, Confined, Confinement, CreateDirs};
 pub use decode::{decode, UTF_8};
 pub use kind::{detect_kind, has_utf16_bom, is_binary, FileKind, ImageFormat, SNIFF_LEN};
 pub use load::{load_file, LoadedFile, BINARY};
+pub use spelling::{on_disk_relative, EntryNames, FileSystemNames};
 pub use watch::{watch, FsEvent, FsEventKind, WatchEvent, Watcher};
 pub use write::{stamp, write_atomic, FileStamp};
 

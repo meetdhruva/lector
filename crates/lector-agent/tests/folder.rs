@@ -341,3 +341,47 @@ fn a_created_file_grown_past_the_limit_by_another_writer_is_removed_by_undo() {
     );
     s.stop();
 }
+
+/// Codex finding: an agent write to an open UTF-16 document is held to the limit by the bytes the
+/// save will write, not by the UTF-8 text it sent: 40 MiB of ASCII is 80 MiB on disk and is
+/// refused; a small write is accepted and the turn's after-state stores it (redo stays possible).
+#[test]
+fn an_open_utf16_document_is_checked_by_the_bytes_it_will_have() {
+    let fx = need!(Fx::build(
+        |base| {
+            let utf16: Vec<u8> = [0xFF, 0xFE]
+                .into_iter()
+                .chain("hi\r\n".encode_utf16().flat_map(|u| u.to_le_bytes()))
+                .collect();
+            fs::write(base.join("proj/u16.txt"), utf16).unwrap();
+        },
+        "proj"
+    ));
+    let store = lector_app::documents::DocumentStore::for_core(&fx.core);
+    let _handle = store.open(&fx.root.join("u16.txt"), &fx.project).unwrap();
+    let before = fs::read(fx.root.join("u16.txt")).unwrap();
+    let s = fx.start();
+    let t = fx.run(&s, &format!("writegen u16.txt {} a", 40 * 1024 * 1024));
+    let answer = t.answer();
+    assert!(
+        answer.contains("64 MiB"),
+        "{:?} size {:?} {}",
+        t.state,
+        fs::metadata(fx.root.join("u16.txt")).map(|m| m.len()),
+        &answer[..answer.len().min(300)]
+    );
+    assert_eq!(
+        fs::read(fx.root.join("u16.txt")).unwrap(),
+        before,
+        "unchanged"
+    );
+
+    let t = fx.run(&s, "writegen u16.txt 1000 b");
+    assert!(!t.answer().contains("WRITE-ERROR"), "{}", t.answer());
+    assert_eq!(
+        fs::metadata(fx.root.join("u16.txt")).unwrap().len(),
+        2 + 2 * 1000
+    );
+    assert_eq!(t.changed_files.len(), 1);
+    s.stop();
+}

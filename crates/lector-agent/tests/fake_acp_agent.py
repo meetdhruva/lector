@@ -8,6 +8,7 @@ per line (unknown lines are echoed back as text):
     think <text>            a thought chunk
     plan a|b|c              a plan with three entries (first completed, second in progress)
     write <path> <text>     tool call (edit) + fs/write_text_file; `\\n` in text = newline
+    writegen <path> <n> <c> like write, with <c> repeated <n> times as the text
     read <path>             fs/read_text_file, then say "READ:<content>"
     ask <title>             session/request_permission (kind edit), then say "PERMISSION:<answer>"
     askread <title>         same with kind read
@@ -184,9 +185,13 @@ def run_prompt(rid, params):
             update({"sessionUpdate": "plan", "entries": [
                 {"content": n, "priority": "medium", "status": statuses[min(i, 2)]}
                 for i, n in enumerate(names)]})
-        elif cmd == "write":
+        elif cmd in ("write", "writegen"):
             path, _, body = rest.partition(" ")
-            body = body.replace("\\n", "\n")
+            if cmd == "writegen":
+                count, _, char = body.partition(" ")
+                body = (char or "a") * int(count)
+            else:
+                body = body.replace("\\n", "\n")
             call_n += 1
             cid = "call-%d" % call_n
             abs_path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
@@ -197,7 +202,7 @@ def run_prompt(rid, params):
             try:
                 with open(abs_path, encoding="utf-8") as f:
                     old = f.read()
-            except OSError:
+            except (OSError, ValueError):
                 pass
             resp = request("fs/write_text_file", {"sessionId": session_id, "path": abs_path, "content": body})
             status = "failed" if "error" in resp else "completed"
