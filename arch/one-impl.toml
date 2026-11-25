@@ -10,6 +10,8 @@
 # owner that does not exist yet is fine: until it does, every match is a duplicate.
 #   delegate = [{ file, fn, why }]: a reviewed thin wrapper of the owner that has one of the names
 #   (the reason is required; an entry whose function is gone is an error).
+#   exception = [{ file, fn, why }]: a reviewed function that has one of the names but is not the
+#   concept at all (neither an implementation nor a wrapper); required reason, stale like a delegate.
 
 [[concept]]
 name = "cancel token"
@@ -57,4 +59,11 @@ adr = "0003"
 # The scheduler owns debouncing (ADR 0003); other code asks it for a debounced job.
 owner = ["crates/lector-app/src/scheduler/**"]
 struct = ["Debounce*"]
-fn = ["*debounce_loop*", "run_debounce*", "debounce_timer*"]
+# `coalesce_*`: gathering events until a quiet period is a debounce by another name, so renaming
+# one does not hide it from this rule (ADR 0012, item 6).
+fn = ["*debounce_loop*", "run_debounce*", "debounce_timer*", "coalesce_*"]
+# Reviewed exceptions: functions with one of the names above that are not a second debounce. An
+# exception whose function is gone fails as stale.
+exception = [
+  { file = "crates/lector-fs/src/watch.rs", fn = "coalesce_events", why = "ADR 0012 item 6: lector_fs::watch batches the backend's raw events inside its own owner thread (one per watcher) before anything is scheduled; lector-fs is below lector-app and cannot use the scheduler, and no job exists yet to debounce" },
+]

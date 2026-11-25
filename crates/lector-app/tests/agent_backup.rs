@@ -10,6 +10,7 @@ use std::sync::{Arc, Once};
 use std::time::SystemTime;
 
 use lector_app::commands::agent_backup::{AgentBackups, MAX_FOLDER_BACKUP};
+use lector_app::commands::journal_undo::{invoke_undo, invoke_undo_last};
 use lector_app::commands::{CommandContext, Source};
 use lector_app::journal::{
     ActivityEntry, Journal, MemoryStore, UndoError, UndoMode, UndoRecord, UndoStatus,
@@ -177,10 +178,10 @@ fn folder_backups_are_lazy_path_scoped_and_undone_through_the_journal() {
         other => panic!("{other:?}"),
     }
     assert_eq!(journal.undo_status(&e), UndoStatus::Available);
-    let undo = journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+    let undo = invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
     assert!(!fx.root.join("new").exists());
-    journal.undo(undo.id, &fx.cx(), UndoMode::Check).unwrap();
+    invoke_undo(&fx.cx(), undo.id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "three\n");
     assert_eq!(fx.read("new/x.txt").unwrap(), "x\n");
     assert!(!fx.root.join(".git").exists());
@@ -194,17 +195,22 @@ fn a_fresh_journal_finds_a_folders_backups_and_reports_them_gone() {
     fx.turn(&backups, &journal, &[("a.txt", "agent\n")]);
     let record = journal.list(1)[0].undo.clone();
 
-    // Another process (the CLI after a restart): a new journal over the same data directory.
+    // Another process (the CLI after a restart): a new core with a new journal over the same
+    // data directory.
+    let core = AppCore::open(CoreOptions::for_tests());
     let other = Journal::new(Arc::new(MemoryStore::default()), fx.data.clone());
+    core.set_extension(Arc::new(other.clone()));
+    core.set_activity_sink(Arc::new(other.clone()));
+    let cx = CommandContext::new(core, Some(fx.project.clone()), Source::Ui);
     let id = other
         .append(entry(&fx.root, vec![fx.root.join("a.txt")], record.clone()))
         .unwrap();
     fs::write(fx.root.join("a.txt"), "user\n").unwrap();
     assert!(matches!(
-        other.undo(id, &fx.cx(), UndoMode::Check),
+        invoke_undo(&cx, id, UndoMode::Check),
         Err(UndoError::Changed { .. })
     ));
-    other.undo(id, &fx.cx(), UndoMode::Force).unwrap();
+    invoke_undo(&cx, id, UndoMode::Force).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
 
     // The shadow was removed (pruned as an orphan): the entry says the backup is gone.
@@ -215,7 +221,7 @@ fn a_fresh_journal_finds_a_folders_backups_and_reports_them_gone() {
     let e = other.get(id).unwrap();
     assert!(matches!(other.undo_status(&e), UndoStatus::Unavailable(_)));
     assert!(matches!(
-        other.undo(id, &fx.cx(), UndoMode::Force),
+        invoke_undo(&cx, id, UndoMode::Force),
         Err(UndoError::BackupGone(_))
     ));
     assert!(
@@ -241,7 +247,7 @@ fn undo_last_in_a_folder_stays_in_that_folder() {
             }),
         ))
         .unwrap();
-    journal.undo_last(&fx.cx(), UndoMode::Check).unwrap();
+    invoke_undo_last(&fx.cx(), UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
 }
 
@@ -290,7 +296,7 @@ fn in_a_repository_ignored_files_join_the_turn_and_tracked_ones_need_no_backup()
     let id = journal
         .append(entry(backups.workdir(), Vec::new(), backup.undo))
         .unwrap();
-    journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+    invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
     assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
 }

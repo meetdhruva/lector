@@ -2,11 +2,11 @@
 //! (`workspace::UndoLastOperation`): every write Lector made to your files or repository,
 //! newest first, with an Undo button per entry, plus the Undo toast shown after a discard.
 //!
-//! Entries come from the activity journal (`lector_app::journal`); undoing restores what
-//! the operation overwrote from the shadow repository (Lector's own backup, never your
-//! `.git`) or runs the inverse command, and records the undo as a new entry (so it can be
-//! undone again). When files changed since, Undo refuses and asks whether to restore
-//! anyway.
+//! Entries come from the activity journal (`lector_app::journal`); undoing invokes the registry
+//! command `journal.undo` (or `journal.undo_last`, ADR 0012), which restores what the operation
+//! overwrote from the shadow repository (Lector's own backup, never your `.git`) or runs the
+//! inverse command, and records the undo as a new entry (so it can be undone again). When files
+//! changed since, Undo refuses and asks whether to restore anyway (`mode: "force"`).
 
 use lector_ui::background::{background, background_described, view_key, JobKind, Priority};
 use std::collections::HashSet;
@@ -18,6 +18,7 @@ use gpui::{
     div, prelude::*, AnyView, App, Context, Entity, FocusHandle, Focusable, FontWeight,
     SharedString, Task, Window,
 };
+use lector_app::commands::journal_undo::{invoke_undo, invoke_undo_last};
 use lector_app::commands::{CommandContext, Source};
 use lector_app::journal::{
     ActivityEntry, Journal, JournalEvent, Subscription as JournalSubscription, UndoError, UndoMode,
@@ -112,8 +113,17 @@ pub fn offer_undo(
     );
 }
 
-/// Undoes journal entry `id` in the background, then refreshes the git views and toasts
-/// the result. Files changed since → a confirmation offers "Restore anyway".
+/// What an undo acts on.
+#[derive(Clone, Copy)]
+enum UndoTarget {
+    /// One journal entry (`journal.undo`).
+    Entry(u64),
+    /// The newest undoable entry of this repository or folder (`journal.undo_last`).
+    Last,
+}
+
+/// Undoes journal entry `id` in the background (the `journal.undo` command), then refreshes the
+/// git views and toasts the result. Files changed since → a confirmation offers "Restore anyway".
 pub fn undo_entry(
     store: &Entity<GitStore>,
     id: u64,
@@ -121,14 +131,27 @@ pub fn undo_entry(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let journal = journal(cx);
+    run_undo(store, UndoTarget::Entry(id), mode, window, cx)
+}
+
+fn run_undo(
+    store: &Entity<GitStore>,
+    target: UndoTarget,
+    mode: UndoMode,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let ctx = context_for(store, cx);
     // A write the user asked for: never replaced, survives the window closing (dropping its
-    // task detaches it); serial with the repository's other git writes.
+    // task detaches it), drained at quit; serial with the repository's other git writes.
     let key = crate::staging::git_write_key(store, cx);
-    let what = format!("undo of activity entry {id}");
-    let work = background_described(cx, key, Priority::Visible, what, move |_| {
-        journal.undo(id, &ctx, mode)
+    let what = match target {
+        UndoTarget::Entry(id) => format!("undo of activity entry {id}"),
+        UndoTarget::Last => "undo of the last operation".to_owned(),
+    };
+    let work = background_described(cx, key, Priority::Visible, what, move |_| match target {
+        UndoTarget::Entry(id) => invoke_undo(&ctx, id, mode),
+        UndoTarget::Last => invoke_undo_last(&ctx, mode),
     });
     let store = store.clone();
     window
@@ -159,7 +182,7 @@ pub fn undo_entry(
                             _ => toast(&store, message, cx),
                         }
                     }
-                    Err(UndoError::Changed { paths, .. }) => {
+                    Err(UndoError::Changed { id, paths }) => {
                         ask_restore_anyway(&store, id, paths, window, cx)
                     }
                     Err(err) => toast(&store, err.to_string(), cx),
@@ -206,12 +229,12 @@ fn activity_dir(store: &Entity<GitStore>, cx: &App) -> Option<PathBuf> {
     }
 }
 
-/// `workspace::UndoLastOperation`: undoes the newest undoable operation in this repository (or
-/// folder).
+/// `workspace::UndoLastOperation` (the UI flow of `journal.undo_last`): undoes the newest undoable
+/// operation in this repository (or folder).
 pub fn undo_last(store: &Entity<GitStore>, window: &mut Window, cx: &mut App) {
     let repo = activity_dir(store, cx);
     match journal(cx).last_undoable(repo.as_deref()) {
-        Some(entry) => undo_entry(store, entry.id, UndoMode::Check, window, cx),
+        Some(_) => run_undo(store, UndoTarget::Last, UndoMode::Check, window, cx),
         None => toast(store, "Nothing to undo", cx),
     }
 }

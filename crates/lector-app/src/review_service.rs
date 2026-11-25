@@ -6,16 +6,15 @@
 //! * loading changesets and file diffs, with the app's content cache ([`ContentCache`]) as
 //!   the [`DerivedCache`] of the analysis,
 //! * the "viewed" marks: read when a changeset is loaded, written by [`ReviewService::set_viewed`]
-//!   (stored in [`crate::store`], concern `review_state`),
-//! * [`apply`]: applying a hunk patch to the index or working tree (called by the
-//!   `git.*_hunk` commands only).
+//!   (stored in [`crate::store`], concern `review_state`).
+//!
+//! Applying a hunk patch to the index or working tree is not here: it is private to the
+//! `git.*_hunk` commands (`commands/git_write/hunk_apply.rs`, ADR 0012).
 //!
 //! All methods are blocking and meant to be called from background work. Each takes a
 //! [`CancelToken`]; a cancelled call returns [`lector_review::Error::Cancelled`] (or `None`)
 //! without finishing the work, checked before it starts and, for changesets, between files.
 //! Results are the plain `lector-review` types, identical to what the loaders return.
-
-pub mod apply;
 
 use std::path::Path;
 

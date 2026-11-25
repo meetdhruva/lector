@@ -47,3 +47,23 @@ reaches zero stops being read.
 `arch-check writes` and `dupes` at 0; the registry enumeration tests (`undo_roundtrip`,
 `read_only`, `command_sources`) cover the two new commands; a test that MCP without
 `--allow-writes` cannot undo; `lector undo` journey tests unchanged.
+
+## Clarifications at implementation
+Recorded by the architect when reviewing the implementation, before merge.
+
+- **The undo commands record themselves.** The journal's undo engine writes the entry that
+  carries the redo, so `CommandSpec::records_itself` tells `invoke` not to add a second entry.
+  Only `journal.undo` and `journal.undo_last` set it. Their declaration is `Undoable`.
+- **Sandboxed sources undo only their own project.** For MCP (and any sandboxed source) the
+  entry's repository must be the context's, every path in the entry and its record must pass
+  the write confinement, `undo_last` skips entries that fail, and `scope: "all"` is refused.
+- **Force** skips only the changed-files check; a missing backup is never overridden.
+- **Scheduling is unchanged:** UI undos run on the repository's serial git-write lane, agent
+  turn undos as `AgentUndo`; both drain at quit.
+- **`arch/one-impl.toml` has an `exception` entry kind** (file, function, reason; stale entries
+  fail) beside `delegate`, and the debounce concept also matches `coalesce_*`, so renaming a
+  debounce cannot hide it. The watcher's `coalesce_events` is the one exception.
+- **New `settings.toml` / `keymap.toml` are created `0600`** (they go through
+  `lector_base::private` like the rest of Lector's own files).
+- `writes` and `dupes` are 0 in the baseline. What remains in the baseline is `hygiene` (6: the
+  `lector-perf` gate binaries).

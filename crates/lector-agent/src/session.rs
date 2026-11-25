@@ -44,6 +44,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use lector_app::commands::agent_backup::{AgentBackups, TurnBackup, TurnLedger};
+use lector_app::commands::journal_undo::invoke_undo;
 use lector_app::commands::Source;
 use lector_app::documents::{DocumentStore, SaveRequest};
 use lector_app::journal::{ActivityEntry, Journal, UndoError, UndoMode, UndoRecord};
@@ -320,10 +321,15 @@ impl AgentSession {
         &self.shared.options
     }
 
-    /// The shadow repository holding the turn checkpoints and backups (in a folder without git
-    /// `None` until the first write backed something up there).
-    pub fn shadow_repo(&self) -> Option<ShadowRepo> {
-        self.shared.shadow()
+    /// The bytes of `path` (relative to the turn's work tree) in the turn checkpoint or backup
+    /// `snapshot` (`None`: no shadow repository yet, or the file is not in it). A read: the
+    /// shadow repository itself is not handed out (ADR 0012, item 4).
+    pub(crate) fn snapshot_file(
+        &self,
+        snapshot: &lector_git::ShadowSnapshot,
+        path: &str,
+    ) -> Option<Vec<u8>> {
+        self.shared.shadow()?.file_at(snapshot, path).ok().flatten()
     }
 
     /// The agent's own name (from `initialize`), else the configured name.
@@ -511,10 +517,11 @@ impl AgentSession {
         self.turn(id)?.changeset()
     }
 
-    /// Restores the working tree files the turn changed to their state before the turn,
-    /// through the activity journal (so the undo is itself undoable). Files edited since
-    /// the turn make it fail with [`AgentError::UndoConflict`] unless `force`.
-    /// Returns the journal entry of the undo.
+    /// Restores the working tree files the turn changed to their state before the turn by
+    /// invoking the `journal.undo` command on the turn's journal entry with `source` (so the undo
+    /// is itself undoable, and sources and confinement are the registry's, ADR 0012). Files
+    /// edited since the turn make it fail with [`AgentError::UndoConflict`] unless `force`.
+    /// Returns the journal entry of the undo. This is the implementation of `agent.undo_turn`.
     pub fn undo_turn(&self, id: TurnId, force: bool, source: Source) -> Result<u64, AgentError> {
         let turn = self.turn(id).ok_or(AgentError::NoTurn(id))?;
         if !turn.state.is_finished() {
@@ -532,8 +539,6 @@ impl AgentSession {
                 "the turn changed no files".into()
             })
         })?;
-        let journal = Journal::of(&self.shared.core)
-            .ok_or_else(|| AgentError::Other("no activity journal".into()))?;
         let cx = CommandContext::new(
             self.shared.core.clone(),
             Some(self.shared.project.clone()),
@@ -544,7 +549,7 @@ impl AgentSession {
         } else {
             UndoMode::Check
         };
-        let result = journal.undo(entry, &cx, mode);
+        let result = invoke_undo(&cx, entry, mode);
         self.shared.emit(AgentEvent::TurnUpdated(id));
         match result {
             Ok(undo) => {

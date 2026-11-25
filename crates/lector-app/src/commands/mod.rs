@@ -13,7 +13,8 @@
 //! Read/navigation commands live in [`read`]; git writes in `git_write` (Agent SAFE), git
 //! network / branch / stash commands in [`git_sync`] (v0.7),
 //! document commands in `documents` (Agent DOCS), the pull request fetch into Lector's shadow
-//! repository in [`pull_request`]. [`agent_backup`] is not a command: it is the backup half of
+//! repository in [`pull_request`], undo (`journal.undo`, `journal.undo_last`) in
+//! [`journal_undo`]. [`agent_backup`] is not a command: it is the backup half of
 //! the agent write path (ADR 0010, ADR 0011), here because it takes backups through the
 //! `lector-git` write API like the commands do.
 
@@ -36,6 +37,7 @@ pub mod agent_backup;
 pub mod documents;
 pub mod git_sync;
 pub mod git_write;
+pub mod journal_undo;
 pub mod pull_request;
 pub mod read;
 pub mod schema;
@@ -47,6 +49,7 @@ pub fn register_builtin(registry: &CommandRegistry) {
     git_write::register(registry);
     git_sync::register(registry);
     pull_request::register(registry);
+    journal_undo::register(registry);
     crate::comments::register_commands(registry);
 }
 
@@ -92,6 +95,11 @@ pub struct CommandSpec {
     /// [`CommandSpec::steers_agent`] and [`CommandSpec::answers_for_user`]. It decides the
     /// minimum [`Sources`] ([`Touches::minimum_sources`]).
     pub touches: Touches,
+    /// The command writes its own journal entry, so [`CommandRegistry::invoke`] records none for
+    /// the invocation and leaves [`Outcome::journal_id`] as the command set it. Declared with
+    /// [`CommandSpec::records_itself`]; only the undo commands do (`journal.undo`,
+    /// `journal.undo_last`: the journal records an undo as the entry that carries its redo).
+    pub records_itself: bool,
 }
 
 /// What a command reaches besides the project's files and Lector's own state
@@ -190,6 +198,7 @@ impl CommandSpec {
             ui_flow: None,
             sources: Sources::All,
             touches: Touches::default(),
+            records_itself: false,
         }
     }
 
@@ -258,6 +267,12 @@ impl CommandSpec {
     /// [`CommandRegistry::list_for`] and the palette use.
     pub fn allowed_sources(&self) -> Sources {
         self.sources.stricter(self.touches.minimum_sources())
+    }
+
+    /// Declares that the command writes its own journal entry ([`CommandSpec::records_itself`]).
+    pub fn records_itself(mut self) -> Self {
+        self.records_itself = true;
+        self
     }
 
     /// Marks the command destructive.
@@ -717,7 +732,8 @@ impl CommandRegistry {
 
     /// Checks that the caller's [`Source`] may run it ([`CommandSpec::sources`]: the one
     /// place UI-only commands are enforced), validates `args`, checks availability, applies
-    /// the command and, for writes, records the outcome in the activity journal. Blocking.
+    /// the command and, for writes, records the outcome in the activity journal (unless the
+    /// command [records itself](CommandSpec::records_itself)). Blocking.
     pub fn invoke(
         &self,
         id: &str,
@@ -749,7 +765,7 @@ impl CommandRegistry {
             return Err(CommandError::Unavailable(why));
         }
         let mut outcome = command.apply(cx, &args)?;
-        if spec.writes {
+        if spec.writes && !spec.records_itself {
             if let Some(sink) = cx.core.activity_sink() {
                 let repo = cx
                     .project

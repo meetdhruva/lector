@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use lector_app::commands::journal_undo::invoke_undo;
 use lector_app::journal::{ActivityEntry, Journal, UndoError, UndoMode};
 use serde_json::{json, Value};
 
@@ -107,7 +108,7 @@ pub fn run_activity(args: &ActivityArgs, io: &mut Io) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs `lector undo`.
+/// Runs `lector undo`: invokes the `journal.undo` command (ADR 0012) with the CLI's source.
 pub fn run_undo(args: &UndoArgs, io: &mut Io) -> anyhow::Result<()> {
     let core = open_core();
     let journal =
@@ -126,7 +127,7 @@ pub fn run_undo(args: &UndoArgs, io: &mut Io) -> anyhow::Result<()> {
     } else {
         UndoMode::Check
     };
-    let undo_entry = journal.undo(args.id, &cx, mode).map_err(|e| match e {
+    let undo_entry = invoke_undo(&cx, args.id, mode).map_err(|e| match e {
         UndoError::Changed { .. } => {
             anyhow!("{e}; use --force to restore anyway (the current state is backed up first)")
         }

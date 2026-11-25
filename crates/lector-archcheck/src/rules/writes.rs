@@ -12,9 +12,10 @@
 //!
 //! **`lector-app` wrappers.** A plain `pub fn` of `crates/lector-app/src/**` outside `commands/`
 //! whose body calls the write API, directly or through a function of the same file (a private
-//! helper), is itself part of the write API (by name and argument count), so
-//! `lector_app::review_service::apply::apply_hunk_action` counts. A wrapper of a wrapper in
-//! another file is not followed.
+//! helper), is itself part of the write API (by name and argument count), so a public
+//! `apply_hunk_action` there would count (ADR 0012 made the hunk apply private to its commands
+//! and the journal's `undo` crate-private). A wrapper of a wrapper in another file is not
+//! followed.
 //!
 //! **Callers.** In the non-test code of every crate except `lector-git` itself, a call of the
 //! write API (method `.name(`, `Type::name(`, `lector_git::name(`, through `use .. as ..` and
@@ -36,10 +37,12 @@
 //! `lector-agent`'s writes are listed there with the ADR 0010 "known gaps" reason, so they stay
 //! visible and counted (the rule prints how many sites the allowances cover).
 //!
-//! **Handing out a handle** (report-only, counted in the baseline): a plain `pub fn` outside
-//! `lector-git` whose return type names `Repo` or `ShadowRepo` (`&Repo`, `Arc<Repo>`,
-//! `Result<Repo>`, ...) gives every caller the whole write API; narrowing it to read-only views
-//! is a product change.
+//! **Handing out a handle** (ADR 0012, item 5): a plain `pub fn` outside `lector-git` whose return
+//! type names `Repo` or `ShadowRepo` (`&Repo`, `Arc<Repo>`, `Result<Repo>`, ...) gives every
+//! caller the whole write API. It is a violation unless `arch/git-handles.allow` lists it as
+//! `<file>::<fn>` with a reason (the reviewed accessors whose handle stays read-write on the
+//! record; the `writes` rule still checks every call made through them). An entry whose accessor
+//! is gone is stale and fails.
 //!
 //! What it cannot see: a write reached through a trait object, a generic bound or a closure
 //! stored in a variable; a call inside a macro body that only expands to the call; generated code
@@ -485,6 +488,7 @@ pub fn scan_file_full(
     ambiguous: &AllowList,
     callers: &AllowList,
     fs_writers: &AllowList,
+    handles: &AllowList,
     globals: &Globals,
 ) -> FileScan {
     let mut scan = FileScan {
@@ -540,7 +544,8 @@ pub fn scan_file_full(
         }
         scan.violations.extend(writes);
     }
-    scan.violations.extend(handle_accessors(f, api, &r));
+    scan.violations
+        .extend(handle_accessors(f, api, &r, handles));
     scan
 }
 
@@ -551,6 +556,7 @@ pub fn scan_file(f: &SourceFile, api: &WriteApi, ambiguous: &AllowList) -> Vec<V
         f,
         api,
         ambiguous,
+        &AllowList::default(),
         &AllowList::default(),
         &AllowList::default(),
         &Globals::default(),
@@ -585,19 +591,28 @@ fn command_violation(f: &SourceFile, i: usize, guess: bool) -> Violation {
     )
 }
 
-/// Report-only findings: plain `pub fn`s outside `lector-git` whose return type names a handle.
-fn handle_accessors(f: &SourceFile, api: &WriteApi, r: &Resolver<'_>) -> Vec<Violation> {
+/// Plain `pub fn`s outside `lector-git` whose return type names a handle, unless
+/// `arch/git-handles.allow` lists them as `<file>::<fn>` (the lookup marks the entry used).
+fn handle_accessors(
+    f: &SourceFile,
+    api: &WriteApi,
+    r: &Resolver<'_>,
+    handles: &AllowList,
+) -> Vec<Violation> {
     let mut out = Vec::new();
     for it in fn_items(f) {
         if !it.is_pub || f.is_test(it.name_idx) {
             continue;
         }
         if let Some(h) = returned_handle(f, &it, api, r) {
+            if handles.contains(&format!("{}::{}", f.path, it.name)) {
+                continue;
+            }
             out.push(Violation::new(
                 RULE,
                 &f.path,
                 f.line(it.name_idx),
-                format!("[report-only] `pub fn {}` hands out a `{h}`: every caller gets the whole lector-git write API; return a read-only view instead (ADR 0010, product change)", it.name),
+                format!("`pub fn {}` hands out a `{h}`: every caller gets the whole lector-git write API; return a read-only view, or list `{}::{}` in arch/git-handles.allow with a reason (ADR 0012)", it.name, f.path, it.name),
             ));
         }
     }
@@ -631,6 +646,7 @@ pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
     let ambiguous = cfg.allow("git-ambiguous");
     let callers = cfg.allow("git-callers");
     let fs_writers = cfg.allow("fs-writers");
+    let handles = cfg.allow("git-handles");
     let globals = Globals::build(files);
     let surface = derive_surface(files, &classes);
     let mut api = surface.api;
@@ -657,7 +673,15 @@ pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
         .collect();
     let (mut allowed, mut allowed_agent) = (0, 0);
     for f in files {
-        let s = scan_file_full(f, &api, &ambiguous, &callers, &fs_writers, &globals);
+        let s = scan_file_full(
+            f,
+            &api,
+            &ambiguous,
+            &callers,
+            &fs_writers,
+            &handles,
+            &globals,
+        );
         allowed += s.fs_allowed;
         allowed_agent += s.fs_allowed_agent;
         found.extend(s.violations);
@@ -667,6 +691,7 @@ pub fn check(files: &[SourceFile], cfg: &Config) -> RuleOutput {
         ("git-ambiguous", &ambiguous),
         ("git-callers", &callers),
         ("fs-writers", &fs_writers),
+        ("git-handles", &handles),
     ] {
         let _ = name;
         found.extend(list.stale_violations(RULE, &|_| false));
@@ -955,6 +980,7 @@ mod tests {
                 &amb,
                 &callers,
                 &AllowList::default(),
+                &AllowList::default(),
                 &Globals::default(),
             )
             .violations
@@ -980,13 +1006,86 @@ mod tests {
         }
     }
 
+    const ACCESSORS: &str = "impl Project {\n    pub fn repo(&self) -> &Repo { &self.r }\n    pub fn shared(&self) -> Arc<Repo> { x }\n    pub fn open(&self) -> Result<ShadowRepo, E> { x }\n    pub fn name(&self) -> &str { n }\n    pub(crate) fn hidden(&self) -> &Repo { r }\n    fn private(&self) -> &Repo { r }\n}\ntype Rp = lector_git::Repo;\npub fn via_alias() -> Option<&'static Rp> { None }";
+
+    /// ADR 0012, item 5: an accessor that hands out a handle is a violation (no longer
+    /// report-only) unless `arch/git-handles.allow` lists it.
     #[test]
-    fn handing_out_a_handle_is_a_report_only_finding() {
-        let src = "impl Project {\n    pub fn repo(&self) -> &Repo { &self.r }\n    pub fn shared(&self) -> Arc<Repo> { x }\n    pub fn open(&self) -> Result<ShadowRepo, E> { x }\n    pub fn name(&self) -> &str { n }\n    pub(crate) fn hidden(&self) -> &Repo { r }\n    fn private(&self) -> &Repo { r }\n}\ntype Rp = lector_git::Repo;\npub fn via_alias() -> Option<&'static Rp> { None }";
-        let v = run("crates/lector-app/src/project.rs", src);
+    fn an_unlisted_handle_accessor_is_a_violation() {
+        let v = run("crates/lector-app/src/project.rs", ACCESSORS);
         assert_eq!(lines(&v), [2, 3, 4, 10], "{v:?}");
-        assert!(v.iter().all(|v| v.message.starts_with("[report-only]")));
-        assert!(run("crates/lector-git/src/repo.rs", src).is_empty());
+        assert!(v.iter().all(|v| !v.message.contains("report-only")));
+        assert!(v
+            .iter()
+            .all(|v| v.message.contains("arch/git-handles.allow")));
+        assert!(run("crates/lector-git/src/repo.rs", ACCESSORS).is_empty());
+    }
+
+    fn handles_check(entries: &[&str]) -> RuleOutput {
+        let mut files = git_files();
+        files.push(file("crates/lector-app/src/project.rs", ACCESSORS));
+        let mut cfg = Config::default();
+        cfg.set_allow("git-read", read_list());
+        cfg.set_allow(
+            "git-handles",
+            AllowList::from_entries(entries.iter().copied()),
+        );
+        check(&files, &cfg)
+    }
+
+    fn accessor_lines(out: &RuleOutput) -> Vec<u32> {
+        out.violations
+            .iter()
+            .filter(|v| v.message.contains("hands out"))
+            .map(|v| v.line)
+            .collect()
+    }
+
+    #[test]
+    fn a_listed_handle_accessor_is_allowed_by_file_and_function() {
+        let out = handles_check(&[
+            "crates/lector-app/src/project.rs::repo",
+            "crates/lector-app/src/project.rs::open",
+        ]);
+        assert_eq!(accessor_lines(&out), [3, 10], "{:?}", out.violations);
+        assert!(
+            !out.violations
+                .iter()
+                .any(|v| v.message.starts_with("stale allowance")),
+            "{:?}",
+            out.violations
+        );
+        // The same function name in another file is not covered by the entry.
+        let mut files = git_files();
+        files.push(file("crates/lector-app/src/other.rs", ACCESSORS));
+        let mut cfg = Config::default();
+        cfg.set_allow("git-read", read_list());
+        cfg.set_allow(
+            "git-handles",
+            AllowList::from_entries(["crates/lector-app/src/project.rs::repo"]),
+        );
+        let out = check(&files, &cfg);
+        assert_eq!(accessor_lines(&out), [2, 3, 4, 10], "{:?}", out.violations);
+    }
+
+    #[test]
+    fn a_stale_handle_allowance_fails() {
+        let out = handles_check(&[
+            "crates/lector-app/src/project.rs::repo",
+            "crates/lector-app/src/project.rs::gone",
+            "crates/lector-app/src/project.rs::name",
+        ]);
+        let stale: Vec<&str> = out
+            .violations
+            .iter()
+            .filter(|v| v.message.starts_with("stale allowance"))
+            .map(|v| v.message.as_str())
+            .collect();
+        assert_eq!(stale.len(), 2, "{stale:?}");
+        assert!(stale.iter().any(|m| m.contains("project.rs::gone`")));
+        // `name` returns no handle, so its entry exempts nothing.
+        assert!(stale.iter().any(|m| m.contains("project.rs::name`")));
+        assert_eq!(accessor_lines(&out), [3, 4, 10]);
     }
 
     fn fs_run(path: &str, src: &str, allow: &[&str]) -> (Vec<Violation>, usize) {
@@ -996,6 +1095,7 @@ mod tests {
             &AllowList::default(),
             &AllowList::default(),
             &AllowList::from_entries(allow.iter().copied()),
+            &AllowList::default(),
             &Globals::default(),
         );
         (s.violations, s.fs_allowed)

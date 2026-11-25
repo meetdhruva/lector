@@ -9,6 +9,7 @@ use std::fs;
 
 use common::Fx;
 use lector_agent::*;
+use lector_app::commands::journal_undo::{invoke_undo, invoke_undo_last};
 use lector_app::commands::Source;
 use lector_app::journal::UndoMode;
 use lector_app::CommandContext;
@@ -64,7 +65,7 @@ fn a_folder_turn_is_backed_up_lazily_and_undone_and_redone_as_one_entry() {
     assert!(s.turn(t.id).unwrap().undone);
 
     let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
-    fx.journal().undo(undo_id, &cx, UndoMode::Check).unwrap();
+    invoke_undo(&cx, undo_id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "again\n");
     assert_eq!(fx.read("new/dir/x.txt").unwrap(), "created\n");
     assert!(!s.turn(t.id).unwrap().undone);
@@ -89,7 +90,7 @@ fn a_folder_undo_refuses_files_edited_since_and_force_backs_them_up() {
     assert!(fx.read("b.txt").is_none());
     // "Restore anyway" backed up what it overwrote: undoing the undo brings the edit back.
     let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
-    fx.journal().undo(undo_id, &cx, UndoMode::Check).unwrap();
+    invoke_undo(&cx, undo_id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "user edit\n");
     assert_eq!(fx.read("b.txt").unwrap(), "new\n");
     s.stop();
@@ -109,7 +110,7 @@ fn a_folder_turn_is_undone_by_the_command_and_by_undo_last() {
     assert_eq!(fx.read("a.txt").unwrap(), "one\ntwo\nthree\n");
 
     fx.run(&s, "write src/lib.rs second\\n");
-    let undone = fx.journal().undo_last(&cx, UndoMode::Check).unwrap();
+    let undone = invoke_undo_last(&cx, UndoMode::Check).unwrap();
     assert_eq!(fx.read("src/lib.rs").unwrap(), "pub fn f() {}\n");
     let entry = fx.journal().get(undone.undo_of.unwrap()).unwrap();
     assert_eq!(entry.command, "agent.turn", "undo last picks the turn");

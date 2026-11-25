@@ -204,16 +204,13 @@ fn changed_after_lines(
     turn: &Turn,
     path: &str,
 ) -> Option<(Vec<u32>, String)> {
-    let shadow = session.shadow_repo()?;
     let before = turn.before.as_ref()?;
     let after = turn.after.as_ref()?;
-    let old = shadow
-        .file_at(before, path)
-        .ok()
-        .flatten()
+    let old = session
+        .snapshot_file(before, path)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    let new = String::from_utf8_lossy(&shadow.file_at(after, path).ok()??).into_owned();
+    let new = String::from_utf8_lossy(&session.snapshot_file(after, path)?).into_owned();
     let diff = diff_lines(&old, &new, &DiffOptions::default());
     let lines = diff
         .hunks

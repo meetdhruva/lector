@@ -795,3 +795,108 @@ fn links_into_git_are_refused_for_resources_and_tools() {
     );
     assert!(!fx.repo.join(".git/hooks/pre-commit").exists());
 }
+
+/// Stages `src/lib.rs` from Lector's window (not through MCP) and returns the journal entry id.
+fn staged_from_the_window(fx: &Fixture) -> u64 {
+    let cx = lector_app::CommandContext::new(
+        fx.core.clone(),
+        Some(fx.project.clone()),
+        lector_app::commands::Source::Ui,
+    );
+    fx.core
+        .registry()
+        .invoke("git.stage", json!({ "paths": ["src/lib.rs"] }), &cx)
+        .expect("stage")
+        .journal_id
+        .expect("journaled")
+}
+
+/// ADR 0012: undo is a write tool like the others. Without `--allow-writes` it is neither listed
+/// nor callable, and calling it changes nothing.
+#[test]
+fn journal_undo_without_allow_writes_is_refused_and_changes_nothing() {
+    let fx = fixture();
+    let id = staged_from_the_window(&fx);
+    let server = fx.server(false);
+    let mut msgs = handshake();
+    msgs.extend([
+        req(2, "tools/list", json!({})),
+        call(3, "journal_undo", json!({ "entry": id })),
+        call(4, "journal_undo_last", json!({})),
+    ]);
+    let out = converse(&server, &msgs);
+    let names = tool_names(response(&out, 2));
+    assert!(
+        !names.iter().any(|n| n.starts_with("journal_")),
+        "{names:?}"
+    );
+    for call_id in [3, 4] {
+        let result = &response(&out, call_id)["result"];
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("--allow-writes"), "{text}");
+    }
+    assert_eq!(
+        git(&fx.repo, &["diff", "--cached", "--name-only"]).trim(),
+        "src/lib.rs",
+        "still staged"
+    );
+    let journal = Journal::of(&fx.core).expect("journal");
+    assert_eq!(journal.list(10).len(), 1, "nothing was journaled");
+    assert!(!journal.get(id).expect("entry").undone);
+}
+
+/// With `--allow-writes` an MCP client undoes an entry of its project (journaled with origin
+/// `mcp`), but not an entry of another project.
+#[test]
+fn journal_undo_with_allow_writes_stays_in_the_project() {
+    let fx = fixture();
+    let id = staged_from_the_window(&fx);
+    // A second repository with its own staged change, journaled by the same core.
+    let other = fx.repo.parent().expect("parent").join("other");
+    std::fs::create_dir_all(&other).expect("mkdir");
+    git(&other, &["init", "-q", "-b", "main"]);
+    std::fs::write(other.join("x.txt"), "x\n").expect("write");
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "init"]);
+    std::fs::write(other.join("x.txt"), "y\n").expect("write");
+    let mut settings = lector_config::Settings::default();
+    settings.lsp.enabled = false;
+    let other_cx = lector_app::CommandContext::new(
+        fx.core.clone(),
+        Some(Project::open(&other, settings).expect("project")),
+        lector_app::commands::Source::Ui,
+    );
+    let foreign = fx
+        .core
+        .registry()
+        .invoke("git.stage", json!({ "paths": ["x.txt"] }), &other_cx)
+        .expect("stage")
+        .journal_id
+        .expect("journaled");
+
+    let mut msgs = handshake();
+    msgs.extend([
+        call(2, "journal_undo", json!({ "entry": foreign })),
+        call(3, "journal_undo", json!({ "entry": id })),
+    ]);
+    let out = converse(&fx.server(true), &msgs);
+    let refused = &response(&out, 2)["result"];
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        git(&other, &["diff", "--cached", "--name-only"]).trim(),
+        "x.txt",
+        "the other project's entry is not undone"
+    );
+    let undone = &response(&out, 3)["result"];
+    assert_eq!(undone["isError"], false, "{undone}");
+    assert_eq!(git(&fx.repo, &["diff", "--cached", "--name-only"]), "");
+    let journal = Journal::of(&fx.core).expect("journal");
+    let newest = &journal.list(1)[0];
+    assert_eq!(newest.undo_of, Some(id));
+    assert_eq!(
+        serde_json::to_value(newest.source).expect("source"),
+        json!("mcp")
+    );
+    assert_eq!(undone["_meta"]["lector"]["journalId"], json!(newest.id));
+}

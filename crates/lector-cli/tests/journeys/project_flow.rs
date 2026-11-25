@@ -1,6 +1,7 @@
 //! Journey: open a project, look at its status, see the changes, read a diff, stage one hunk,
 //! commit it, find both in the activity log, undo what can be undone.
 
+use lector_app::commands::journal_undo::{invoke_undo, invoke_undo_last};
 use lector_app::commands::UiRequest;
 use lector_app::journal::{UndoError, UndoMode};
 use serde_json::json;
@@ -144,15 +145,13 @@ fn open_status_changes_diff_stage_hunk_commit_activity_undo() {
 
     // --- undo: the commit refuses with a typed error; a new stage undoes cleanly
     assert!(matches!(
-        s.journal.undo(commit_id, &s.cx, UndoMode::Check),
+        invoke_undo(&s.cx, commit_id, UndoMode::Check),
         Err(UndoError::NotUndoable(_))
     ));
     let second = s.ok("git.stage_hunk", json!({"path": "src/lib.rs", "hunk": 0}));
     assert_eq!(counts(&s.status()).0, 1, "the remaining hunk is staged");
     let second_id = second.journal_id.expect("journaled");
-    let undone = s
-        .journal
-        .undo_last(&s.cx, UndoMode::Check)
+    let undone = invoke_undo_last(&s.cx, UndoMode::Check)
         .expect("the newest undoable entry is the second stage");
     assert_eq!(undone.undo_of, Some(second_id));
     assert_eq!(

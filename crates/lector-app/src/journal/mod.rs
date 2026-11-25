@@ -8,11 +8,12 @@
 //!   every `writes` command automatically.
 //! * Entries live in the database's journal table ([`DbStore`]) and survive restarts;
 //!   the table is bounded ([`Journal::MAX_ENTRIES`] by default).
-//! * [`Journal::undo`] executes the record: restores files or index entries from the
-//!   shadow, or invokes the inverse command. It refuses with [`UndoError::Changed`]
-//!   when the files changed since (the UI offers "Restore anyway" =
-//!   [`UndoMode::Force`]), and records the undo itself as a new, again undoable entry
-//!   (redo). The files are backed up again before an undo overwrites them.
+//! * The registry commands `journal.undo` / `journal.undo_last`
+//!   ([`crate::commands::journal_undo`], ADR 0012) execute the record through the journal's
+//!   crate-private undo engine: restore files or index entries from the shadow, or invoke the
+//!   inverse command. It refuses with [`UndoError::Changed`] when the files changed since (the
+//!   UI offers "Restore anyway" = [`UndoMode::Force`]), and records the undo itself as a new,
+//!   again undoable entry (redo). The files are backed up again before an undo overwrites them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -437,6 +438,16 @@ impl Journal {
     /// The newest entry "Undo last operation" would undo: undoable, not undone, not
     /// itself an undo; restricted to `repo` when given.
     pub fn last_undoable(&self, repo: Option<&Path>) -> Option<ActivityEntry> {
+        self.last_undoable_where(repo, |_| true)
+    }
+
+    /// [`Journal::last_undoable`] among the entries `keep` accepts (`journal.undo_last` skips the
+    /// entries a sandboxed caller may not undo instead of picking one up).
+    pub(crate) fn last_undoable_where(
+        &self,
+        repo: Option<&Path>,
+        keep: impl Fn(&ActivityEntry) -> bool,
+    ) -> Option<ActivityEntry> {
         let mut before = None;
         // Bounded walk: do not scan the whole journal for a repository with nothing to undo.
         for _ in 0..40 {
@@ -447,6 +458,7 @@ impl Journal {
                     && !e.undone
                     && !e.is_undo()
                     && repo.is_none_or(|r| e.repo.as_deref() == Some(r))
+                    && keep(e)
             });
             if hit.is_some() {
                 return hit;
