@@ -56,7 +56,7 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.7.2" date="2026-11-21">
+    <release version="0.7.2" date="2026-11-25">
       <url type="details">https://github.com/meetdhruva/lector/releases/tag/v0.7.2</url>
       <description><p>Security fixes: an agent can no longer write into .git through a symlink in the project, and GitHub or GitLab tokens are no longer sent to look-alike hosts.</p></description>
     </release>
