@@ -680,11 +680,33 @@ impl AgentPanel {
                     format!("turn {id} of an earlier agent session")
                 };
                 match result {
-                    Ok(_) => this.toast_level(
-                        format!("Undid {which}. Undo it again from the Activity Log."),
-                        ToastLevel::Success,
-                        cx,
-                    ),
+                    Ok(undo_id) => {
+                        // Files too large to back up are restored but cannot be redone (ADR 0011).
+                        let not_redoable: Vec<String> =
+                            lector_app::journal::Journal::of(session.core())
+                                .and_then(|j| j.get(undo_id))
+                                .and_then(|e| {
+                                    serde_json::from_value(e.args.get("not_redoable")?.clone())
+                                        .ok()
+                                })
+                                .unwrap_or_default();
+                        if not_redoable.is_empty() {
+                            this.toast_level(
+                                format!("Undid {which}. Undo it again from the Activity Log."),
+                                ToastLevel::Success,
+                                cx,
+                            )
+                        } else {
+                            this.toast_level(
+                                format!(
+                                    "Undid {which}. {} cannot be redone: too large for Lector to back up.",
+                                    not_redoable.join(", ")
+                                ),
+                                ToastLevel::Warning,
+                                cx,
+                            )
+                        }
+                    }
                     Err(AgentError::UndoConflict { paths }) if current => {
                         this.undo_conflict = Some(UndoConflict {
                             session: session.clone(),

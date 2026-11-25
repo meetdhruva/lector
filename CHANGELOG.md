@@ -93,8 +93,11 @@ Security:
   empty one. Agents can only write files: naming a folder (or a device) as the file to write is
   refused before anything is read. A file over 64 MiB is not backed up there, so a write to it, or
   of more than that, is refused with the reason, and one turn backs up at most 1 GiB (further
-  writes are refused until the next turn). The Activity log and Undo Last Operation work in such
-  folders too. In 0.7.1 such writes had no undo.
+  writes are refused until the next turn). A file that grew past 64 MiB through another program
+  during the turn is still part of the turn: Undo restores the state before it (removing it if
+  the turn created it) and says it cannot be redone; Undo never overwrites such a file if it
+  changed after the turn, because that change could not be backed up. The Activity log and Undo
+  Last Operation work in such folders too. In 0.7.1 such writes had no undo.
 - **Undoing an agent turn restores git-ignored files it overwrote** (such as `.env`), not only
   tracked and untracked ones; the turn's changes list them too.
 - **Backups of deleted or renamed folders are cleaned up** once they are 30 days old, like every

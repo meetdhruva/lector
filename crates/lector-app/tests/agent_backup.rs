@@ -453,3 +453,84 @@ fn each_turn_trims_its_shadow_before_its_first_backup() {
     );
     assert!(refs.len() >= old, "the turn's own snapshots are there");
 }
+
+/// A turn that creates a file another program then grows past the limit: the turn is undoable
+/// (the file is its only change), check mode removes the file when it is unchanged since the turn
+/// ended, and the undo says it cannot be redone (its content was never backed up); redo refuses.
+#[test]
+fn a_created_file_grown_past_the_limit_is_undone_but_cannot_be_redone() {
+    let fx = Fx::new(false);
+    let backups = AgentBackups::new(&fx.core, &fx.project);
+    let journal = Journal::of(&fx.core).unwrap();
+    let mut ledger = backups.begin_turn("Before agent turn 1");
+    backups
+        .before_write(Some(&mut ledger), "big.log", 3)
+        .unwrap();
+    fx.write("big.log", "hi\n");
+    sparse(&fx.root.join("big.log"), MAX_FOLDER_BACKUP + 1);
+    let backup = backups.finish_turn(&ledger, "Agent turn 1").unwrap();
+    let paths: Vec<&str> = backup.changes.iter().map(|c| c.path()).collect();
+    assert_eq!(paths, ["big.log"], "the turn's only change");
+    let id = journal
+        .append(entry(backups.workdir(), Vec::new(), backup.undo))
+        .unwrap();
+    let undo = invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
+    assert!(
+        !fx.root.join("big.log").exists(),
+        "the before-state: absent"
+    );
+    assert!(
+        undo.summary.contains("cannot be redone"),
+        "{}",
+        undo.summary
+    );
+    assert_eq!(undo.args["not_redoable"], json!(["big.log"]));
+    match invoke_undo(&fx.cx(), undo.id, UndoMode::Check) {
+        Err(UndoError::Failed(why)) => assert!(why.contains("not backed up"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Force never destroys content Lector could not back up: when the large file changed after the
+/// turn ended, check mode reports it and force refuses with the reason, leaving it in place.
+#[test]
+fn force_refuses_to_remove_a_large_file_changed_since_the_turn() {
+    let fx = Fx::new(false);
+    let backups = AgentBackups::new(&fx.core, &fx.project);
+    let journal = Journal::of(&fx.core).unwrap();
+    let mut ledger = backups.begin_turn("Before agent turn 1");
+    backups
+        .before_write(Some(&mut ledger), "big.log", 3)
+        .unwrap();
+    backups.before_write(Some(&mut ledger), "a.txt", 3).unwrap();
+    fx.write("big.log", "hi\n");
+    fx.write("a.txt", "two\n");
+    sparse(&fx.root.join("big.log"), MAX_FOLDER_BACKUP + 1);
+    let backup = backups.finish_turn(&ledger, "Agent turn 1").unwrap();
+    let id = journal
+        .append(entry(backups.workdir(), Vec::new(), backup.undo))
+        .unwrap();
+    // The other program keeps writing after the turn ended.
+    sparse(&fx.root.join("big.log"), MAX_FOLDER_BACKUP + 2);
+    assert!(matches!(
+        invoke_undo(&fx.cx(), id, UndoMode::Check),
+        Err(UndoError::Changed { .. })
+    ));
+    match invoke_undo(&fx.cx(), id, UndoMode::Force) {
+        Err(UndoError::Failed(why)) => {
+            assert!(why.contains("big.log") && why.contains("back"), "{why}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        fs::metadata(fx.root.join("big.log")).unwrap().len(),
+        MAX_FOLDER_BACKUP + 2,
+        "kept"
+    );
+    assert_eq!(
+        fx.read("a.txt").unwrap(),
+        "two\n",
+        "nothing restored: all or nothing"
+    );
+    assert!(!journal.get(id).unwrap().undone);
+}

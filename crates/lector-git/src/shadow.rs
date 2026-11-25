@@ -530,7 +530,35 @@ impl ShadowRepo {
     /// snapshots), sorted by path. Only paths covered by both snapshots are compared,
     /// so a narrower snapshot never reports the rest as deleted. Sides are
     /// [`Side::Blob`]s living in the shadow repository: load them with
-    /// [`ShadowRepo::file_at`] or [`ShadowRepo::load`].
+    /// [`ShadowRepo::file_at`] or [`ShadowRepo::load`]. A side the snapshot did not store
+    /// (skipped) is [`Side::Workdir`] (the file now) for `b` and [`Side::None`] for `a`.
+    ///
+    /// Each covered path is in one of three states per snapshot: *absent*, *stored* (a file or
+    /// link with its blob) or *skipped* (not stored: a file over the size limit, or not a regular
+    /// file; the manifest does not say which, so both behave alike here). For an agent turn in a
+    /// folder without git (ADR 0011), `a` is the before-state (first-touch backups, which are
+    /// never skipped: a write whose backup would be is refused) and `b` the state at turn end;
+    /// the turn's undo restores `a` for every reported path through the journal, which first
+    /// backs the present state up (folder shadow: [`ShadowRepo::snapshot_paths`]: files over
+    /// 64 MiB skipped, directories refused) and keeps that backup for redo:
+    ///
+    /// | before (`a`) | after (`b`) | reported | undo (check / force) | redo |
+    /// |---|---|---|---|---|
+    /// | absent | absent | nothing | – | – |
+    /// | absent | file | Added | deletes the file | restores the file |
+    /// | absent | large | Added | deletes it; check passes only when it is unchanged since turn end (hash, not stored); force refuses if it changed since (no backup possible); the undo says the file cannot be redone | refuses: not backed up |
+    /// | absent | not a file | Added | refuses: a directory is never backed up or removed | – |
+    /// | file | absent | Deleted | recreates the file | deletes it again |
+    /// | file | file | Modified (if different) | restores the bytes | restores the turn's bytes |
+    /// | file | large | Modified | restores the bytes; check / force as for absent → large | refuses: not backed up |
+    /// | file | not a file | Modified | refuses (the path is now a directory) | – |
+    /// | large or not a file | absent | Deleted | refuses: not backed up | – |
+    /// | large or not a file | file | Modified | refuses: not backed up | – |
+    /// | large or not a file | large or not a file | nothing (neither side stored) | – | – |
+    ///
+    /// An undo restores all of its paths or none (a refusal for one path writes nothing). Whole
+    /// work-tree snapshots treat an unrecorded path as absent; their skipped files (over
+    /// 256 MiB) follow the same rows.
     pub fn changes_between(
         &self,
         a: &ShadowSnapshot,
@@ -545,14 +573,28 @@ impl ShadowRepo {
         let (fa, fb) = (self.tree_files(a)?, self.tree_files(b)?);
         let covered_a = ma.covers_fn(&fa);
         let covered_b = mb.covers_fn(&fb);
+        // Every path either snapshot says something about: stored, absent or skipped.
         let mut paths: BTreeSet<&String> = fa.keys().collect();
         paths.extend(fb.keys());
+        paths.extend(ma.absent.iter().chain(&ma.skipped));
+        paths.extend(mb.absent.iter().chain(&mb.skipped));
+        let skipped = |m: &Manifest, path: &String| m.skipped.iter().any(|s| s == path);
         let mut changes = Vec::new();
         for path in paths {
             if !covered_a(path) || !covered_b(path) {
                 continue;
             }
-            let change = match (fa.get(path), fb.get(path)) {
+            let (skip_a, skip_b) = (skipped(&ma, path), skipped(&mb, path));
+            let change = |kind, old: Side, new: Side| FileChange {
+                old_path: (kind != ChangeKind::Added).then(|| path.clone()),
+                new_path: (kind != ChangeKind::Deleted).then(|| path.clone()),
+                kind,
+                old,
+                new,
+                binary: None,
+            };
+            let now = || Side::Workdir(path.clone());
+            let found = match (fa.get(path), fb.get(path)) {
                 (Some((ma_, oa)), Some((mb_, ob))) => {
                     if oa == ob && ma_ == mb_ {
                         continue;
@@ -562,43 +604,26 @@ impl ShadowRepo {
                     } else {
                         ChangeKind::Modified
                     };
-                    FileChange {
-                        old_path: Some(path.clone()),
-                        new_path: Some(path.clone()),
-                        kind,
-                        old: Side::Blob(*oa),
-                        new: Side::Blob(*ob),
-                        binary: None,
-                    }
+                    change(kind, Side::Blob(*oa), Side::Blob(*ob))
                 }
-                // Not stored by `b` (too large): still there, changed.
-                (Some((_, oa)), None) if mb.skipped.iter().any(|s| s == path) => FileChange {
-                    old_path: Some(path.clone()),
-                    new_path: Some(path.clone()),
-                    kind: ChangeKind::Modified,
-                    old: Side::Blob(*oa),
-                    new: Side::Workdir(path.clone()),
-                    binary: None,
+                // Not stored by `b`: still there, changed.
+                (Some((_, oa)), None) if skip_b => {
+                    change(ChangeKind::Modified, Side::Blob(*oa), now())
+                }
+                (Some((_, oa)), None) => change(ChangeKind::Deleted, Side::Blob(*oa), Side::None),
+                (None, Some((_, ob))) if skip_a => {
+                    change(ChangeKind::Modified, Side::None, Side::Blob(*ob))
+                }
+                (None, Some((_, ob))) => change(ChangeKind::Added, Side::None, Side::Blob(*ob)),
+                // Neither stored: absent -> skipped is a creation (it grew past the limit or is
+                // not a file), skipped -> absent a deletion, skipped -> skipped not comparable.
+                (None, None) => match (skip_a, skip_b) {
+                    (false, true) => change(ChangeKind::Added, Side::None, now()),
+                    (true, false) => change(ChangeKind::Deleted, Side::None, Side::None),
+                    _ => continue,
                 },
-                (Some((_, oa)), None) => FileChange {
-                    old_path: Some(path.clone()),
-                    new_path: None,
-                    kind: ChangeKind::Deleted,
-                    old: Side::Blob(*oa),
-                    new: Side::None,
-                    binary: None,
-                },
-                (None, Some((_, ob))) => FileChange {
-                    old_path: None,
-                    new_path: Some(path.clone()),
-                    kind: ChangeKind::Added,
-                    old: Side::None,
-                    new: Side::Blob(*ob),
-                    binary: None,
-                },
-                (None, None) => continue,
             };
-            changes.push(change);
+            changes.push(found);
         }
         Ok(changes)
     }

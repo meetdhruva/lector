@@ -535,7 +535,9 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    when there is a checkpoint, plus every first-touch path; a touched path that became a directory,
    or a file that grew past 64 MiB in a folder by other means, is recorded as skipped without being
    read into the shadow: its after-fingerprint is a hash, the undo still restores the state before
-   the turn and a redo of that file refuses), its "before" state is the checkpoint
+   the turn, including removing a file the turn created that then grew past the limit, and a redo
+   of that file refuses; the full state table is the rustdoc of `ShadowRepo::changes_between`),
+   its "before" state is the checkpoint
    and the first-touch backups combined (`ShadowRepo::merge_snapshots`), and a turn that changed
    files appends one `agent.turn` journal entry (its directory, `ActivityEntry::repo`, is the
    repository's work tree, or the folder itself without git) whose undo (`RestoreFiles` over the
@@ -546,7 +548,10 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    `workspace::UndoLastOperation`, `lector undo` and MCP clients all invoke `journal.undo` /
    `journal.undo_last`, whose engine finds a folder's backups with `ShadowRepo::existing_folder`;
    check / force / redo and the confinement of sandboxed callers (a folder project's directory
-   is the folder) apply unchanged. In a repository the turn's changes are a
+   is the folder) apply unchanged, with one rule for content the shadow could not store: an undo
+   overwrites or removes such a file only while it is exactly as the turn left it (in check and
+   force mode alike; otherwise it refuses and writes nothing), and the undo then says the file
+   cannot be redone (`args.not_redoable`). In a repository the turn's changes are a
    `lector_git::Changeset::Snapshots` reviewable in the normal review tab; a folder without git
    has no review, status or history ("Review" says it needs a git repository), but its workspace
    registers the Activity log, `workspace::UndoLastOperation`, Undo toasts (through the

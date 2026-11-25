@@ -140,6 +140,21 @@ pub fn run_undo(args: &UndoArgs, io: &mut Io) -> anyhow::Result<()> {
         )?);
     }
     writeln!(io.out, "Undid #{}: {}", args.id, entry.summary)?;
+    if let Some(paths) = undo_entry
+        .args
+        .get("not_redoable")
+        .and_then(Value::as_array)
+    {
+        let names: Vec<&str> = paths.iter().filter_map(Value::as_str).collect();
+        writeln!(
+            io.out,
+            "{}",
+            io.style.dim(&format!(
+                "{} cannot be redone: too large for Lector to back up",
+                names.join(", ")
+            ))
+        )?;
+    }
     if undo_entry.undo.is_some() {
         writeln!(
             io.out,

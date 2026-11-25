@@ -297,3 +297,47 @@ fn a_write_to_an_ignored_directory_in_a_repository_is_refused_before_any_backup(
     );
     s.stop();
 }
+
+/// Codex finding: the agent creates `big.log`, another program grows it past 64 MiB before the
+/// turn ends. The turn still lists it (added) and, with it as the only touched file, is undoable:
+/// undo removes it (the before-state, "did not exist") and says it cannot be redone.
+#[test]
+fn a_created_file_grown_past_the_limit_by_another_writer_is_removed_by_undo() {
+    let fx = need!(Fx::folder());
+    let s = fx.start();
+    let id = s
+        .prompt("write big.log started\\n\nask keep going".into(), vec![])
+        .unwrap();
+    // While the agent waits for an answer, another program appends to the file.
+    let mut pending = Vec::new();
+    for _ in 0..600 {
+        pending = s.pending_permissions();
+        if !pending.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let request = pending.first().expect("the agent asks").id;
+    sparse(&fx.root.join("big.log"), 65 * 1024 * 1024);
+    s.answer_permission(request, PermissionChoice::AllowOnce);
+    let t = s.wait_turn(id, common::WAIT).expect("turn finished");
+    let changed: Vec<(&str, lector_git::ChangeKind)> = t
+        .changed_files
+        .iter()
+        .map(|c| (c.path.as_str(), c.kind))
+        .collect();
+    assert_eq!(changed, [("big.log", lector_git::ChangeKind::Added)]);
+    assert!(t.journal_id.is_some(), "the turn is undoable");
+    let undo_id = s.undo_turn(t.id, false, Source::Internal).unwrap();
+    assert!(
+        !fx.root.join("big.log").exists(),
+        "undo restored the absence"
+    );
+    let undo = fx.journal().get(undo_id).unwrap();
+    assert!(
+        undo.summary.contains("cannot be redone"),
+        "{}",
+        undo.summary
+    );
+    s.stop();
+}
