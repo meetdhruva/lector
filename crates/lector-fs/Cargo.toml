@@ -14,6 +14,7 @@ dunce.workspace = true
 lector-text.workspace = true
 thiserror.workspace = true
 encoding_rs = "0.8"
+unicode-normalization = "0.1"
 notify = "8.2"
 
 # No-follow opens for confined reads and writes (`confine`): openat/mkdirat/renameat.

@@ -777,6 +777,7 @@ fn spellings_of_one_file_on_the_real_file_system() {
         let fx = Fx::new(git);
         let (case, normalising) = probe_folding(&fx.root);
         println!("git={git}: case-insensitive={case} normalising={normalising}");
+        require_ci_folding(&fx.root, case, Some(normalising));
         if git {
             fx.write(".gitignore", "*.env\n");
         }
@@ -824,5 +825,31 @@ fn spellings_of_one_file_on_the_real_file_system() {
             !names.contains(&format!("cafe\u{301}.{ext}")) || normalising,
             "the NFD file the turn created is gone: {names:?}"
         );
+    }
+}
+
+/// On CI for macOS and Windows the temp directory must be case-insensitive (and on macOS,
+/// APFS, insensitive to Unicode normalisation on lookup): if a runner's is not, this fails
+/// loudly instead of silently running the case-sensitive branch.
+fn require_ci_folding(dir: &Path, case: bool, normalising: Option<bool>) {
+    if std::env::var_os("CI").is_none() {
+        return;
+    }
+    let os = std::env::consts::OS;
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(
+            case,
+            "CI on {os}: {} is case-sensitive, so the case-insensitive branch would not run",
+            dir.display()
+        );
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(normalising) = normalising {
+            assert!(
+                normalising,
+                "CI on macOS: {} does not fold Unicode normalisation (APFS does)",
+                dir.display()
+            );
+        }
     }
 }
