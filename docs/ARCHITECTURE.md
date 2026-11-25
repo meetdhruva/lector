@@ -516,13 +516,18 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    when there is a checkpoint, plus every first-touch path; a touched path that became a directory,
    or a file that grew past 64 MiB in a folder by other means, is recorded as skipped without being
    read into the shadow: its after-fingerprint is a hash, the undo still restores the state before
-   the turn and a redo of that file refuses), its "before" state is the checkpoint
+   the turn, including removing a file the turn created that then grew past the limit, and a redo
+   of that file refuses; the full state table is the rustdoc of `ShadowRepo::changes_between`),
+   its "before" state is the checkpoint
    and the first-touch backups combined (`ShadowRepo::merge_snapshots`), and a turn that changed
    files appends one `agent.turn` journal entry whose undo (`RestoreFiles` over the changed paths,
    with their fingerprints at the end of the turn) restores exactly those files to their state
    before the turn, including "did not exist" (`AgentSession::undo_turn`, the Activity log or
    `lector undo` → `Journal::undo`, which finds a folder's backups with
-   `ShadowRepo::existing_folder`). The journal's check / force / redo apply unchanged. In a
+   `ShadowRepo::existing_folder`). The journal's check / force / redo apply unchanged, with one
+   rule for content the shadow could not store: an undo overwrites or removes such a file only
+   while it is exactly as the turn left it (in check and force mode alike; otherwise it refuses
+   and writes nothing), and the undo then says the file cannot be redone (`args.not_redoable`). In a
    repository the turn's changes are a `lector_git::Changeset::Snapshots` reviewable in the normal
    review tab; a folder without git has no review, status or history ("Review" says it needs a git
    repository), but its workspace registers the Activity log, `workspace::UndoLastOperation`, Undo

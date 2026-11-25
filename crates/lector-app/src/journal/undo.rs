@@ -167,6 +167,7 @@ impl Journal {
         }
         let mut redo: Vec<UndoRecord> = Vec::new();
         let mut invoked: Vec<u64> = Vec::new();
+        let mut not_redoable: Vec<String> = Vec::new();
         self.apply(
             &entry,
             &record,
@@ -174,6 +175,7 @@ impl Journal {
             cx,
             &mut redo,
             &mut invoked,
+            &mut not_redoable,
         )?;
 
         // The entry for the undo itself: the inverse command's own entry when the record was a
@@ -204,12 +206,24 @@ impl Journal {
                     id: 0,
                     time: SystemTime::now(),
                     command: "journal.undo".into(),
-                    summary: format!("Undid: {}", entry.summary),
+                    summary: if not_redoable.is_empty() {
+                        format!("Undid: {}", entry.summary)
+                    } else {
+                        format!(
+                            "Undid: {} ({} cannot be redone: too large for Lector to back up)",
+                            entry.summary,
+                            describe_paths(&not_redoable)
+                        )
+                    },
                     repo: entry.repo.clone(),
                     paths: entry.paths.clone(),
                     undo,
                     undone: false,
-                    args: serde_json::json!({ "entry": id }),
+                    args: if not_redoable.is_empty() {
+                        serde_json::json!({ "entry": id })
+                    } else {
+                        serde_json::json!({ "entry": id, "not_redoable": not_redoable })
+                    },
                     source: cx.source,
                     undo_of: Some(id),
                     undone_by: None,
@@ -315,7 +329,17 @@ impl Journal {
         Ok(())
     }
 
-    /// Runs the record's writes (last first for `Multi`), collecting redo records.
+    /// Runs the record's writes (last first for `Multi`), collecting redo records and the paths
+    /// whose present state could not be backed up first (`not_redoable`).
+    ///
+    /// The shadow of a folder without git does not store files over 64 MiB (ADR 0011). Undoing
+    /// over such a file (overwriting or deleting it) is allowed only while it is exactly as the
+    /// operation left it (its fingerprint, a hash taken without storing, matches the record's
+    /// `after`), in [`UndoMode::Check`] and [`UndoMode::Force`] alike: then nothing anyone made
+    /// since is lost, the undo restores the before-state, and the redo of that file is not
+    /// possible (the undo's summary and `args.not_redoable` say so). If it changed since, the
+    /// undo refuses with the reason and writes nothing, because the change could not be backed up.
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         &self,
         entry: &ActivityEntry,
@@ -324,13 +348,14 @@ impl Journal {
         cx: &CommandContext,
         redo: &mut Vec<UndoRecord>,
         invoked: &mut Vec<u64>,
+        not_redoable: &mut Vec<String>,
     ) -> Result<(), UndoError> {
         let fail = |e: lector_git::Error| UndoError::Failed(e.to_string());
         match record {
             UndoRecord::RestoreFiles {
                 shadow: snap,
                 paths,
-                ..
+                after: left,
             } => {
                 let shadow = self.shadow_for(repo.unwrap_or(Path::new("")))?;
                 let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
@@ -339,6 +364,23 @@ impl Journal {
                 let backup = shadow
                     .snapshot_paths(&refs, &format!("Before undoing: {}", entry.summary))
                     .map_err(fail)?;
+                let unsaved = unsaved_paths(&shadow, &backup).map_err(fail)?;
+                if !unsaved.is_empty() {
+                    let keys: Vec<&str> = unsaved.iter().map(String::as_str).collect();
+                    let now = shadow.fingerprints(&keys).map_err(fail)?;
+                    let changed: Vec<String> = unsaved
+                        .iter()
+                        .filter(|p| left.get(*p).is_none() || left.get(*p) != now.get(*p))
+                        .cloned()
+                        .collect();
+                    if !changed.is_empty() {
+                        return Err(UndoError::Failed(format!(
+                            "{} changed since this operation and is too large for Lector to back up, so undoing would destroy that change with no way back; nothing was restored",
+                            describe_paths(&changed)
+                        )));
+                    }
+                    not_redoable.extend(unsaved);
+                }
                 shadow.restore_paths(snap, &refs).map_err(fail)?;
                 let after = shadow.fingerprints(&refs).map_err(fail)?;
                 redo.push(UndoRecord::RestoreFiles {
@@ -394,12 +436,31 @@ impl Journal {
                 // a `Multi` of those redos (undone last first again) then repeats the
                 // original parts first to last.
                 for r in records.iter().rev() {
-                    self.apply(entry, r, repo, cx, redo, invoked)?;
+                    self.apply(entry, r, repo, cx, redo, invoked, not_redoable)?;
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Paths a backup did not store (the shadow of a folder without git skips files over 64 MiB);
+/// whole-repository shadows never skip in a path backup, so they are not asked.
+fn unsaved_paths(
+    shadow: &ShadowRepo,
+    backup: &lector_git::ShadowSnapshot,
+) -> Result<Vec<String>, lector_git::Error> {
+    if !shadow.is_folder() {
+        return Ok(Vec::new());
+    }
+    Ok(shadow
+        .entries(backup)?
+        .into_iter()
+        .filter_map(|e| match e {
+            lector_git::shadow::SnapshotEntry::Skipped { path } => Some(path),
+            _ => None,
+        })
+        .collect())
 }
 
 fn diff_maps(
