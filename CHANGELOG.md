@@ -84,8 +84,18 @@ Security:
   the network or your credentials, or start or steer an agent, now run only from Lector's window or
   `lector run`; answering a permission request only from the window.
 - **An agent write that cannot be undone is refused.** If the backup that makes it undoable fails,
-  or the folder is not a git repository (where Lector has nowhere to keep the backup), the write is
-  refused instead of happening without an undo.
+  the write is refused instead of happening without an undo.
+- **Agents work in folders that are not git repositories, with undo.** Each file an agent writes
+  there is backed up on its first touch in the turn into Lector's own data folder (never a `.git`
+  in your folder; nothing is created until the first write), and Undo turn (the Agent panel, the
+  Activity log, `lector undo`) restores exactly the files the turn touched, including removing the
+  ones it created. Only those files are read: a turn costs the same in your home folder as in an
+  empty one. A file over 64 MiB is not backed up there, so that write is refused with the reason.
+  In 0.7.1 such writes had no undo.
+- **Undoing an agent turn restores git-ignored files it overwrote** (such as `.env`), not only
+  tracked and untracked ones; the turn's changes list them too.
+- **Backups of deleted or renamed folders are cleaned up** once they are 30 days old, like every
+  other backup.
 - **Lector's data folder is private.** The backups Lector keeps (which can include git-ignored
   files such as `.env`), logs, crash reports and session records were created readable by other
   users of the machine under the usual umask. Everything Lector creates there is now owner-only,

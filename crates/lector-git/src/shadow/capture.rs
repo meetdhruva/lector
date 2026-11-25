@@ -133,6 +133,10 @@ impl ShadowRepo {
                     plan.vanished.push(file.rel.clone());
                 }
             }
+            // Entries carried over from other snapshots: their blobs are already here.
+            for (rel, mode, oid) in &plan.recorded {
+                writeln!(w, "M {mode} {oid} {}", quote_path(&format!("files/{rel}")))?;
+            }
             let mut blobs = BTreeSet::new();
             for entry in &plan.index {
                 if entry.mode != "160000" && blobs.insert(entry.oid) {

@@ -235,7 +235,8 @@ commands). **Start at** `lector_fs::load_file`, `lector_fs::detect_kind`, `lecto
 Git: reads through `gix`, writes and network operations through the git CLI under
 `lector-process`. **Owns** status, changesets, blobs, log, graph, blame and line history, the
 write API (`write`, `sync`, branches, stashes, conflict operations) and the shadow repository
-(Lector's own bare repository for backups, agent checkpoints and pull-request fetches). **Must
+(Lector's own bare repository for backups, agent checkpoints and pull-request fetches; for a folder
+without git a path-scoped one, `ShadowRepo::open_folder`, [ADR 0011](adr/0011-agent-edits-without-git.md)). **Must
 not** be called for writes except from `lector-app` registry commands (`arch-check writes`), or
 write into the user's `.git` from the shadow. **Start at** `lector_git::Repo`,
 `lector_git::Changeset`, `lector_git::write`, `lector_git::sync`, `lector_git::ShadowRepo`.
@@ -282,7 +283,7 @@ health, and the quit sequence. **Must not** depend on GPUI or tokio, or on `lect
 ### lector-agent (client)
 Coding agents over the Agent Client Protocol (newline-delimited JSON-RPC on the agent's stdio).
 **Owns** sessions and turns, permission requests, agent file reads and writes through the document
-store, turn checkpoints in the shadow repository, undo of a turn, the agent provenance provider,
+store, turns' backups (taken through `lector_app::commands::agent_backup`), undo of a turn, the agent provenance provider,
 inline-edit state and turn summaries. **Must not** decide path confinement itself (agent paths go
 through `lector_fs::confine`), let an agent read or write outside the project or in `.git`, write
 anything it cannot undo, or give it a terminal or Lector's tools. **Start at** `lector_agent::AgentSession`,
@@ -468,9 +469,12 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    an agent from the **user's** `[[agent.servers]]` or a known ACP agent found on `PATH`
    (`lector_agent::available_configs`; a project cannot add one), as a supervised process tree
    (`ProcessKind::Agent`, askpass variables scrubbed).
-2. `AgentSession::prompt` starts a turn as a `JobKind::AgentTurn` job (guaranteed lane). The turn
-   takes a "before" checkpoint (`ShadowRepo::snapshot_worktree`), sends `session/prompt` with the
-   context blocks, and streams `session/update` notifications into the `Turn`.
+2. `AgentSession::prompt` starts a turn as a `JobKind::AgentTurn` job (guaranteed lane). In a
+   repository the turn takes a "before" checkpoint of the work tree
+   (`AgentBackups::begin_turn` in `lector_app::commands::agent_backup` → `ShadowRepo::snapshot_worktree`);
+   in a folder without git it takes none and creates nothing ([ADR 0011](adr/0011-agent-edits-without-git.md)).
+   It then sends `session/prompt` with the context blocks and streams `session/update`
+   notifications into the `Turn`.
 3. Agent-to-client requests run as `JobKind::AgentRequest` tasks
    (`lector_agent::rpc::Connection`). Both file requests go through the one confinement check,
    `lector_fs::confine` (configured by `lector_app::commands::confinement`): the path is resolved
@@ -484,17 +488,32 @@ assert. The decisions are [ADR 0003](adr/0003-one-scheduler.md) and
    before each attempt. `fs/read_text_file` serves the open document (unsaved edits
    included) or reads the file with `Confined::read`; `fs/write_text_file` goes through the open
    `DocHandle` (a confined save, `SaveRequest::confine`) or `Confined::write`. A write is refused
-   unless it can be undone: the turn checkpoint covers the file, or the file is backed up into the
-   shadow repository first; a failed backup, or a folder without git (no shadow repository),
-   refuses the write. Each write is journaled as `agent.write_file` with `Source::Agent`.
+   unless it can be undone (`AgentBackups::before_write`, after confinement): the turn checkpoint
+   covers the file, or the file was backed up earlier in the turn, or it is backed up now on its
+   first touch with `ShadowRepo::snapshot_paths`: a file the checkpoint leaves out (git-ignored,
+   such as `.env`) in a repository, every file in a folder without git. There the backup goes
+   into the folder's shadow repository (`ShadowRepo::open_folder`, keyed by the folder's
+   canonical path, created at that first backup, owner-only, never a `.git` in the folder); it is
+   path-scoped: the folder is never listed, walked or staged, so a turn costs the same in a home
+   directory as in an empty folder, and every git command names the shadow (`--git-dir`) so no
+   repository above the folder and none of the folder's settings or `.gitattributes` are read. A
+   failed backup, or a file over 64 MiB in a folder without git, refuses the write with the reason.
+   Each write is journaled as `agent.write_file` with `Source::Agent` (undoable on its own when it
+   took a backup of its own).
 4. `session/request_permission` becomes a `PermissionRequest` shown inline in the panel; the user
    answers allow once / always for the session / reject (`AgentSession::answer_permission`).
    `auto_allow_reads` answers reads inside the project. Cancel answers pending requests
    `cancelled`.
-5. When the turn ends an "after" checkpoint is taken; a turn that changed files appends one
-   `agent.turn` journal entry whose undo restores the "before" snapshot
-   (`AgentSession::undo_turn` → `Journal::undo`). The turn's changes are a
-   `lector_git::Changeset::Snapshots` reviewable in the normal review tab.
+5. When the turn ends (`AgentBackups::finish_turn`) its "after" state is recorded (the work tree
+   when there is a checkpoint, plus every first-touch path), its "before" state is the checkpoint
+   and the first-touch backups combined (`ShadowRepo::merge_snapshots`), and a turn that changed
+   files appends one `agent.turn` journal entry whose undo (`RestoreFiles` over the changed paths,
+   with their fingerprints at the end of the turn) restores exactly those files to their state
+   before the turn, including "did not exist" (`AgentSession::undo_turn`, the Activity log or
+   `lector undo` → `Journal::undo`, which finds a folder's backups with
+   `ShadowRepo::existing_folder`). The journal's check / force / redo apply unchanged. In a
+   repository the turn's changes are a `lector_git::Changeset::Snapshots` reviewable in the normal
+   review tab; a folder without git has no review, status or history.
 
 **What each source can reach.** The agent itself gets no terminal (`terminal: false`), no MCP
 servers and none of Lector's commands: only confined file reads and writes inside the project,
@@ -517,7 +536,12 @@ Turning a UI-only capability into a command must not widen this
 1. **Files people edit** stay files in `lector_config::paths::config_dir()`: `settings.toml`,
    `keymap.toml`, themes; plus a project's `.lector/settings.toml`. Logs and crash reports stay
    files in the data directory (`lector_app::health`) so they work when the database does not.
-   The shadow repositories (`data_dir()/shadow/`) and shell-integration scripts are files too.
+   The shadow repositories (`data_dir()/shadow/<hash of the canonical work tree>.git`, for
+   repositories and for folders without git alike) and shell-integration scripts are files too.
+   A shadow is trimmed (30 days, 1 GiB) the first time per process Lector backs something up into
+   it, and the first backup of a process also deletes the shadows whose folder or repository is
+   gone (deleted or renamed) once their newest backup is older than 30 days
+   (`ShadowRepo::prune_orphans`).
    Everything Lector creates in the data directory is owner-only (`lector_base::private`, see
    [File permissions](#file-permissions)); config files keep the user's own modes.
 2. **Everything else** lives in `data_dir()/lector.redb` behind `lector_app::store::Store`: one
@@ -585,7 +609,8 @@ effect of reading.
   back. A confirmation remains when the backup cannot be taken, for operations that cannot be
   undone or reach beyond the machine (abort a merge or rebase, force push with lease, submit a
   review), before deleting an unmerged branch, and for closing or reloading unsaved buffers. Undo never silently throws away newer edits.
-  Backups are pruned after 30 days or above 1 GiB per repository.
+  Backups are pruned after 30 days or above 1 GiB per repository (or folder without git), and the
+  backups of a deleted or renamed folder go once they are 30 days old.
 - **Git writes go through the git CLI** (`lector_git::write`, `lector_git::sync`) so hooks, locks,
   filters and signing behave as in a terminal; reads stay on gix with `GIT_OPTIONAL_LOCKS=0`.
 - **Saves are atomic** (temp file, fsync, rename), keep permissions, encoding and line endings,

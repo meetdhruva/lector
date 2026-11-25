@@ -4506,6 +4506,7 @@ name = "lector-agent"
 version = "0.7.2"
 dependencies = [
  "anyhow",
+ "dunce",
  "lector-app",
  "lector-base",
  "lector-buffer",

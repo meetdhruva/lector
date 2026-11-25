@@ -13,7 +13,9 @@
 //! Read/navigation commands live in [`read`]; git writes in `git_write` (Agent SAFE), git
 //! network / branch / stash commands in [`git_sync`] (v0.7),
 //! document commands in `documents` (Agent DOCS), the pull request fetch into Lector's shadow
-//! repository in [`pull_request`].
+//! repository in [`pull_request`]. [`agent_backup`] is not a command: it is the backup half of
+//! the agent write path (ADR 0010, ADR 0011), here because it takes backups through the
+//! `lector-git` write API like the commands do.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -30,6 +32,7 @@ use serde_json::{json, Value};
 pub use crate::core::AppCore;
 pub use crate::journal::UndoRecord;
 
+pub mod agent_backup;
 pub mod documents;
 pub mod git_sync;
 pub mod git_write;
