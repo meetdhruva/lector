@@ -81,6 +81,8 @@ const TABLE: &[(&str, bool, bool, bool, Sources)] = {
         ("git.unstage_all", true, false, false, All),
         ("git.unstage_hunk", true, false, false, All),
         ("git.upstream_status", false, false, false, All),
+        ("journal.undo", true, false, false, All),
+        ("journal.undo_last", true, false, false, All),
         ("review.fetch_pull_request", false, true, true, UiOnly),
         ("search.project", false, false, false, All),
         ("settings.get", false, false, false, All),

@@ -52,7 +52,14 @@ fn module_names(path: &str) -> Vec<&str> {
 pub fn check_concepts(files: &[SourceFile], concepts: &[Concept]) -> RuleOutput {
     let mut found = Vec::new();
     for c in concepts {
-        let mut used = vec![false; c.delegates.len()];
+        // Delegates first, then exceptions: one reviewed list, each entry marked when it matches.
+        let reviewed: Vec<(&str, &crate::config::Delegate)> = c
+            .delegates
+            .iter()
+            .map(|d| ("delegate", d))
+            .chain(c.exceptions.iter().map(|d| ("exception", d)))
+            .collect();
+        let mut used = vec![false; reviewed.len()];
         let owners = c.owner.join(", ");
         let say = |what: String| -> String {
             format!(
@@ -94,10 +101,9 @@ pub fn check_concepts(files: &[SourceFile], concepts: &[Concept]) -> RuleOutput 
                         Some(format!("`{} {name}`", f.tok(i)))
                     }
                     "fn" if matches_any(&c.fns, name) => {
-                        match c
-                            .delegates
+                        match reviewed
                             .iter()
-                            .position(|d| d.file == f.path && d.name == name)
+                            .position(|(_, d)| d.file == f.path && d.name == name)
                         {
                             Some(k) => {
                                 used[k] = true;
@@ -116,14 +122,14 @@ pub fn check_concepts(files: &[SourceFile], concepts: &[Concept]) -> RuleOutput 
                 }
             }
         }
-        for (d, u) in c.delegates.iter().zip(&used) {
+        for ((kind, d), u) in reviewed.iter().zip(&used) {
             if !u {
                 found.push(Violation::new(
                     RULE,
                     "arch/one-impl.toml",
                     1,
                     format!(
-                        "stale delegate `{}` in {} for \"{}\": no such function matches the patterns any more; remove it",
+                        "stale {kind} `{}` in {} for \"{}\": no such function matches the patterns any more; remove it",
                         d.name, d.file, c.name
                     ),
                 ));
@@ -154,6 +160,7 @@ mod tests {
             fns: v(fns),
             modules: v(modules),
             delegates: Vec::new(),
+            exceptions: Vec::new(),
         }
     }
 
@@ -188,6 +195,59 @@ mod tests {
         let out = run(vec![file("crates/lector-app/src/c.rs", "fn x() {}")], &[c]);
         assert_eq!(out.violations.len(), 1);
         assert!(out.violations[0].message.contains("stale delegate"));
+    }
+
+    /// ADR 0012, item 6: a function that matches a pattern but is reviewed as not being the
+    /// concept (the file watcher's event coalescing) is an exception; a stale one fails.
+    #[test]
+    fn a_reviewed_exception_is_not_a_duplicate_and_a_stale_one_fails() {
+        let mut c = concept(
+            "debounce",
+            &["crates/lector-app/src/scheduler/**"],
+            &["Debounce*"],
+            &["*debounce_loop*", "coalesce_*"],
+            &[],
+        );
+        c.exceptions.push(crate::config::Delegate {
+            file: "crates/lector-fs/src/watch.rs".into(),
+            name: "coalesce_events".into(),
+            why: "batches raw events in the watcher's owner thread".into(),
+        });
+        let src = "fn coalesce_events() {}\nfn coalesce_other() {}\nfn debounce_loop() {}";
+        let out = run(
+            vec![file("crates/lector-fs/src/watch.rs", src)],
+            std::slice::from_ref(&c),
+        );
+        let hits: Vec<&str> = out.violations.iter().map(|v| v.message.as_str()).collect();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits.iter().any(|m| m.contains("`fn coalesce_other`")));
+        assert!(hits.iter().any(|m| m.contains("`fn debounce_loop`")));
+        // The same name in another file is not covered.
+        let out = run(
+            vec![file(
+                "crates/lector-fs/src/other.rs",
+                "fn coalesce_events() {}",
+            )],
+            std::slice::from_ref(&c),
+        );
+        assert!(out
+            .violations
+            .iter()
+            .any(|v| v.message.contains("stale exception `coalesce_events`")));
+        assert!(out
+            .violations
+            .iter()
+            .any(|v| v.file == "crates/lector-fs/src/other.rs"));
+        let parsed = crate::config::Concept::parse_all(
+            "[[concept]]\nname=\"d\"\nadr=\"3\"\nowner=[\"a/**\"]\nfn=[\"c*\"]\nexception=[{file=\"w.rs\", fn=\"c1\", why=\"not a debounce\"}]\n",
+        )
+        .unwrap();
+        assert_eq!(parsed[0].exceptions.len(), 1);
+        assert!(parsed[0].delegates.is_empty());
+        assert!(crate::config::Concept::parse_all(
+            "[[concept]]\nname=\"d\"\nadr=\"3\"\nowner=[\"a/**\"]\nfn=[\"c*\"]\nexception=[{file=\"w.rs\", fn=\"c1\"}]\n",
+        )
+        .is_err());
     }
 
     #[test]

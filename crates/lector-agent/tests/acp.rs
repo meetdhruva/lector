@@ -9,6 +9,7 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use lector_agent::*;
+use lector_app::commands::journal_undo::invoke_undo;
 use lector_app::commands::Source;
 use lector_app::documents::DocumentStore;
 use lector_app::journal::Journal;
@@ -246,9 +247,7 @@ fn writes_are_checkpointed_reviewable_and_undoable() {
     assert!(fx.read("src/new.rs").is_none());
     assert!(s.turn(t.id).unwrap().undone);
     let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
-    journal
-        .undo(undo_id, &cx, lector_app::journal::UndoMode::Check)
-        .unwrap();
+    invoke_undo(&cx, undo_id, lector_app::journal::UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\nTWO\nthree\n");
     assert!(!s.turn(t.id).unwrap().undone);
     s.stop();
@@ -592,9 +591,7 @@ fn ignored_files_are_backed_up_and_dangling_links_refused() {
         "the ignored file's write must be undoable"
     );
     let cx = CommandContext::new(fx.core.clone(), Some(fx.project.clone()), Source::Internal);
-    journal
-        .undo(entry.id, &cx, lector_app::journal::UndoMode::Check)
-        .unwrap();
+    invoke_undo(&cx, entry.id, lector_app::journal::UndoMode::Check).unwrap();
     assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
     s.stop();
 }

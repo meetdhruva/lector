@@ -1,5 +1,11 @@
 //! Executing an [`UndoRecord`]: restore from the shadow, invoke the inverse command,
 //! check that nothing changed since, and record the undo itself.
+//!
+//! This is the undo engine behind the registry commands `journal.undo` and `journal.undo_last`
+//! (`crate::commands::journal_undo`, ADR 0012), which are its only callers: `Journal::undo` is
+//! crate-private, so every undo goes through [`crate::CommandRegistry::invoke`] (sources,
+//! confinement of sandboxed callers). It calls the `lector-git` write API (shadow snapshots and
+//! restores), which is why this file is listed in `arch/git-callers.allow`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -10,7 +16,8 @@ use lector_git::{Repo, ShadowRepo};
 use super::{ActivityEntry, Journal, UndoRecord};
 use crate::commands::CommandContext;
 
-/// How strictly [`Journal::undo`] checks that the files are still as the command left them.
+/// How strictly an undo (`journal.undo`'s `mode`) checks that the files are still as the command
+/// left them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoMode {
     /// Refuse with [`UndoError::Changed`] when files changed since.
@@ -188,7 +195,11 @@ impl Journal {
     ///
     /// With [`UndoMode::Check`], files that changed since the operation make it fail with
     /// [`UndoError::Changed`] before anything is written.
-    pub fn undo(
+    ///
+    /// Undoing an entry that is itself an undo is a redo: the new entry is `undo_of` that undo
+    /// entry, and the original operation is marked not undone again (it can be undone once
+    /// more). Crate-private: callers invoke `journal.undo` (ADR 0012).
+    pub(crate) fn undo(
         &self,
         id: u64,
         cx: &CommandContext,
@@ -279,23 +290,6 @@ impl Journal {
         }
         self.get(undo_entry_id)
             .ok_or_else(|| UndoError::Failed("the undo entry vanished".into()))
-    }
-
-    /// Undoes the newest undoable operation ("Undo last operation") of the context's
-    /// repository, or of its folder when that is not a git repository (any, without a project).
-    pub fn undo_last(
-        &self,
-        cx: &CommandContext,
-        mode: UndoMode,
-    ) -> Result<ActivityEntry, UndoError> {
-        let workdir = cx.project.as_ref().map(|p| match p.repo() {
-            Some(r) => r.workdir().to_path_buf(),
-            None => p.root().to_path_buf(),
-        });
-        let entry = self
-            .last_undoable(workdir.as_deref())
-            .ok_or_else(|| UndoError::NotUndoable("Nothing to undo.".into()))?;
-        self.undo(entry.id, cx, mode)
     }
 
     fn check_snapshots(&self, record: &UndoRecord, repo: Option<&Path>) -> Result<(), UndoError> {

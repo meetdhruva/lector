@@ -20,6 +20,7 @@ and how the result is checked automatically (`scripts/arch-check`, see `arch/`).
 | [0009](0009-security-posture.md) | Security posture carried over from 0.1–0.7 (write policy, agents, updates) | Accepted |
 | [0010](0010-audit-corrections.md) | Corrections after the independent audit (confinement, tokens, command sources, write jobs, guardrails) | Accepted |
 | [0011](0011-agent-edits-without-git.md) | Agent edits in a folder without git are backed up and undoable | Accepted |
+| [0012](0012-write-debt.md) | The write violations the stronger guardrails exposed are paid off | Accepted |
 
 ## How work is done
 

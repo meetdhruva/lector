@@ -7,7 +7,7 @@
 //!
 //! A scenario builds a repository with the git CLI (hermetic config, `core.autocrlf=false`),
 //! captures its [`State`], runs the command through the registry, undoes the journal entry the
-//! way the UI's Undo does (`Journal::undo(id, cx, UndoMode::Check)`), and asserts the state is
+//! way the UI's Undo does (the `journal.undo` command with `mode: "check"`), and asserts the state is
 //! back. Then it redoes (undo of the undo) and asserts the post-command state, and undoes the
 //! original operation once more and asserts the pre-command state again.
 //!
@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
 
+use lector_app::commands::journal_undo::invoke_undo;
 use lector_app::commands::{CommandContext, CommandError, Source, UndoPolicy};
 use lector_app::journal::{Journal, UndoError, UndoMode};
 use lector_app::{AppCore, CoreOptions, Outcome, Project};
@@ -126,6 +127,15 @@ const SCENARIOS: &[(&str, &[&str])] = &[
     ("git.stash_drop", &["stash_drop"]),
     ("git.stash_store", &["stash_store_after_drop"]),
     ("git.restore_ref", &["restore_ref_moves_a_branch"]),
+    // An undo is itself undoable (ADR 0012): its entry carries the redo.
+    (
+        "journal.undo",
+        &[
+            "journal_undo_of_a_restore",
+            "journal_undo_of_an_inverse_command",
+        ],
+    ),
+    ("journal.undo_last", &["journal_undo_last_of_a_discard"]),
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -386,15 +396,11 @@ impl Fx {
         assert!(out.undo.is_some(), "`{id}` returned no undo record");
         let entry = out.journal_id.expect("journaled");
 
-        let undone = self
-            .journal
-            .undo(entry, &self.cx, UndoMode::Check)
+        let undone = invoke_undo(&self.cx, entry, UndoMode::Check)
             .unwrap_or_else(|e| panic!("undo of `{id}`: {e}"));
         State::assert_same(&before, &self.state(), &format!("after undoing `{id}`"));
 
-        let redone = self
-            .journal
-            .undo(undone.id, &self.cx, UndoMode::Check)
+        let redone = invoke_undo(&self.cx, undone.id, UndoMode::Check)
             .unwrap_or_else(|e| panic!("redo of `{id}`: {e}"));
         State::assert_same(&after, &self.state(), &format!("after redoing `{id}`"));
 
@@ -402,8 +408,7 @@ impl Fx {
         let original = self.journal.get(entry).expect("entry");
         assert!(!original.undone, "redo of `{id}` left the original undone");
         let _ = redone;
-        self.journal
-            .undo(entry, &self.cx, UndoMode::Check)
+        invoke_undo(&self.cx, entry, UndoMode::Check)
             .unwrap_or_else(|e| panic!("second undo of `{id}`: {e}"));
         State::assert_same(
             &before,
@@ -1016,7 +1021,7 @@ fn refused(fx: &Fx, id: &str, args: Value) {
     assert!(out.undo.is_none(), "`{id}` is declared not undoable");
     let entry = out.journal_id.expect("journaled");
     let before = fx.state();
-    match fx.journal.undo(entry, &fx.cx, UndoMode::Check) {
+    match invoke_undo(&fx.cx, entry, UndoMode::Check) {
         Err(UndoError::NotUndoable(why)) => assert!(!why.is_empty()),
         other => panic!("undo of `{id}`: {other:?}"),
     }
@@ -1072,4 +1077,35 @@ fn the_commit_command_reports_what_the_composer_shows() {
     assert_eq!(out.data["upstream"]["ahead"], 1);
     let oid = fx.git(&["rev-parse", "HEAD"]);
     assert_eq!(out.data["oid"], oid.trim());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The undo commands themselves (ADR 0012)
+// ---------------------------------------------------------------------------------------------
+
+/// `journal.undo` of a discard (a `RestoreFiles` record): undoing the undo discards again.
+#[test]
+fn journal_undo_of_a_restore() {
+    let fx = Fx::mixed();
+    let discard = fx.ok("git.discard", json!({ "paths": ["b.txt", "u.txt"] }));
+    let entry = discard.journal_id.expect("journaled");
+    fx.round_trip("journal.undo", json!({ "entry": entry }));
+}
+
+/// `journal.undo` of a stage whose undo is the inverse command (`git.unstage`).
+#[test]
+fn journal_undo_of_an_inverse_command() {
+    let fx = Fx::mixed();
+    let stage = fx.ok("git.stage", json!({ "paths": ["b.txt"] }));
+    let entry = stage.journal_id.expect("journaled");
+    fx.round_trip("journal.undo", json!({ "entry": entry }));
+}
+
+/// `journal.undo_last` of the newest operation (a discard of the whole mixed tree's edits).
+#[test]
+fn journal_undo_last_of_a_discard() {
+    let fx = Fx::mixed();
+    fx.ok("git.stage", json!({ "paths": ["b.txt"] }));
+    fx.ok("git.discard", json!({ "paths": ["u.txt"] }));
+    fx.round_trip("journal.undo_last", json!({}));
 }

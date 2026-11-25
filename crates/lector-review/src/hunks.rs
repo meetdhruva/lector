@@ -1,6 +1,6 @@
 //! Hunk patches: what staging, unstaging or discarding a hunk (or selected lines) of a file's
 //! diff would apply (v0.2). The patch is computed here from the diff and what `repo` reads;
-//! applying it is `lector-app`'s write (`review_service::apply`, ADR 0002).
+//! applying it is `lector-app`'s write (private to the `git.*_hunk` commands, ADR 0002, ADR 0012).
 
 use std::ops::Range;
 

@@ -7,6 +7,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, Once};
 
 use lector_app::commands::git_sync::SyncHost;
+use lector_app::commands::journal_undo::invoke_undo;
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::{Journal, UndoMode};
 use lector_app::Project;
@@ -63,7 +64,6 @@ struct Fx {
     a: PathBuf,
     b: PathBuf,
     cx: CommandContext,
-    journal: Journal,
 }
 
 impl Fx {
@@ -97,7 +97,7 @@ impl Fx {
             &["clone", "-q", remote.to_str().unwrap(), b.to_str().unwrap()],
         );
         let core = AppCore::open(CoreOptions::for_tests());
-        let journal = Journal::install_in(&core, root.join("data"));
+        Journal::install_in(&core, root.join("data"));
         let mut settings = Settings::default();
         settings.lsp.enabled = false;
         let project = Project::open(&a, settings).unwrap();
@@ -107,7 +107,6 @@ impl Fx {
             a,
             b,
             cx,
-            journal,
         }
     }
 
@@ -120,13 +119,12 @@ impl Fx {
     }
 
     fn undo(&self, outcome: &Outcome) {
-        self.journal
-            .undo(
-                outcome.journal_id.expect("journaled"),
-                &self.cx,
-                UndoMode::Check,
-            )
-            .unwrap_or_else(|e| panic!("undo: {e}"));
+        invoke_undo(
+            &self.cx,
+            outcome.journal_id.expect("journaled"),
+            UndoMode::Check,
+        )
+        .unwrap_or_else(|e| panic!("undo: {e}"));
     }
 
     fn commit(&self, dir: &Path, file: &str, content: &str) -> String {
@@ -473,10 +471,7 @@ fn undo_of_a_stash_whose_index_cannot_come_back_is_refused_and_keeps_the_stash()
     write(&fx.a, "f.txt", "one other\n");
     git_in(&fx.a, &["add", "f.txt"]);
     let wanted = state(&fx.a, &["f.txt", "n.txt"]);
-    let err = fx
-        .journal
-        .undo(pushed.journal_id.unwrap(), &fx.cx, UndoMode::Check)
-        .unwrap_err();
+    let err = invoke_undo(&fx.cx, pushed.journal_id.unwrap(), UndoMode::Check).unwrap_err();
     assert!(err.to_string().contains("stash is kept"), "{err}");
     assert_eq!(state(&fx.a, &["f.txt", "n.txt"]), wanted, "nothing changed");
     assert_eq!(stash_count(&fx), 1);
@@ -558,10 +553,7 @@ fn undo_of_a_pull_keeps_staged_changes_and_refuses_overlaps() {
     write(&fx.a, "f.txt", "staged edit of the pulled file\n");
     git_in(&fx.a, &["add", "f.txt"]);
     let wanted = state(&fx.a, MATRIX);
-    let err = fx
-        .journal
-        .undo(pulled.journal_id.unwrap(), &fx.cx, UndoMode::Check)
-        .unwrap_err();
+    let err = invoke_undo(&fx.cx, pulled.journal_id.unwrap(), UndoMode::Check).unwrap_err();
     assert!(err.to_string().contains("f.txt"), "{err}");
     assert_eq!(fx.head(), after);
     assert_eq!(state(&fx.a, MATRIX), wanted);
@@ -570,10 +562,7 @@ fn undo_of_a_pull_keeps_staged_changes_and_refuses_overlaps() {
 
     // No overlap: the branch goes back and every staged change survives, then redo.
     let wanted = state(&fx.a, MATRIX);
-    let undo = fx
-        .journal
-        .undo(pulled.journal_id.unwrap(), &fx.cx, UndoMode::Check)
-        .unwrap();
+    let undo = invoke_undo(&fx.cx, pulled.journal_id.unwrap(), UndoMode::Check).unwrap();
     assert_eq!(fx.head(), before);
     let now = state(&fx.a, MATRIX);
     assert_eq!(now.status, wanted.status);
@@ -592,7 +581,7 @@ fn undo_of_a_pull_keeps_staged_changes_and_refuses_overlaps() {
             .join("\n")
     };
     assert_eq!(strip(&now.index), strip(&wanted.index));
-    fx.journal.undo(undo.id, &fx.cx, UndoMode::Check).unwrap();
+    invoke_undo(&fx.cx, undo.id, UndoMode::Check).unwrap();
     assert_eq!(fx.head(), after);
     assert_eq!(state(&fx.a, MATRIX), wanted);
 }

@@ -36,11 +36,12 @@ also protected by the test suite.
 | `generated.allow` | Generated files exempt from the 1,500-line limit (ADR 0006). |
 | `review-statics.allow` | `NAME: Type` pairs of the statics `lector-review` may declare (ADR 0001); name and type must both match. |
 | `git-read.allow` | The classification of the public surface of `lector-git`: `handle:Type` (a type whose `pub fn`s can act on a repository), `value:Type` (data only), and every read as `Type::name`, `free::name` or a bare `name`. Everything not listed is a write (ADR 0002, ADR 0010 item 8). |
-| `git-callers.allow` | Files outside `lector-git` that may call the write API: the `lector-app` command modules (`commands/**`). |
+| `git-callers.allow` | Files outside `lector-git` that may call the write API: the `lector-app` command modules (`commands/**`) and the journal's undo engine (`journal/undo.rs`, the implementation of `journal.undo` / `journal.undo_last`, ADR 0012). |
+| `git-handles.allow` | The reviewed accessors outside `lector-git` that hand out a repository handle (`&Repo`, `Arc<Repo>`, `ShadowRepo`...), as `<file>::<fn>` with a reason: `Project::repo`, `RepoState::repo`, `GitStore::repo` (ADR 0012 item 5). Any other such accessor is a violation. |
 | `git-ambiguous.allow` | Write-API names that are also common method names (`push`); only flagged when the receiver's name contains `repo`, `git` or `shadow`. |
 | `fs-writers.allow` | Files of the UI crates, `lector-mcp`, `lector-cli` and `lector-agent` that write files themselves. Today: the agent's `fs/write_text_file` (ADR 0010 "known gaps"). |
 | `store-ambiguous.allow` | `lector-config` write-method names that are also common method names (`remove`, `set`, `clear`); `purity` flags them in `lector-review` only when the receiver's name contains `store`, `config`, `settings`, `session`, `recent` or `backend`. |
-| `one-impl.toml` | The concepts that have one implementation only (`dupes`): name, ADR, owner globs, name patterns, reviewed `delegate` wrappers. |
+| `one-impl.toml` | The concepts that have one implementation only (`dupes`): name, ADR, owner globs, name patterns, reviewed `delegate` wrappers and reviewed `exception`s (a function with a matching name that is not the concept: the file watcher's `coalesce_events`). |
 | `unsafe.allow` | `crate:` names exempt from `#![forbid(unsafe_code)]` (only `lector-text`); every `unsafe` block there needs a `// SAFETY:` comment. |
 
 ## Lowering the baseline
@@ -123,18 +124,22 @@ below), so renaming an import does not hide a call. Each rule's module doc in
     `lector_git::f`, through `use .. as ..` and `type Alias = Repo;`) is reported unless the file is
     in `git-callers.allow`. `lector-app` command modules are the only entries: every function
     there is a registry command (ADR 0002), where sources, permission, journal and undo are
-    decided. A plain `pub fn` of `lector-app` outside `commands/` that runs a write (directly or
-    through a private helper of the same file) is a derived *wrapper* and counts as API
-    (`apply_hunk_action`, `undo`, `undo_last` today).
+    decided, plus the journal's undo engine, which is the implementation of the `journal.undo` /
+    `journal.undo_last` commands (ADR 0012). A plain `pub fn` of `lector-app` outside `commands/`
+    that runs a write (directly or through a private helper of the same file) is a derived
+    *wrapper* and counts as API (none today: the hunk apply is private to its commands and the
+    journal's `undo` is `pub(crate)`).
   - *Processes*: `ProcessCommand`, `Supervisor`, `std::process::Command` in the UI crates.
   - *Files*: `fs::write`/`rename`/`copy`/`remove_*`/`create_dir*`/..., `File::create*`,
     `OpenOptions`, `lector_fs::write_atomic` and the confined write of `lector_fs::confine`
     (named by its `CreateDirs` argument) in the UI crates, `lector-mcp`, `lector-cli` and
     `lector-agent`, unless the file is in `fs-writers.allow`. The agent's entries are counted and
     printed so they stay visible.
-  - *Report-only*: a plain `pub fn` outside `lector-git` returning `&Repo`, `Arc<Repo>`,
-    `Result<Repo, ..>` (or the `ShadowRepo` forms) hands every caller the whole write API. Each is
-    counted in the baseline with a `[report-only]` message; the fix is a read-only view type.
+  - *Handle accessors*: a plain `pub fn` outside `lector-git` returning `&Repo`, `Arc<Repo>`,
+    `Result<Repo, ..>` (or the `ShadowRepo` forms) hands every caller the whole write API. It is a
+    violation unless `git-handles.allow` lists it (`<file>::<fn>`, with a reason); a listed
+    accessor that is gone is a stale entry. Today three are listed (ADR 0012 item 5: a read-only
+    view type was rejected for now; every write call through them is still checked).
 - **`state`** (ADR 0004): a file or directory *created* under a path derived from `data_dir()`,
   `config_dir()`, `state_dir()` or any other `PathBuf`-returning `pub fn` of
   `lector-config/src/paths.rs`, whatever the extension; the path is followed through `let`
@@ -145,8 +150,12 @@ below), so renaming an import does not hide a call. Each rule's module doc in
 - **`dupes`** (ADR 0005, 0010): `one-impl.toml` declares concepts that have one implementation: a
   definition (`struct`/`enum`, `fn`, `mod`/file name) matching a name pattern outside the owner's
   files is reported. Concepts today: cancel token, fuzzy scorer, path confinement (`confine*`,
-  `resolve_in_root`, `*_in_root`), credential redaction, debounce. A thin wrapper of the owner is
-  listed as a `delegate` with a reason (the six wrappers around `lector_fs::Confinement` today).
+  `resolve_in_root`, `*_in_root`), credential redaction, debounce (`coalesce_*` included, so a
+  rename does not hide one). A thin wrapper of the owner is listed as a `delegate` with a reason
+  (the six wrappers around `lector_fs::Confinement` today); a function with a matching name that
+  is reviewed as not being the concept at all is an `exception` with a reason (the file watcher's
+  `coalesce_events`, which batches raw events in its owner thread below the scheduler, ADR 0012).
+  A delegate or exception whose function is gone fails as stale.
   The rule passes once `lector_fs::confine` is the only implementation and its wrappers are listed.
 - **`size`**, **`hygiene`**, **`graph`**: unchanged (1,500 lines; `forbid(unsafe_code)`, `// SAFETY:`;
   the committed crate graph).
@@ -158,7 +167,7 @@ below), so renaming an import does not hide a call. Each rule's module doc in
   name-and-argument-count matching as `writes`), any `lector-config` store handle or
   store-writing method, `std::process::Command`/`ProcessCommand`/`Supervisor`, and any file write
   or `OpenOptions`. Computing a patch is allowed; applying it is `lector-app`'s
-  (`review_service::apply`).
+  (`commands/git_write/hunk_apply.rs`, private to the hunk commands).
 
 ## Name resolution and its noise
 

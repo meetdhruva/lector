@@ -1,0 +1,13 @@
+# Accessors outside lector-git that hand out a repository handle (`&Repo`, `Arc<Repo>`,
+# `ShadowRepo`, ...) whose type also has the lector-git write methods (arch-check writes, ADR 0012
+# item 5). An accessor that is not listed here is a violation; an entry whose accessor is gone is
+# stale and fails. Entries are `<file>::<fn>`.
+#
+# ADR 0012, item 5: repository handles stay read-write, on the record. A read-only view type was
+# considered and rejected for now (about 60 call sites and every read signature in lector-git
+# would change, for a property the `writes` rule already enforces at each call site, fail-closed:
+# every call of a write method through these handles outside lector-app command modules is
+# reported). A fourth accessor is a violation.
+crates/lector-app/src/project.rs::repo
+crates/lector-app/src/git_service.rs::repo
+crates/lector-ui-git/src/store.rs::repo

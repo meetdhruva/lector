@@ -438,6 +438,7 @@ pub const ALLOW_FILES: &[&str] = &[
     "unsafe",
     "git-callers",
     "fs-writers",
+    "git-handles",
 ];
 
 /// A concept that may have one implementation only (`arch/one-impl.toml`).
@@ -458,9 +459,14 @@ pub struct Concept {
     /// Reviewed delegations: a function outside the owner that matches a name pattern but only
     /// calls the owner (a thin wrapper), each with the file, the function and the reason.
     pub delegates: Vec<Delegate>,
+    /// Reviewed exceptions (`exception = [{ file, fn, why }]`): a function outside the owner that
+    /// matches a name pattern and is not the concept at all (it neither implements nor wraps it),
+    /// each with the file, the function and the reason. Stale like a delegate.
+    pub exceptions: Vec<Delegate>,
 }
 
-/// One reviewed delegation of a [`Concept`] (`delegate = [{ file, fn, why }]`).
+/// One reviewed delegation or exception of a [`Concept`] (`delegate = [{ file, fn, why }]`,
+/// `exception = [{ file, fn, why }]`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Delegate {
     /// Path of the file.
@@ -487,24 +493,31 @@ impl Concept {
                 fns: strs_of(c, "fn"),
                 modules: strs_of(c, "module"),
                 delegates: Vec::new(),
+                exceptions: Vec::new(),
             };
-            for d in tables_of(c, "delegate") {
-                let field = |k: &str| d.get(k).and_then(|v| v.as_str()).map(str::to_string);
-                let (Some(file), Some(name), Some(why)) =
-                    (field("file"), field("fn"), field("why"))
-                else {
-                    return Err(ArchError::Config(format!(
-                        "arch/one-impl.toml: a `delegate` of `{}` needs `file`, `fn` and `why`",
-                        concept.name
-                    )));
-                };
-                if why.trim().is_empty() {
-                    return Err(ArchError::Config(format!(
-                        "arch/one-impl.toml: the delegate `{name}` of `{}` needs a reason",
-                        concept.name
-                    )));
+            for kind in ["delegate", "exception"] {
+                for d in tables_of(c, kind) {
+                    let field = |k: &str| d.get(k).and_then(|v| v.as_str()).map(str::to_string);
+                    let (Some(file), Some(name), Some(why)) =
+                        (field("file"), field("fn"), field("why"))
+                    else {
+                        return Err(ArchError::Config(format!(
+                            "arch/one-impl.toml: a `{kind}` of `{}` needs `file`, `fn` and `why`",
+                            concept.name
+                        )));
+                    };
+                    if why.trim().is_empty() {
+                        return Err(ArchError::Config(format!(
+                            "arch/one-impl.toml: the {kind} `{name}` of `{}` needs a reason",
+                            concept.name
+                        )));
+                    }
+                    let entry = Delegate { file, name, why };
+                    match kind {
+                        "delegate" => concept.delegates.push(entry),
+                        _ => concept.exceptions.push(entry),
+                    }
                 }
-                concept.delegates.push(Delegate { file, name, why });
             }
             if concept.owner.is_empty() {
                 return Err(ArchError::Config(format!(

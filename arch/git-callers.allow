@@ -10,3 +10,8 @@
 # any other lector-app file, from lector-agent, lector-mcp, lector-cli, lector-review or a UI
 # crate is reported.
 crates/lector-app/src/commands/**
+
+# ADR 0012, item 1: the journal's undo engine is the implementation of the registry commands
+# `journal.undo` / `journal.undo_last` (commands/journal_undo.rs), its only callers (`Journal::undo`
+# is pub(crate)). It restores from and snapshots into Lector's shadow repository.
+crates/lector-app/src/journal/undo.rs

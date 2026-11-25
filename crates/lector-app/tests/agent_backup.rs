@@ -10,6 +10,7 @@ use std::sync::{Arc, Once};
 use std::time::SystemTime;
 
 use lector_app::commands::agent_backup::{AgentBackups, MAX_FOLDER_BACKUP, TURN_BACKUP_BUDGET};
+use lector_app::commands::journal_undo::{invoke_undo, invoke_undo_last};
 use lector_app::commands::{CommandContext, Source};
 use lector_app::journal::{
     ActivityEntry, Journal, MemoryStore, UndoError, UndoMode, UndoRecord, UndoStatus,
@@ -177,10 +178,10 @@ fn folder_backups_are_lazy_path_scoped_and_undone_through_the_journal() {
         other => panic!("{other:?}"),
     }
     assert_eq!(journal.undo_status(&e), UndoStatus::Available);
-    let undo = journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+    let undo = invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
     assert!(!fx.root.join("new").exists());
-    journal.undo(undo.id, &fx.cx(), UndoMode::Check).unwrap();
+    invoke_undo(&fx.cx(), undo.id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "three\n");
     assert_eq!(fx.read("new/x.txt").unwrap(), "x\n");
     assert!(!fx.root.join(".git").exists());
@@ -194,17 +195,22 @@ fn a_fresh_journal_finds_a_folders_backups_and_reports_them_gone() {
     fx.turn(&backups, &journal, &[("a.txt", "agent\n")]);
     let record = journal.list(1)[0].undo.clone();
 
-    // Another process (the CLI after a restart): a new journal over the same data directory.
+    // Another process (the CLI after a restart): a new core with a new journal over the same
+    // data directory.
+    let core = AppCore::open(CoreOptions::for_tests());
     let other = Journal::new(Arc::new(MemoryStore::default()), fx.data.clone());
+    core.set_extension(Arc::new(other.clone()));
+    core.set_activity_sink(Arc::new(other.clone()));
+    let cx = CommandContext::new(core, Some(fx.project.clone()), Source::Ui);
     let id = other
         .append(entry(&fx.root, vec![fx.root.join("a.txt")], record.clone()))
         .unwrap();
     fs::write(fx.root.join("a.txt"), "user\n").unwrap();
     assert!(matches!(
-        other.undo(id, &fx.cx(), UndoMode::Check),
+        invoke_undo(&cx, id, UndoMode::Check),
         Err(UndoError::Changed { .. })
     ));
-    other.undo(id, &fx.cx(), UndoMode::Force).unwrap();
+    invoke_undo(&cx, id, UndoMode::Force).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
 
     // The shadow was removed (pruned as an orphan): the entry says the backup is gone.
@@ -215,7 +221,7 @@ fn a_fresh_journal_finds_a_folders_backups_and_reports_them_gone() {
     let e = other.get(id).unwrap();
     assert!(matches!(other.undo_status(&e), UndoStatus::Unavailable(_)));
     assert!(matches!(
-        other.undo(id, &fx.cx(), UndoMode::Force),
+        invoke_undo(&cx, id, UndoMode::Force),
         Err(UndoError::BackupGone(_))
     ));
     assert!(
@@ -241,7 +247,7 @@ fn undo_last_in_a_folder_stays_in_that_folder() {
             }),
         ))
         .unwrap();
-    journal.undo_last(&fx.cx(), UndoMode::Check).unwrap();
+    invoke_undo_last(&fx.cx(), UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
 }
 
@@ -290,7 +296,7 @@ fn in_a_repository_ignored_files_join_the_turn_and_tracked_ones_need_no_backup()
     let id = journal
         .append(entry(backups.workdir(), Vec::new(), backup.undo))
         .unwrap();
-    journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+    invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
     assert_eq!(fx.read(".env").unwrap(), "SECRET=keep\n");
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
 }
@@ -387,9 +393,9 @@ fn a_file_grown_past_the_limit_during_the_turn_is_not_stored() {
     let id = journal
         .append(entry(backups.workdir(), Vec::new(), backup.undo))
         .unwrap();
-    let undo = journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+    let undo = invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
     assert_eq!(fx.read("a.txt").unwrap(), "one\n");
-    match journal.undo(undo.id, &fx.cx(), UndoMode::Force) {
+    match invoke_undo(&fx.cx(), undo.id, UndoMode::Force) {
         Err(UndoError::Failed(why)) => assert!(why.contains("not backed up"), "{why}"),
         other => panic!("redo of a file too large to store: {other:?}"),
     }
@@ -468,7 +474,7 @@ fn a_created_file_grown_past_the_limit_is_undone_but_cannot_be_redone() {
     let id = journal
         .append(entry(backups.workdir(), Vec::new(), backup.undo))
         .unwrap();
-    let undo = journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+    let undo = invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
     assert!(
         !fx.root.join("big.log").exists(),
         "the before-state: absent"
@@ -479,7 +485,7 @@ fn a_created_file_grown_past_the_limit_is_undone_but_cannot_be_redone() {
         undo.summary
     );
     assert_eq!(undo.args["not_redoable"], json!(["big.log"]));
-    match journal.undo(undo.id, &fx.cx(), UndoMode::Check) {
+    match invoke_undo(&fx.cx(), undo.id, UndoMode::Check) {
         Err(UndoError::Failed(why)) => assert!(why.contains("not backed up"), "{why}"),
         other => panic!("{other:?}"),
     }
@@ -507,10 +513,10 @@ fn force_refuses_to_remove_a_large_file_changed_since_the_turn() {
     // The other program keeps writing after the turn ended.
     sparse(&fx.root.join("big.log"), MAX_FOLDER_BACKUP + 2);
     assert!(matches!(
-        journal.undo(id, &fx.cx(), UndoMode::Check),
+        invoke_undo(&fx.cx(), id, UndoMode::Check),
         Err(UndoError::Changed { .. })
     ));
-    match journal.undo(id, &fx.cx(), UndoMode::Force) {
+    match invoke_undo(&fx.cx(), id, UndoMode::Force) {
         Err(UndoError::Failed(why)) => {
             assert!(why.contains("big.log") && why.contains("back"), "{why}")
         }
@@ -551,7 +557,7 @@ fn undoing_a_repository_turn_that_deleted_an_unstored_file_fails_naming_it() {
     let id = journal
         .append(entry(backups.workdir(), Vec::new(), backup.undo))
         .unwrap();
-    match journal.undo(id, &fx.cx(), UndoMode::Check) {
+    match invoke_undo(&fx.cx(), id, UndoMode::Check) {
         Err(UndoError::Failed(why)) => assert!(why.contains("huge.bin"), "{why}"),
         other => panic!("a no-op undo: {other:?}"),
     }
@@ -580,7 +586,7 @@ fn an_undo_record_without_paths_is_refused() {
             }),
         ))
         .unwrap();
-    assert!(journal.undo(empty, &fx.cx(), UndoMode::Force).is_err());
+    assert!(invoke_undo(&fx.cx(), empty, UndoMode::Force).is_err());
     assert!(!journal.get(empty).unwrap().undone);
 }
 
@@ -618,7 +624,7 @@ fn a_parent_replaced_by_a_link_keeps_the_turn_on_record_and_the_undo_refuses() {
     let id = journal
         .append(entry(backups.workdir(), Vec::new(), backup.undo))
         .unwrap();
-    assert!(journal.undo(id, &fx.cx(), UndoMode::Force).is_err());
+    assert!(invoke_undo(&fx.cx(), id, UndoMode::Force).is_err());
     assert_eq!(fx.read("a.txt").unwrap(), "agent\n", "nothing restored");
     assert!(!journal.get(id).unwrap().undone);
 }
@@ -642,7 +648,7 @@ fn an_index_undo_record_without_paths_is_refused() {
             }),
         ))
         .unwrap();
-    assert!(journal.undo(id, &fx.cx(), UndoMode::Force).is_err());
+    assert!(invoke_undo(&fx.cx(), id, UndoMode::Force).is_err());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -731,7 +737,7 @@ fn spellings_of_one_file_share_one_ledger_entry_with_a_folding_resolver() {
         let id = journal
             .append(entry(backups.workdir(), Vec::new(), backup.undo))
             .unwrap();
-        journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+        invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
         assert_eq!(fx.read(&format!("Readme.{ext}")).unwrap(), "original\n");
         assert_eq!(fx.read(&format!("caf\u{e9}.{ext}")).unwrap(), "nfc\n");
         assert!(fx.read(&format!("new.{ext}")).is_none(), "git={git}");
@@ -803,7 +809,7 @@ fn spellings_of_one_file_on_the_real_file_system() {
         let id = journal
             .append(entry(backups.workdir(), Vec::new(), backup.undo))
             .unwrap();
-        journal.undo(id, &fx.cx(), UndoMode::Check).unwrap();
+        invoke_undo(&fx.cx(), id, UndoMode::Check).unwrap();
         assert_eq!(fx.read(&a).unwrap(), "original\n", "git={git}");
         assert_eq!(fx.read(&nfc).unwrap(), "nfc\n", "git={git}");
         let names = names_in(&fx.root);

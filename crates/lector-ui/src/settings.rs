@@ -1,7 +1,6 @@
 //! Settings and key bindings from `lector-config`, applied to the UI:
 //! editor fonts/sizes, theme selection, UI font and the keymap.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{px, App, Global, SharedString};
@@ -180,56 +179,10 @@ pub fn bind_effective_keymap(cx: &mut App) -> Vec<String> {
     warnings
 }
 
-/// Lector's own settings file, created with the commented defaults when
-/// missing (this is Lector's state, never the user's project).
-pub fn ensure_settings_file() -> PathBuf {
-    let path = lector_config::paths::settings_file();
-    ensure_file(&path, lector_config::default_settings_toml());
-    path
-}
-
-/// Lector's own keymap file, created with a commented template when missing.
-pub fn ensure_keymap_file() -> PathBuf {
-    let path = lector_config::paths::keymap_file();
-    let mut text = String::from(
-        "# Lector key bindings. Entries here override the defaults listed below.\n\
-         # Each binding: keys (GPUI syntax, e.g. \"ctrl-shift-p\", chords separated by a space),\n\
-         # action (\"namespace::Name\"; \"none\" unbinds) and an optional context\n\
-         # (Workspace, CodeView, DiffView, Picker, TextInput, TreeView).\n\
-         #\n\
-         # [[bindings]]\n\
-         # keys = \"ctrl-alt-p\"\n\
-         # action = \"workspace::ToggleFileFinder\"\n\
-         # context = \"Workspace\"\n\
-         #\n# Defaults:\n",
-    );
-    let defaults = lector_config::default_keymap(lector_config::Platform::current());
-    for b in defaults {
-        text.push_str(&format!(
-            "#   {:<22} {:<40} {}\n",
-            b.keys,
-            b.action,
-            b.context.unwrap_or_default()
-        ));
-    }
-    ensure_file(&path, &text);
-    path
-}
-
-fn ensure_file(path: &std::path::Path, contents: &str) {
-    if path.exists() {
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            tracing::warn!("cannot create {}: {err}", parent.display());
-            return;
-        }
-    }
-    if let Err(err) = std::fs::write(path, contents) {
-        tracing::warn!("cannot write {}: {err}", path.display());
-    }
-}
+/// Lector's own settings and keymap files, created (with the commented defaults, owner-only) when
+/// missing by `lector-app` on Open Settings / Open Keymap: UI code creates no files (ADR 0012).
+/// This is Lector's state, never the user's project.
+pub use lector_app::user_files::{ensure_keymap_file, ensure_settings_file};
 
 #[cfg(test)]
 mod tests {

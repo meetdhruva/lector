@@ -8,6 +8,7 @@ use std::process::Command;
 use std::sync::Once;
 
 use lector_app::commands::git_write::BackupUnavailable;
+use lector_app::commands::journal_undo::{invoke_undo, invoke_undo_last};
 use lector_app::commands::{CommandContext, CommandError, Source};
 use lector_app::journal::{Journal, UndoError, UndoMode, UndoRecord, UndoStatus};
 use lector_app::Project;
@@ -97,9 +98,9 @@ impl Fx {
     }
 
     fn undo(&self, outcome: &Outcome) -> Result<lector_app::journal::ActivityEntry, UndoError> {
-        self.journal.undo(
-            outcome.journal_id.expect("journaled"),
+        invoke_undo(
             &self.cx,
+            outcome.journal_id.expect("journaled"),
             UndoMode::Check,
         )
     }
@@ -154,9 +155,7 @@ fn stage_and_unstage_undo_by_inverse_command() {
     // Already undone: refused with a clear error.
     assert!(matches!(fx.undo(&staged), Err(UndoError::AlreadyUndone(_))));
     // The undo is itself undoable (redo) and re-activates the original.
-    fx.journal
-        .undo(undo_entry.id, &fx.cx, UndoMode::Check)
-        .unwrap();
+    invoke_undo(&fx.cx, undo_entry.id, UndoMode::Check).unwrap();
     assert_eq!(fx.git(&["diff", "--cached", "--name-only"]), "parser.rs\n");
     assert!(!fx.journal.get(staged.journal_id.unwrap()).unwrap().undone);
 }
@@ -266,9 +265,7 @@ fn discard_backs_up_first_and_undo_restores_exact_bytes() {
     );
 
     // Redo: the undo's own record discards again.
-    fx.journal
-        .undo(undo_entry.id, &fx.cx, UndoMode::Check)
-        .unwrap();
+    invoke_undo(&fx.cx, undo_entry.id, UndoMode::Check).unwrap();
     assert_eq!(
         fx.read("parser.rs"),
         b"fn one() {}\n\nfn two() {}\n\nfn three() {}\n"
@@ -297,13 +294,10 @@ fn undo_refuses_when_files_changed_since_and_force_backs_up_first() {
     assert!(!fx.journal.get(out.journal_id.unwrap()).unwrap().undone);
 
     // "Restore anyway".
-    let forced = fx
-        .journal
-        .undo(out.journal_id.unwrap(), &fx.cx, UndoMode::Force)
-        .unwrap();
+    let forced = invoke_undo(&fx.cx, out.journal_id.unwrap(), UndoMode::Force).unwrap();
     assert_eq!(fx.read("parser.rs"), b"lost edits\n");
     // ... and the work it overwrote is recoverable (redo = restore the backup).
-    fx.journal.undo(forced.id, &fx.cx, UndoMode::Force).unwrap();
+    invoke_undo(&fx.cx, forced.id, UndoMode::Force).unwrap();
     assert_eq!(fx.read("parser.rs"), b"new work after the discard\n");
 }
 
@@ -549,7 +543,7 @@ fn undo_last_skips_undos_and_non_undoable_entries() {
     // The commit is not undoable; the newest undoable one is the stage before it.
     let last = fx.journal.last_undoable(None).unwrap();
     assert_eq!(last.command, "git.stage");
-    let u1 = fx.journal.undo_last(&fx.cx, UndoMode::Check).unwrap();
+    let u1 = invoke_undo_last(&fx.cx, UndoMode::Check).unwrap();
     assert!(u1.undo_of.is_some());
     assert_eq!(
         fx.git(&["diff", "--cached", "--name-only"]),
@@ -561,16 +555,16 @@ fn undo_last_skips_undos_and_non_undoable_entries() {
         fx.journal.last_undoable(None).unwrap().id,
         second.journal_id.unwrap()
     );
-    fx.journal.undo_last(&fx.cx, UndoMode::Check).unwrap();
+    invoke_undo_last(&fx.cx, UndoMode::Check).unwrap();
     assert_eq!(fx.read("keep.txt"), b"b\n");
     assert_eq!(
         fx.journal.last_undoable(None).unwrap().id,
         first.journal_id.unwrap()
     );
-    fx.journal.undo_last(&fx.cx, UndoMode::Check).unwrap();
+    invoke_undo_last(&fx.cx, UndoMode::Check).unwrap();
     assert_eq!(fx.read("parser.rs"), b"a\n");
     assert!(matches!(
-        fx.journal.undo_last(&fx.cx, UndoMode::Check),
+        invoke_undo_last(&fx.cx, UndoMode::Check),
         Err(UndoError::NotUndoable(_))
     ));
 }
