@@ -21,8 +21,8 @@ terminal access).
    (language servers, agents, shell, forge). Reason: opening a repository must not run or send
    anything. As built, a project's settings *can* turn on auto-save and format on save; they
    act only on buffers the user edits, through the user's own formatter. Whether these two
-   should become user-level as well is open (see the 0.8 plan); until a record says so, this is
-   the boundary.
+   should become user-level as well was put to the owner on 2026-11-25, who decided to leave
+   both project-settable; this is the boundary.
 4. **Language servers may not write into the project.** They start with options that prevent
    it; their edits reach buffers, never files.
 5. **Agents get file reads and writes inside the project and nothing else**: no terminal, no
